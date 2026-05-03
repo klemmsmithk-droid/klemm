@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { dirname } from "node:path";
 import { readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 import {
   buildCodexContext,
+  addStructuredPolicy,
   distillMemory,
   evaluateAgentAlignment,
   getKlemmStatus,
+  importMemorySource,
   ingestMemoryExport,
+  renderLaunchAgentPlist,
+  searchMemories,
   recordAgentActivity,
   proposeAction,
   recordAgentEvent,
@@ -76,6 +81,8 @@ async function main() {
     if (command === "rewrite") return recordQueueOutcome(args.slice(1), "rewritten");
     if (command === "memory" && args[1] === "ingest") return await ingestMemoryFromCli(args.slice(2));
     if (command === "memory" && args[1] === "ingest-export") return await ingestMemoryExportFromCli(args.slice(2));
+    if (command === "memory" && args[1] === "import-source") return await importMemorySourceFromCli(args.slice(2));
+    if (command === "memory" && args[1] === "search") return searchMemoryFromCli(args.slice(2));
     if (command === "memory" && args[1] === "review") return printMemoryReview();
     if (command === "memory" && ["approve", "reject", "pin"].includes(args[1])) {
       return reviewMemoryFromCli(args.slice(2), memoryCommandToStatus(args[1]));
@@ -87,6 +94,9 @@ async function main() {
     if (command === "supervised-runs") return printSupervisedRuns();
     if (command === "monitor" && args[1] === "status") return printMonitorStatus(args.slice(2));
     if (command === "monitor" && args[1] === "evaluate") return evaluateMonitorFromCli(args.slice(2));
+    if (command === "policy" && args[1] === "add") return addPolicyFromCli(args.slice(2));
+    if (command === "helper" && args[1] === "launch-agent") return renderLaunchAgentFromCli(args.slice(2));
+    if (command === "mcp" && args[1] === "stdio") return printMcpCommand();
     if (command === "os" && args[1] === "snapshot") return await recordOsSnapshotFromCli(args.slice(2));
     if (command === "os" && args[1] === "status") return printOsStatus(args.slice(2));
     if (command === "os" && args[1] === "permissions") return printOsPermissions();
@@ -417,6 +427,36 @@ async function ingestMemoryExportFromCli(args) {
   console.log(`Rejected: ${next.rejectedMemoryInputs.length - before.rejectedMemoryInputs.length}`);
 }
 
+async function importMemorySourceFromCli(args) {
+  const flags = parseFlags(args);
+  const source = flags.source ?? flags.provider ?? "unknown";
+  const payload = flags.text ?? (flags.file ? await readFile(flags.file, "utf8") : "");
+  if (!payload) throw new Error("Usage: klemm memory import-source --source <provider> (--text <json-or-text> | --file <path>)");
+  const next = store.update((state) =>
+    importMemorySource(state, {
+      source,
+      sourceRef: flags.ref ?? flags.file ?? source,
+      payload,
+    }),
+  );
+  const memorySource = next.memorySources[0];
+  console.log(`Memory source imported: ${memorySource.id}`);
+  console.log(`Provider: ${memorySource.provider}`);
+  console.log(`Messages: ${memorySource.messageCount}`);
+  console.log(`Distilled: ${memorySource.distilledCount}`);
+}
+
+function searchMemoryFromCli(args) {
+  const flags = parseFlags(args);
+  const query = flags.query ?? args.join(" ");
+  const results = searchMemories(store.getState(), { query });
+  console.log("Memory search");
+  console.log(`Results: ${results.length}`);
+  for (const memory of results.slice(0, 10)) {
+    console.log(`- ${memory.id} [${memory.memoryClass}] ${memory.text}`);
+  }
+}
+
 function printMemoryReview() {
   const state = store.getState();
   console.log("Klemm memory review");
@@ -496,7 +536,13 @@ async function superviseFromCli(args) {
   if (decision.decision === "rewrite") {
     console.log("Klemm rewrote command");
     console.log(`Rewrite: ${decision.rewrite}`);
-    const result = await runSupervisedProcess(splitShellLike(decision.rewrite), { cwd: commandCwd, capture: flags.capture, missionId: flags.mission });
+    const result = await runSupervisedProcess(splitShellLike(decision.rewrite), {
+      cwd: commandCwd,
+      capture: flags.capture,
+      missionId: flags.mission,
+      watchLoop: flags.watchLoop,
+      watchIntervalMs: flags.watchIntervalMs,
+    });
     if (flags.capture) persistCapturedRun(flags, decision.rewrite, result, commandCwd);
     if (flags.watch) recordAndPrintAlignment(flags, {
       actor: flags.actor ?? "supervised_process",
@@ -514,9 +560,15 @@ async function superviseFromCli(args) {
     return;
   }
 
-  const result = await runSupervisedProcess(command, { cwd: commandCwd, capture: flags.capture, missionId: flags.mission });
+  const result = await runSupervisedProcess(command, {
+    cwd: commandCwd,
+    capture: flags.capture,
+    missionId: flags.mission,
+    watchLoop: flags.watchLoop,
+    watchIntervalMs: flags.watchIntervalMs,
+  });
   if (flags.capture) persistCapturedRun(flags, target, result, commandCwd);
-  if (flags.watch) recordAndPrintAlignment(flags, {
+  if (flags.watch || flags.watchLoop) recordAndPrintAlignment(flags, {
     actor: flags.actor ?? "supervised_process",
     command: target,
     result,
@@ -589,7 +641,7 @@ async function runRuntimeFromCli(args) {
   process.exitCode = result.status;
 }
 
-async function runSupervisedProcess(command, { cwd = process.cwd(), capture = false } = {}) {
+async function runSupervisedProcess(command, { cwd = process.cwd(), capture = false, watchLoop = false, watchIntervalMs = 1000 } = {}) {
   const startedAt = new Date().toISOString();
   const beforeSnapshot = capture ? await snapshotFiles(cwd) : new Map();
   const started = Date.now();
@@ -599,6 +651,14 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let heartbeat;
+    if (watchLoop) {
+      const interval = Math.max(25, Number(watchIntervalMs ?? 1000));
+      heartbeat = setInterval(() => {
+        const elapsedMs = Date.now() - started;
+        process.stdout.write(`Klemm heartbeat: ${elapsedMs}ms elapsed for ${command.join(" ")}\n`);
+      }, interval);
+    }
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
@@ -609,8 +669,14 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
       stderr += chunk;
       process.stderr.write(chunk);
     });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ status: status ?? 1, stdout, stderr }));
+    child.on("error", (error) => {
+      if (heartbeat) clearInterval(heartbeat);
+      reject(error);
+    });
+    child.on("close", (status) => {
+      if (heartbeat) clearInterval(heartbeat);
+      resolve({ status: status ?? 1, stdout, stderr });
+    });
   });
   const afterSnapshot = capture ? await snapshotFiles(cwd) : new Map();
   return {
@@ -784,6 +850,41 @@ function printOsPermissions() {
   console.log(`File events: ${permissions.fileEvents}`);
 }
 
+function addPolicyFromCli(args) {
+  const flags = parseFlags(args);
+  const next = store.update((state) =>
+    addStructuredPolicy(state, {
+      id: flags.id,
+      name: flags.name,
+      effect: flags.effect ?? "queue",
+      severity: flags.severity ?? "medium",
+      source: flags.source ?? "manual",
+      condition: {
+        actionTypes: flags.actionTypes,
+        targetIncludes: flags.targetIncludes,
+        externalities: flags.externalities,
+      },
+    }),
+  );
+  const policy = next.policies[0];
+  console.log(`Policy added: ${policy.id}`);
+  console.log(`Effect: ${policy.effect}`);
+  console.log(`Severity: ${policy.severity}`);
+}
+
+function renderLaunchAgentFromCli(args) {
+  const flags = parseFlags(args);
+  console.log(renderLaunchAgentPlist({
+    label: flags.label,
+    program: flags.program,
+    dataDir: flags.dataDir,
+  }));
+}
+
+function printMcpCommand() {
+  console.log(`node --no-warnings ${join(dirname(new URL(import.meta.url).pathname), "klemm-mcp-server.js")}`);
+}
+
 function printDecision(decision) {
   console.log(`Decision: ${decision.decision}`);
   console.log(`Risk: ${decision.riskLevel}`);
@@ -943,15 +1044,20 @@ Commands:
   klemm approve|deny|rewrite <decision-id> [note]
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json
+  klemm memory import-source --source chatgpt --file export.json
+  klemm memory search --query "deploy review"
   klemm memory approve|reject|pin <memory-id> [note]
   klemm memory review
   klemm debrief [--mission mission-id]
   klemm tui [--mission mission-id] [--interactive]
   klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] -- [args...]
-  klemm supervise [--mission mission-id] [--capture] [--watch] [--cwd path] -- <command> [args...]
+  klemm supervise [--mission mission-id] [--capture] [--watch] [--watch-loop] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs
   klemm monitor status [--mission mission-id]
   klemm monitor evaluate [--mission mission-id] [--agent agent-id]
+  klemm policy add --id policy-id --name "..." --action-types deployment --target-includes prod
+  klemm helper launch-agent [--program /usr/local/bin/klemm] [--data-dir path]
+  klemm mcp stdio
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions

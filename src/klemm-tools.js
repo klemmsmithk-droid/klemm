@@ -1,9 +1,12 @@
 import {
   distillMemory,
   buildCodexContext,
+  addStructuredPolicy,
   evaluateAgentAlignment,
   getKlemmStatus,
+  importMemorySource,
   ingestMemoryExport,
+  normalizeAgentAdapterEnvelope,
   proposeAction,
   recordAgentActivity,
   recordAgentEvent,
@@ -12,6 +15,7 @@ import {
   recordSupervisedRun,
   renderKlemmDashboard,
   reviewMemory,
+  searchMemories,
   registerAgent,
   startCodexHub,
   startMission,
@@ -96,6 +100,22 @@ export const KLEMM_MCP_TOOLS = [
     name: "get_agent_monitor",
     description: "Return recent agent activities, alignment reports, and active interventions for a mission.",
   },
+  {
+    name: "record_adapter_envelope",
+    description: "Normalize an agent adapter protocol envelope and record its activity/action with Klemm.",
+  },
+  {
+    name: "add_structured_policy",
+    description: "Add a structured, auditable policy rule to Klemm's authority engine.",
+  },
+  {
+    name: "import_memory_source",
+    description: "Import a provider-specific memory source and distill local memory candidates.",
+  },
+  {
+    name: "search_memories",
+    description: "Search distilled Klemm memories by query terms.",
+  },
 ];
 
 export function executeKlemmTool(name, args = {}, { state } = {}) {
@@ -151,6 +171,17 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
   if (name === "record_agent_activity") {
     const nextState = recordAgentActivity(state, args);
     return { state: nextState, result: { activity: nextState.agentActivities[0] } };
+  }
+
+  if (name === "record_adapter_envelope") {
+    const envelope = normalizeAgentAdapterEnvelope(args);
+    let nextState = recordAgentActivity(state, envelope.activity);
+    let decision = null;
+    if (envelope.action) {
+      nextState = proposeAction(nextState, envelope.action);
+      decision = nextState.decisions[0];
+    }
+    return { state: nextState, result: { envelope, activity: nextState.agentActivities[0], decision } };
   }
 
   if (name === "evaluate_agent_alignment") {
@@ -219,6 +250,20 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
   if (name === "distill_memory") {
     const nextState = distillMemory(state, args);
     return { state: nextState, result: { memories: nextState.memories, rejected: nextState.rejectedMemoryInputs } };
+  }
+
+  if (name === "add_structured_policy") {
+    const nextState = addStructuredPolicy(state, args);
+    return { state: nextState, result: { policy: nextState.policies[0] } };
+  }
+
+  if (name === "import_memory_source") {
+    const nextState = importMemorySource(state, args);
+    return { state: nextState, result: { memorySource: nextState.memorySources[0], memories: nextState.memories } };
+  }
+
+  if (name === "search_memories") {
+    return { state, result: { memories: searchMemories(state, args) } };
   }
 
   if (name === "ingest_memory_export") {

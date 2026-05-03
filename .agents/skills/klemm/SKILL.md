@@ -111,15 +111,31 @@ Record live agent work into the continuous monitor whenever possible:
 record_agent_activity
 evaluate_agent_alignment
 get_agent_monitor
+record_adapter_envelope
 ```
 
 Klemm is not only an approval checkpoint. It should continuously evaluate whether agents remain aligned with the mission. Watch for scope drift, repeated failures, unsafe patterns, and work that no longer serves the user's current intent.
+
+For long-running commands, prefer live watch loops:
+
+```text
+klemm supervise --watch-loop --watch-interval-ms 1000 --mission <mission-id> -- npm test
+```
+
+Structured policies and memory-source imports are available through:
+
+```text
+add_structured_policy
+import_memory_source
+search_memories
+```
 
 Use daemon lifecycle checks when relying on the local API:
 
 ```text
 klemm daemon health --url http://127.0.0.1:8765
 klemm daemon status --pid-file ./data/klemm.pid
+node --no-warnings src/klemm-mcp-server.js
 ```
 
 Use OS observation when the user asks Klemm to watch the local machine:

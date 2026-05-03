@@ -91,6 +91,10 @@ export function createKlemmHttpServer({ getState, saveState }) {
         return runTool(response, "record_agent_activity", await readJson(request), { getState, saveState });
       }
 
+      if (request.method === "POST" && url.pathname === "/api/adapter/envelope") {
+        return runTool(response, "record_adapter_envelope", await readJson(request), { getState, saveState });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/monitor/evaluate") {
         return runTool(response, "evaluate_agent_alignment", await readJson(request), { getState, saveState });
       }
@@ -100,6 +104,18 @@ export function createKlemmHttpServer({ getState, saveState }) {
           missionId: url.searchParams.get("mission"),
           agentId: url.searchParams.get("agent"),
         }, { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/policies") {
+        return runTool(response, "add_structured_policy", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/memory/sources") {
+        return runTool(response, "import_memory_source", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/memory/search") {
+        return runTool(response, "search_memories", { query: url.searchParams.get("query") ?? "" }, { getState, saveState });
       }
 
       sendJson(response, 404, { error: "not_found" });

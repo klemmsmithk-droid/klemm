@@ -8,7 +8,8 @@
   },
   "scripts": {
     "test": "node --no-warnings --test",
-    "klemm": "node --no-warnings src/klemm-cli.js"
+    "klemm": "node --no-warnings src/klemm-cli.js",
+    "mcp": "node --no-warnings src/klemm-mcp-server.js"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +17,7 @@
   "type": "module",
   "private": true,
   "bin": {
-    "klemm": "./src/klemm-cli.js"
+    "klemm": "./src/klemm-cli.js",
+    "klemm-mcp": "./src/klemm-mcp-server.js"
   }
 }

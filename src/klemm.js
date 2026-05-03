@@ -29,6 +29,8 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     decisions: [],
     queue: [],
     memories: [],
+    memorySources: [],
+    policies: [],
     imports: [],
     supervisedRuns: [],
     osObservations: [],
@@ -211,6 +213,41 @@ export function proposeAction(state, proposal = {}) {
   );
 }
 
+export function addStructuredPolicy(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const id = options.id ?? `policy-${compactTimestamp(now)}-${(state.policies?.length ?? 0) + 1}`;
+  const policy = {
+    id,
+    name: options.name ?? id,
+    condition: {
+      actionTypes: normalizeList(options.condition?.actionTypes, []),
+      targetIncludes: normalizeList(options.condition?.targetIncludes, []),
+      externalities: normalizeList(options.condition?.externalities, []),
+    },
+    effect: normalizePolicyEffect(options.effect ?? "queue"),
+    severity: options.severity ?? "medium",
+    source: options.source ?? "manual",
+    sourceRef: options.sourceRef ?? options.source ?? "manual",
+    status: options.status ?? "active",
+    confidence: options.confidence ?? 1,
+    createdAt: now,
+  };
+
+  return updateState(
+    {
+      ...state,
+      policies: [policy, ...withoutId(state.policies ?? [], id)],
+    },
+    now,
+    {
+      type: "policy_added",
+      at: now,
+      policyId: id,
+      summary: `${policy.name} policy added with ${policy.effect} effect.`,
+    },
+  );
+}
+
 export function recordQueuedDecision(state, options = {}) {
   const now = options.now ?? new Date().toISOString();
   const decisionId = options.decisionId;
@@ -361,6 +398,129 @@ export function ingestMemoryExport(state, options = {}) {
       summary: `${importRecord.messageCount} message(s) imported from ${source}.`,
     },
   );
+}
+
+export function importMemorySource(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const provider = options.source ?? options.provider ?? "unknown";
+  const sourceRef = options.sourceRef ?? provider;
+  const payload = options.payload ?? options.text ?? "";
+  const next = ingestMemoryExport(state, {
+    source: provider,
+    sourceRef,
+    text: payload,
+    now,
+  });
+  const sourceRecord = {
+    id: options.id ?? `memory-source-${compactTimestamp(now)}-${(state.memorySources?.length ?? 0) + 1}`,
+    provider,
+    sourceRef,
+    importedAt: now,
+    messageCount: next.imports[0]?.messageCount ?? 0,
+    distilledCount: next.imports[0]?.distilledCount ?? 0,
+    rejectedCount: next.imports[0]?.rejectedCount ?? 0,
+  };
+
+  return updateState(
+    {
+      ...next,
+      memorySources: [sourceRecord, ...(next.memorySources ?? [])],
+    },
+    now,
+    {
+      type: "memory_source_imported",
+      at: now,
+      memorySourceId: sourceRecord.id,
+      summary: `${provider} memory source imported from ${sourceRef}.`,
+    },
+  );
+}
+
+export function searchMemories(state, options = {}) {
+  const terms = String(options.query ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter(Boolean);
+  if (terms.length === 0) return [];
+  return (state.memories ?? []).filter((memory) => {
+    const text = `${memory.text} ${memory.memoryClass} ${memory.source}`.toLowerCase();
+    return terms.every((term) => text.includes(term) || stemmedContains(text, term));
+  });
+}
+
+export function normalizeAgentAdapterEnvelope(input = {}) {
+  const type = normalizeAdapterEventType(input.event ?? input.type);
+  const missionId = input.missionId;
+  const agentId = input.agentId ?? input.actor ?? "unknown_agent";
+  const toolName = input.toolCall?.name ?? input.tool ?? "";
+  const command = input.toolCall?.arguments?.command ?? input.command ?? "";
+  const target = type === "tool_call" ? toolName : input.target ?? command;
+
+  return {
+    protocolVersion: Number(input.protocolVersion ?? 1),
+    type,
+    missionId,
+    agentId,
+    summary: input.summary ?? `${type} reported by ${agentId}`,
+    activity: {
+      missionId,
+      agentId,
+      type: type === "diff" ? "file_change" : type,
+      summary: input.summary ?? `${type} reported by ${agentId}`,
+      target,
+      command,
+      fileChanges: input.diff?.files ?? input.fileChanges ?? [],
+      evidence: {
+        plan: input.plan,
+        toolCall: input.toolCall,
+        uncertainty: input.uncertainty,
+      },
+    },
+    action: command
+      ? {
+          missionId,
+          actor: agentId,
+          actionType: "command",
+          target: command,
+          missionRelevance: "related",
+        }
+      : null,
+  };
+}
+
+export function renderLaunchAgentPlist(options = {}) {
+  const label = options.label ?? "com.klemm.daemon";
+  const program = options.program ?? "klemm";
+  const dataDir = options.dataDir ?? "$HOME/Library/Application Support/Klemm";
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${escapeXml(label)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${escapeXml(program)}</string>
+    <string>daemon</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8765</string>
+    <string>--pid-file</string>
+    <string>${escapeXml(dataDir)}/klemm.pid</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KLEMM_DATA_DIR</key>
+    <string>${escapeXml(dataDir)}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+</dict>
+</plist>`;
 }
 
 export function reviewMemory(state, options = {}) {
@@ -616,6 +776,8 @@ export function getKlemmStatus(state, { now = new Date().toISOString() } = {}) {
     pendingMemoryReviewCount: state.memories.filter((memory) => memory.status === "pending_review").length,
     eventCount: (state.agentEvents ?? []).length,
     importCount: (state.imports ?? []).length,
+    memorySourceCount: (state.memorySources ?? []).length,
+    policyCount: (state.policies ?? []).length,
     supervisedRunCount: (state.supervisedRuns ?? []).length,
     osObservationCount: (state.osObservations ?? []).length,
     agentActivityCount: (state.agentActivities ?? []).length,
@@ -873,6 +1035,12 @@ function normalizeEventType(type) {
   return known.has(value) ? value : "agent_event";
 }
 
+function normalizeAdapterEventType(type) {
+  const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
+  const known = new Set(["plan", "tool_call", "diff", "uncertainty", "subagent", "activity"]);
+  return known.has(value) ? value : "activity";
+}
+
 function normalizeActivityType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
   const known = new Set(["command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "activity"]);
@@ -942,7 +1110,7 @@ function isHighRiskExternality(externality) {
 
 function findPolicyMatches(state, proposal) {
   const haystack = `${proposal.actionType} ${proposal.target} ${proposal.externality}`.toLowerCase();
-  return (state.memories ?? [])
+  const memoryPolicies = (state.memories ?? [])
     .filter((memory) => memory.memoryClass === "authority_boundary")
     .filter((memory) => memory.status === "approved" || memory.status === "pinned")
     .filter((memory) => memoryPolicyMatches(memory.text, haystack))
@@ -952,6 +1120,29 @@ function findPolicyMatches(state, proposal) {
       memoryClass: memory.memoryClass,
       text: memory.text,
     }));
+  const structuredPolicies = (state.policies ?? [])
+    .filter((policy) => policy.status === "active")
+    .filter((policy) => structuredPolicyMatches(policy, proposal))
+    .map((policy) => ({
+      id: policy.id,
+      source: policy.sourceRef ?? policy.source,
+      memoryClass: "structured_policy",
+      text: policy.name,
+      effect: policy.effect,
+      severity: policy.severity,
+    }));
+  return [...memoryPolicies, ...structuredPolicies];
+}
+
+function structuredPolicyMatches(policy, proposal) {
+  const actionTypes = policy.condition?.actionTypes ?? [];
+  const targetIncludes = policy.condition?.targetIncludes ?? [];
+  const externalities = policy.condition?.externalities ?? [];
+  const actionMatches = actionTypes.length === 0 || actionTypes.includes(proposal.actionType);
+  const target = String(proposal.target ?? "").toLowerCase();
+  const targetMatches = targetIncludes.length === 0 || targetIncludes.some((item) => target.includes(String(item).toLowerCase()));
+  const externalityMatches = externalities.length === 0 || externalities.includes(proposal.externality);
+  return actionMatches && targetMatches && externalityMatches;
 }
 
 function memoryPolicyMatches(text, haystack) {
@@ -1074,6 +1265,25 @@ function normalizeMemoryReviewStatus(status) {
   if (status === "rejected") return "rejected";
   if (status === "pinned") return "pinned";
   throw new Error("memory review status must be approved, rejected, or pinned");
+}
+
+function normalizePolicyEffect(effect) {
+  if (["allow", "queue", "pause", "deny", "rewrite"].includes(effect)) return effect;
+  throw new Error("policy effect must be allow, queue, pause, deny, or rewrite");
+}
+
+function stemmedContains(text, term) {
+  if (term.endsWith("s")) return text.includes(term.slice(0, -1));
+  return text.includes(`${term}s`);
+}
+
+function escapeXml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 }
 
 function normalizeMemoryText(text) {

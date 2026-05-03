@@ -35,7 +35,17 @@ npm run klemm -- os status --mission mission-codex
 npm run klemm -- os permissions
 npm run klemm -- daemon health --url http://127.0.0.1:8765
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
+npm run mcp
 ```
+
+## MCP Server
+
+```bash
+npm run mcp
+klemm mcp stdio
+```
+
+Klemm includes a real stdio MCP server. It speaks JSON-RPC 2.0, supports `initialize`, `tools/list`, and `tools/call`, and exposes the same authority, monitor, memory, policy, OS, and adapter tools used by the CLI/daemon.
 
 ## Agent Runtime Wrapper
 
@@ -56,6 +66,7 @@ npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe
 npm run klemm -- supervise --watch --mission mission-codex -- npm test
 npm run klemm -- monitor status --mission mission-codex
 npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
+npm run klemm -- supervise --watch-loop --watch-interval-ms 1000 --mission mission-codex -- npm test
 ```
 
 Klemm continuously observes supervised agent work as an activity stream. `supervise --watch` records the command, exit status, file changes when capture is enabled, transcript excerpts, and duration, then evaluates alignment against the active mission.
@@ -70,9 +81,29 @@ Alignment states:
 
 Interventions currently include `nudge`, `pause`, and `queue`. These are recorded into the audit trail and surfaced in debriefs and Codex context.
 
+`--watch-loop` emits heartbeat evaluations while a long-running process is still active, giving Klemm a live supervisory path instead of only post-run review.
+
+## Agent Adapter Protocol
+
+Compatible agents can report normalized envelopes through MCP or HTTP:
+
+- `plan`
+- `tool_call`
+- `diff`
+- `uncertainty`
+- `subagent`
+
+Use `record_adapter_envelope` over MCP or `POST /api/adapter/envelope` over HTTP. Klemm normalizes the envelope into an activity, and when possible, an authority action.
+
 ## Policy Engine
 
 Klemm applies deterministic mission rules first, then reviewed memory policies. Approved or pinned authority-boundary memories can require user review for matching future actions, and each decision records the matched memory policy IDs for auditability.
+
+Structured policies can be added with:
+
+```bash
+npm run klemm -- policy add --id policy-prod --name "Production deploy approval" --action-types deployment --target-includes prod
+```
 
 ## Daemon
 
@@ -103,6 +134,10 @@ Local endpoints:
 - `POST /api/monitor/activity`
 - `POST /api/monitor/evaluate`
 - `GET /api/monitor/status?mission=<id>&agent=<id>`
+- `POST /api/adapter/envelope`
+- `POST /api/policies`
+- `POST /api/memory/sources`
+- `GET /api/memory/search?query=<query>`
 - `GET /api/debrief?mission=<id>`
 
 ## OS Observation Layer
@@ -154,6 +189,23 @@ When an event includes an action, Klemm immediately creates an authority decisio
 `klemm memory ingest-export` accepts plain text or JSON-ish ChatGPT/Claude/Codex exports. Raw history stays local. Klemm extracts message text, distills memory candidates, and rejects prompt-injection-like lines instead of treating imported content as authority.
 
 Use `klemm memory approve`, `klemm memory reject`, or `klemm memory pin` to promote or reject candidates after review.
+
+Memory v2 source import/search:
+
+```bash
+npm run klemm -- memory import-source --source chatgpt --file export.json
+npm run klemm -- memory search --query "deploy review"
+```
+
+Imports now record provider-level source records in addition to distilled memory candidates.
+
+## macOS Helper Scaffold
+
+```bash
+npm run klemm -- helper launch-agent --program /usr/local/bin/klemm --data-dir "$HOME/Library/Application Support/Klemm"
+```
+
+This renders a LaunchAgent plist for a non-privileged Klemm daemon. Installing/loading the plist is still left to the user or a future installer command.
 
 ## Terminal Dashboard
 

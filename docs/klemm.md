@@ -35,7 +35,17 @@ npm run klemm -- os status --mission mission-codex
 npm run klemm -- os permissions
 npm run klemm -- daemon health --url http://127.0.0.1:8765
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
+npm run mcp
 ```
+
+## MCP Server
+
+```bash
+npm run mcp
+klemm mcp stdio
+```
+
+Klemm includes a real stdio MCP server. It speaks JSON-RPC 2.0, supports `initialize`, `tools/list`, and `tools/call`, and exposes the same authority, monitor, memory, policy, OS, and adapter tools used by the CLI/daemon.
 
 ## Agent Runtime Wrapper
 
@@ -56,6 +66,7 @@ npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe
 npm run klemm -- supervise --watch --mission mission-codex -- npm test
 npm run klemm -- monitor status --mission mission-codex
 npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
+npm run klemm -- supervise --watch-loop --watch-interval-ms 1000 --mission mission-codex -- npm test
 ```
 
 Klemm continuously observes supervised agent work as an activity stream. `supervise --watch` records the command, exit status, file changes when capture is enabled, transcript excerpts, and duration, then evaluates alignment against the active mission.
@@ -70,9 +81,29 @@ Alignment states:
 
 Interventions currently include `nudge`, `pause`, and `queue`. These are recorded into the audit trail and surfaced in debriefs and Codex context.
 
+`--watch-loop` emits heartbeat evaluations while a long-running process is still active, giving Klemm a live supervisory path instead of only post-run review.
+
+## Agent Adapter Protocol
+
+Compatible agents can report normalized envelopes through MCP or HTTP:
+
+- `plan`
+- `tool_call`
+- `diff`
+- `uncertainty`
+- `subagent`
+
+Use `record_adapter_envelope` over MCP or `POST /api/adapter/envelope` over HTTP. Klemm normalizes the envelope into an activity, and when possible, an authority action.
+
 ## Policy Engine
 
 Klemm applies deterministic mission rules first, then reviewed memory policies. Approved or pinned authority-boundary memories can require user review for matching future actions, and each decision records the matched memory policy IDs for auditability.
+
+Structured policies can be added with:
+
+```bash
+npm run klemm -- policy add --id policy-prod --name "Production deploy approval" --action-types deployment --target-includes prod
+```
 
 ## Daemon
 
@@ -103,6 +134,10 @@ Local endpoints:
 - `POST /api/monitor/activity`
 - `POST /api/monitor/evaluate`
 - `GET /api/monitor/status?mission=<id>&agent=<id>`
+- `POST /api/adapter/envelope`
+- `POST /api/policies`
+- `POST /api/memory/sources`
+- `GET /api/memory/search?query=<query>`
 - `GET /api/debrief?mission=<id>`
 
 ## OS Observation Layer
@@ -136,12 +171,17 @@ The repo includes `.agents/skills/klemm/SKILL.md`. When invoked as `/klemm`, Cod
 - `klemm run codex|claude|shell`: named runtime wrapper for supervised agent launches.
 - `klemm event record`: agent event protocol for planned tools, commands, files, external actions, and lifecycle events.
 - `klemm memory ingest-export`: first AI chat export importer, with dedupe and review promotion.
+- `klemm memory import-source/search`: memory source records and search.
 - `klemm debrief`: inspection-first summary of events, rewrites, queue, and memory candidates.
 - `klemm tui --interactive`: lightweight terminal dashboard with approve/deny and memory-review commands.
 - `klemm supervise --capture`: transcript, exit code, duration, and file-change capture for supervised processes.
 - `klemm daemon health`: lifecycle probe for the local authority daemon.
 - `klemm os snapshot/status/permissions`: public-capability OS observation, unmanaged-agent detection, and permission status reporting.
 - `klemm supervise --watch` and `klemm monitor status/evaluate`: continuous agent activity monitoring and alignment interventions.
+- `npm run mcp`: real stdio MCP server for compatible agent clients.
+- `record_adapter_envelope`: normalized adapter protocol entrypoint for plans, tool calls, diffs, uncertainty, and subagents.
+- `klemm policy add`: structured policy v2.
+- `klemm helper launch-agent`: non-privileged macOS LaunchAgent scaffold.
 
 ## Safety Model
 
