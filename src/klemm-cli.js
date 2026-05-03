@@ -8,6 +8,7 @@ import { join, relative } from "node:path";
 
 import {
   addContextSyncSource,
+  addAdapterClient,
   buildUserModelSummary,
   buildCodexContext,
   addStructuredPolicy,
@@ -22,6 +23,7 @@ import {
   renderLaunchAgentPlist,
   recordContextSyncRun,
   searchMemories,
+  simulatePolicyDecision,
   recordAgentActivity,
   proposeAction,
   recordAgentEvent,
@@ -38,6 +40,7 @@ import {
   updateContextSyncSource,
 } from "./klemm.js";
 import { createKlemmHttpServer } from "./klemm-daemon.js";
+import { executeKlemmTool } from "./klemm-tools.js";
 import {
   buildOsObservation,
   collectFileActivitySnapshot,
@@ -117,6 +120,8 @@ async function main() {
     if (command === "monitor" && args[1] === "status") return printMonitorStatus(args.slice(2));
     if (command === "monitor" && args[1] === "evaluate") return evaluateMonitorFromCli(args.slice(2));
     if (command === "policy" && args[1] === "add") return addPolicyFromCli(args.slice(2));
+    if (command === "policy" && args[1] === "simulate") return simulatePolicyFromCli(args.slice(2));
+    if (command === "adapter" && args[1] === "token" && args[2] === "add") return addAdapterTokenFromCli(args.slice(3));
     if (command === "helper" && args[1] === "launch-agent") return renderLaunchAgentFromCli(args.slice(2));
     if (command === "mcp" && args[1] === "stdio") return printMcpCommand();
     if (command === "install" && args[1] === "mcp") return await installMcpFromCli(args.slice(2));
@@ -611,6 +616,9 @@ function recordCodexAdapterReportFromCli(args) {
     agentId: flags.agent ?? "agent-codex",
     event: flags.type ?? "activity",
     summary: flags.summary,
+    adapterClientId: flags.adapterClient,
+    adapterToken: flags.adapterToken,
+    protocolVersion: flags.protocolVersion ? Number(flags.protocolVersion) : 1,
     target: flags.target,
     command: flags.command,
     toolCall: flags.tool
@@ -622,8 +630,27 @@ function recordCodexAdapterReportFromCli(args) {
     diff: flags.file ? { files: normalizeListFlag(flags.file) } : undefined,
     uncertainty: flags.uncertainty,
   });
-  let next = store.update((state) => recordAgentActivity(state, envelope.activity));
+  let accepted = true;
+  let protocol = { negotiatedVersion: envelope.protocolVersion };
   let decision = null;
+  let next;
+  if (flags.adapterClient || flags.adapterToken) {
+    const toolResult = executeAdapterEnvelopeTool(envelope);
+    accepted = toolResult.result.accepted;
+    protocol = toolResult.result.protocol;
+    next = toolResult.state;
+    decision = toolResult.result.decision;
+    console.log("Codex adapter envelope recorded");
+    console.log(`Adapter accepted: ${accepted}`);
+    console.log(`Protocol: ${protocol?.negotiatedVersion ?? "none"}`);
+    if (!accepted) {
+      console.log(`Error: ${toolResult.result.error}`);
+      return;
+    }
+    if (decision) printDecision(decision);
+    return;
+  }
+  next = store.update((state) => recordAgentActivity(state, envelope.activity));
   if (envelope.action) {
     next = store.update((state) => proposeAction(state, buildCommandProposal(splitShellLike(envelope.action.target), {
       missionId: envelope.action.missionId,
@@ -634,9 +661,17 @@ function recordCodexAdapterReportFromCli(args) {
   const activity = next.agentActivities[0];
 
   console.log("Codex adapter envelope recorded");
+  console.log(`Adapter accepted: ${accepted}`);
+  console.log(`Protocol: ${protocol?.negotiatedVersion ?? envelope.protocolVersion}`);
   console.log(`Activity: ${activity.id}`);
   console.log(`Type: ${envelope.type}`);
   if (decision) printDecision(decision);
+}
+
+function executeAdapterEnvelopeTool(envelope) {
+  const output = executeKlemmTool("record_adapter_envelope", envelope, { state: store.getState() });
+  store.saveState(output.state);
+  return output;
 }
 
 async function runCodexWatchedCommandFromCli(args) {
@@ -1698,6 +1733,49 @@ function addPolicyFromCli(args) {
   console.log(`Severity: ${policy.severity}`);
 }
 
+function simulatePolicyFromCli(args) {
+  const flags = parseFlags(args);
+  const simulation = simulatePolicyDecision(store.getState(), {
+    missionId: flags.mission,
+    actor: flags.actor,
+    actionType: flags.type ?? flags.actionType,
+    target: flags.target,
+    externality: flags.external,
+    reversibility: flags.reversibility,
+    privacyExposure: flags.privacy,
+    moneyImpact: flags.money,
+    legalImpact: flags.legal,
+    reputationImpact: flags.reputation,
+    credentialImpact: flags.credential,
+    missionRelevance: flags.relevance ?? "related",
+  });
+  console.log("Policy simulation");
+  console.log(`Decision: ${simulation.decision}`);
+  console.log(`Risk: ${simulation.riskLevel}`);
+  console.log(`Risk score: ${simulation.riskScore}`);
+  console.log(`Action category: ${simulation.actionCategory}`);
+  console.log(`Reason: ${simulation.reason}`);
+  console.log(`Matched policies: ${simulation.matchedPolicies.map((policy) => policy.id).join(",") || "none"}`);
+  console.log(`Risk factors: ${simulation.riskFactors.map((factor) => factor.id).join(",") || "none"}`);
+}
+
+function addAdapterTokenFromCli(args) {
+  const flags = parseFlags(args);
+  if (!flags.id || !flags.token) throw new Error("Usage: klemm adapter token add --id <client-id> --token <token> [--versions 1,2]");
+  const next = store.update((state) =>
+    addAdapterClient(state, {
+      id: flags.id,
+      token: flags.token,
+      protocolVersions: flags.versions,
+      permissions: flags.permissions,
+    }),
+  );
+  const client = next.adapterClients[0];
+  console.log(`Adapter client added: ${client.id}`);
+  console.log(`Protocol versions: ${client.protocolVersions.join(",")}`);
+  console.log(`Permissions: ${client.permissions.join(",")}`);
+}
+
 function renderLaunchAgentFromCli(args) {
   const flags = parseFlags(args);
   console.log(renderLaunchAgentPlist({
@@ -1991,6 +2069,8 @@ Commands:
   klemm monitor status [--mission mission-id]
   klemm monitor evaluate [--mission mission-id] [--agent agent-id]
   klemm policy add --id policy-id --name "..." --action-types deployment --target-includes prod
+  klemm policy simulate --mission mission-id --type deployment --target "deploy prod" --external deployment
+  klemm adapter token add --id codex-local --token token --versions 1,2
   klemm helper launch-agent [--program /usr/local/bin/klemm] [--data-dir path]
   klemm mcp stdio
   klemm install mcp --client codex|claude-desktop|generic [--output path]

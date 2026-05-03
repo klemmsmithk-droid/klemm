@@ -1,5 +1,6 @@
 import {
   buildUserModelSummary,
+  addAdapterClient,
   distillMemory,
   buildCodexContext,
   addStructuredPolicy,
@@ -8,6 +9,7 @@ import {
   importContextSource,
   importMemorySource,
   ingestMemoryExport,
+  simulatePolicyDecision,
   normalizeAgentAdapterEnvelope,
   proposeAction,
   recordAgentActivity,
@@ -112,6 +114,14 @@ export const KLEMM_MCP_TOOLS = [
     description: "Add a structured, auditable policy rule to Klemm's authority engine.",
   },
   {
+    name: "simulate_policy_decision",
+    description: "Run Policy Engine v2 against a proposed action without persisting a decision.",
+  },
+  {
+    name: "add_adapter_client",
+    description: "Register a local adapter client token and supported protocol versions.",
+  },
+  {
     name: "import_memory_source",
     description: "Import a provider-specific memory source and distill local memory candidates.",
   },
@@ -185,14 +195,29 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
   }
 
   if (name === "record_adapter_envelope") {
-    const envelope = normalizeAgentAdapterEnvelope(args);
+    const validation = validateAdapterClient(state, args);
+    if (!validation.accepted) {
+      return {
+        state,
+        result: {
+          accepted: false,
+          error: validation.error,
+          protocol: validation.protocol,
+        },
+      };
+    }
+    const envelope = normalizeAgentAdapterEnvelope({
+      ...args,
+      validation,
+      protocolVersion: validation.protocol.negotiatedVersion,
+    });
     let nextState = recordAgentActivity(state, envelope.activity);
     let decision = null;
     if (envelope.action) {
       nextState = proposeAction(nextState, envelope.action);
       decision = nextState.decisions[0];
     }
-    return { state: nextState, result: { envelope, activity: nextState.agentActivities[0], decision } };
+    return { state: nextState, result: { accepted: true, protocol: validation.protocol, envelope, activity: nextState.agentActivities[0], decision } };
   }
 
   if (name === "evaluate_agent_alignment") {
@@ -273,6 +298,15 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
     return { state: nextState, result: { policy: nextState.policies[0] } };
   }
 
+  if (name === "simulate_policy_decision") {
+    return { state, result: simulatePolicyDecision(state, args) };
+  }
+
+  if (name === "add_adapter_client") {
+    const nextState = addAdapterClient(state, args);
+    return { state: nextState, result: { adapterClient: nextState.adapterClients[0] } };
+  }
+
   if (name === "import_memory_source") {
     const nextState = importMemorySource(state, args);
     return { state: nextState, result: { memorySource: nextState.memorySources[0], memories: nextState.memories } };
@@ -351,5 +385,51 @@ function buildAgentMonitorResult(state, args = {}) {
       .filter((intervention) => !missionId || intervention.missionId === missionId)
       .filter((intervention) => !agentId || intervention.agentId === agentId)
       .slice(0, args.limit ?? 20),
+  };
+}
+
+function validateAdapterClient(state, args = {}) {
+  const requestedVersion = Number(args.protocolVersion ?? 1);
+  if (!args.adapterClientId && !args.adapterToken) {
+    return {
+      accepted: true,
+      protocol: {
+        requestedVersion,
+        negotiatedVersion: requestedVersion,
+        supportedVersions: [requestedVersion],
+      },
+    };
+  }
+  const client = (state.adapterClients ?? []).find((item) => item.id === args.adapterClientId && item.status === "active");
+  if (!client) {
+    return {
+      accepted: false,
+      error: `Unknown adapter client: ${args.adapterClientId ?? "missing"}`,
+      protocol: { requestedVersion, negotiatedVersion: null, supportedVersions: [] },
+    };
+  }
+  if (client.token && args.adapterToken !== client.token) {
+    return {
+      accepted: false,
+      error: "Adapter token rejected.",
+      protocol: { requestedVersion, negotiatedVersion: null, supportedVersions: client.protocolVersions ?? [1] },
+    };
+  }
+  const supported = client.protocolVersions ?? [1];
+  if (!supported.includes(requestedVersion)) {
+    return {
+      accepted: false,
+      error: `Unsupported adapter protocol version: ${requestedVersion}`,
+      protocol: { requestedVersion, negotiatedVersion: null, supportedVersions: supported },
+    };
+  }
+  return {
+    accepted: true,
+    protocol: {
+      requestedVersion,
+      negotiatedVersion: requestedVersion,
+      supportedVersions: supported,
+      adapterClientId: client.id,
+    },
   };
 }

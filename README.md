@@ -42,6 +42,8 @@ npm run klemm -- run shell --mission mission-codex -- node -e "console.log('safe
 npm run klemm -- supervise --watch --intercept-output --mission mission-codex -- npm test
 npm run klemm -- monitor status --mission mission-codex
 npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
+npm run klemm -- policy simulate --mission mission-codex --type deployment --target "deploy prod" --external deployment
+npm run klemm -- adapter token add --id codex-local --token "$KLEMM_ADAPTER_TOKEN" --versions 1,2
 npm run klemm -- supervise --capture --mission mission-codex -- npm test
 npm run klemm -- supervised-runs
 npm run klemm -- os snapshot --mission mission-codex --watch-path ./src
@@ -147,14 +149,26 @@ Compatible agents can report normalized envelopes through MCP or HTTP:
 
 Use `record_adapter_envelope` over MCP or `POST /api/adapter/envelope` over HTTP. Klemm normalizes the envelope into an activity, and when possible, an authority action.
 
+Adapters can register a local client token and supported protocol versions:
+
+```bash
+npm run klemm -- adapter token add --id codex-local --token "$KLEMM_ADAPTER_TOKEN" --versions 1,2
+npm run klemm -- codex report --adapter-client codex-local --adapter-token "$KLEMM_ADAPTER_TOKEN" --protocol-version 2 --mission mission-codex --type tool_call --tool shell --command "npm test"
+```
+
+Authenticated adapter calls receive explicit acceptance, negotiated protocol version, and validation details. Bad tokens or unsupported versions are rejected before activity is recorded.
+
 ## Policy Engine
 
 Klemm applies deterministic mission rules first, then reviewed memory policies. Approved or pinned authority-boundary memories can require user review for matching future actions, and each decision records the matched memory policy IDs for auditability.
+
+Policy Engine v2 adds action categories, risk scores, risk factors, mission authority overrides, policy effects such as `deny`, and structured explanations with mission/policy/proposal evidence.
 
 Structured policies can be added with:
 
 ```bash
 npm run klemm -- policy add --id policy-prod --name "Production deploy approval" --action-types deployment --target-includes prod
+npm run klemm -- policy simulate --mission mission-codex --type deployment --target "deploy prod" --external deployment
 ```
 
 ## Daemon

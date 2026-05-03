@@ -39,6 +39,7 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     setupRuns: [],
     onboardingProfiles: [],
     watchPaths: [],
+    adapterClients: [],
     schemaMigrations: [],
     policies: [],
     imports: [],
@@ -108,6 +109,7 @@ export function startMission(state, options = {}) {
     expiresAt: options.expiresAt ?? new Date(Date.parse(now) + durationMinutes * 60_000).toISOString(),
     supervisedAgents: [],
     escalationChannel: options.escalationChannel ?? "terminal_queue",
+    authorityOverrides: normalizeAuthorityOverrides(options.authorityOverrides),
     status: "active",
     createdAt: now,
   };
@@ -179,6 +181,11 @@ export function proposeAction(state, proposal = {}) {
     actor: normalized.actor,
     actionType: normalized.actionType,
     target: normalized.target,
+    authorityVersion: authority.authorityVersion,
+    actionCategory: authority.actionCategory,
+    riskScore: authority.riskScore,
+    riskFactors: authority.riskFactors,
+    explanation: authority.explanation,
     decision: authority.decision,
     riskLevel: authority.riskLevel,
     reason: authority.reason,
@@ -219,6 +226,53 @@ export function proposeAction(state, proposal = {}) {
       missionId: decision.missionId,
       decisionId: decision.id,
       summary: `${decision.decision} ${decision.actor} ${decision.actionType}: ${decision.target}`,
+    },
+  );
+}
+
+export function simulatePolicyDecision(state, proposal = {}) {
+  const now = proposal.now ?? new Date().toISOString();
+  const mission = findMission(state, proposal.missionId);
+  const normalized = normalizeActionProposal(proposal, mission, now);
+  const matchedPolicies = findPolicyMatches(state, normalized);
+  const authority = classifyAuthority(normalized, mission, matchedPolicies);
+  return {
+    ...authority,
+    id: normalized.id,
+    missionId: normalized.missionId,
+    actor: normalized.actor,
+    actionType: normalized.actionType,
+    target: normalized.target,
+    matchedPolicies,
+    proposal: normalized,
+    persisted: false,
+  };
+}
+
+export function addAdapterClient(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const id = options.id ?? `adapter-${compactTimestamp(now)}-${(state.adapterClients?.length ?? 0) + 1}`;
+  const client = {
+    id,
+    token: options.token,
+    protocolVersions: normalizeNumberList(options.protocolVersions ?? options.versions, [1]),
+    permissions: normalizeList(options.permissions, ["record_adapter_envelope"]),
+    status: options.status ?? "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return updateState(
+    {
+      ...state,
+      adapterClients: [client, ...withoutId(state.adapterClients ?? [], id)],
+    },
+    now,
+    {
+      type: "adapter_client_added",
+      at: now,
+      adapterClientId: id,
+      summary: `${id} adapter client added.`,
     },
   );
 }
@@ -587,6 +641,8 @@ export function normalizeAgentAdapterEnvelope(input = {}) {
 
   return {
     protocolVersion: Number(input.protocolVersion ?? 1),
+    adapterClientId: input.adapterClientId,
+    adapterToken: input.adapterToken,
     type,
     missionId,
     agentId,
@@ -605,6 +661,7 @@ export function normalizeAgentAdapterEnvelope(input = {}) {
         uncertainty: input.uncertainty,
       },
     },
+    validation: input.validation ?? { accepted: true },
     action: command
       ? {
           missionId,
@@ -1180,8 +1237,28 @@ export function normalizeActionProposal(proposal = {}, mission, now = new Date()
 }
 
 export function classifyAuthority(proposal, mission = {}, matchedPolicies = []) {
+  const override = findMissionAuthorityOverride(mission, proposal);
+  const policyEffect = strongestPolicyEffect(matchedPolicies);
+  const riskFactors = buildRiskFactors(proposal, mission, matchedPolicies, override);
+  const riskScore = calculateRiskScore(riskFactors);
+  const actionCategory = categorizeAction(proposal.actionType);
+  if (override?.effect === "allow") {
+    const reason = override.reason ?? "Mission authority override allows this action.";
+    return {
+      authorityVersion: "policy-v2",
+      decision: "allow",
+      riskLevel: riskScore >= 70 ? "high" : "medium",
+      riskScore: Math.min(riskScore, 74),
+      riskFactors,
+      actionCategory,
+      reason,
+      explanation: buildAuthorityExplanation({ proposal, mission, matchedPolicies, riskFactors, summary: reason }),
+    };
+  }
+
   const reasons = [];
   const highRisk =
+    policyEffect === "deny" ||
     isBlockedAction(proposal.actionType, mission) ||
     matchedPolicies.length > 0 ||
     proposal.credentialImpact ||
@@ -1205,34 +1282,62 @@ export function classifyAuthority(proposal, mission = {}, matchedPolicies = []) 
   if (/oauth/i.test(`${proposal.actionType} ${proposal.target}`)) reasons.push("OAuth or external account permission change");
 
   if (highRisk) {
+    const decision = policyEffect === "deny" ? "deny" : "queue";
+    const riskLevel = policyEffect === "deny" ? "critical" : "high";
+    const denyPolicy = policyEffect === "deny" ? matchedPolicies.find((policy) => policy.effect === "deny") : null;
+    const baseReason = sentence(reasons, "High-risk action exceeds current Klemm authority and needs user review.");
+    const reason = denyPolicy ? `${denyPolicy.text}: ${baseReason}` : baseReason;
     return {
-      decision: "queue",
-      riskLevel: "high",
-      reason: sentence(reasons, "High-risk action exceeds current Klemm authority and needs user review."),
+      authorityVersion: "policy-v2",
+      decision,
+      riskLevel,
+      riskScore,
+      riskFactors,
+      actionCategory,
+      reason,
+      explanation: buildAuthorityExplanation({ proposal, mission, matchedPolicies, riskFactors, summary: reason }),
     };
   }
 
   if (proposal.suggestedRewrite && mission?.rewriteAllowed !== false) {
+    const reason = "Klemm can preserve the mission while narrowing this reversible action.";
     return {
+      authorityVersion: "policy-v2",
       decision: "rewrite",
       riskLevel: "medium",
-      reason: "Klemm can preserve the mission while narrowing this reversible action.",
+      riskScore: Math.max(riskScore, 45),
+      riskFactors,
+      actionCategory,
+      reason,
+      explanation: buildAuthorityExplanation({ proposal, mission, matchedPolicies, riskFactors, summary: reason }),
       rewrite: proposal.suggestedRewrite,
     };
   }
 
   if (proposal.missionRelevance === "unrelated" || proposal.missionRelevance === "unknown") {
+    const reason = "Mission relevance is not clear enough to continue while the user is away.";
     return {
+      authorityVersion: "policy-v2",
       decision: "pause",
       riskLevel: "medium",
-      reason: "Mission relevance is not clear enough to continue while the user is away.",
+      riskScore: Math.max(riskScore, 50),
+      riskFactors,
+      actionCategory,
+      reason,
+      explanation: buildAuthorityExplanation({ proposal, mission, matchedPolicies, riskFactors, summary: reason }),
     };
   }
 
+  const reason = "Local, reversible action matches the active mission lease.";
   return {
+    authorityVersion: "policy-v2",
     decision: "allow",
     riskLevel: "low",
-    reason: "Local, reversible action matches the active mission lease.",
+    riskScore,
+    riskFactors,
+    actionCategory,
+    reason,
+    explanation: buildAuthorityExplanation({ proposal, mission, matchedPolicies, riskFactors, summary: reason }),
   };
 }
 
@@ -1710,6 +1815,22 @@ function normalizeList(value, fallback) {
     .filter(Boolean);
 }
 
+function normalizeNumberList(value, fallback) {
+  return normalizeList(value, fallback).map(Number).filter((item) => Number.isFinite(item));
+}
+
+function normalizeAuthorityOverrides(value) {
+  if (!value) return [];
+  const overrides = Array.isArray(value) ? value : [value];
+  return overrides.map((override) => ({
+    actionTypes: normalizeList(override.actionTypes, []),
+    targetIncludes: normalizeList(override.targetIncludes, []),
+    externalities: normalizeList(override.externalities, []),
+    effect: normalizePolicyEffect(override.effect ?? "allow"),
+    reason: override.reason ?? "",
+  }));
+}
+
 function withoutId(items, id) {
   return (items ?? []).filter((item) => item.id !== id);
 }
@@ -1765,8 +1886,94 @@ function findPolicyMatches(state, proposal) {
       text: policy.name,
       effect: policy.effect,
       severity: policy.severity,
+      condition: policy.condition,
     }));
   return [...memoryPolicies, ...structuredPolicies];
+}
+
+function strongestPolicyEffect(policies) {
+  const priority = ["deny", "queue", "pause", "rewrite", "allow"];
+  return priority.find((effect) => policies.some((policy) => policy.effect === effect));
+}
+
+function buildRiskFactors(proposal, mission = {}, matchedPolicies = [], override) {
+  const factors = [];
+  if (override) factors.push({ id: "mission_override", weight: override.effect === "allow" ? -25 : 20, detail: override.reason ?? override.effect });
+  if (isBlockedAction(proposal.actionType, mission)) factors.push({ id: "mission_blocked_action", weight: 35, detail: proposal.actionType });
+  if (matchedPolicies.length > 0) {
+    const critical = matchedPolicies.some((policy) => policy.severity === "critical" || policy.effect === "deny");
+    factors.push({ id: "matched_policy", weight: critical ? 40 : 30, detail: matchedPolicies.map((policy) => policy.id).join(",") });
+  }
+  if (proposal.credentialImpact) factors.push({ id: "credential_impact", weight: 45, detail: "credential or OAuth surface" });
+  if (proposal.moneyImpact) factors.push({ id: "financial_impact", weight: 40, detail: "money movement or billing surface" });
+  if (proposal.legalImpact) factors.push({ id: "legal_impact", weight: 40, detail: "legal surface" });
+  if (proposal.reputationImpact) factors.push({ id: "reputation_impact", weight: 35, detail: "public or reputational surface" });
+  if (isHighRiskExternality(proposal.externality)) factors.push({ id: "externality", weight: 25, detail: proposal.externality });
+  if (proposal.actionType.includes("delete") || proposal.actionType === "destructive_command") factors.push({ id: "destructive", weight: 35, detail: proposal.actionType });
+  if (/(^|\s)(rm|sudo|chmod|chown)\b.*(-rf|777|\/)/i.test(proposal.target)) factors.push({ id: "dangerous_command", weight: 45, detail: "dangerous shell pattern" });
+  if (proposal.missionRelevance === "unknown" || proposal.missionRelevance === "unrelated") factors.push({ id: "mission_relevance", weight: 20, detail: proposal.missionRelevance });
+  if (factors.length === 0) factors.push({ id: "local_reversible", weight: 10, detail: "local reversible action" });
+  return factors;
+}
+
+function calculateRiskScore(factors) {
+  const score = factors.reduce((total, factor) => total + Number(factor.weight ?? 0), 0);
+  return Math.max(0, Math.min(100, score));
+}
+
+function categorizeAction(actionType) {
+  if (["credential_change", "oauth_scope_change"].includes(actionType)) return "credentials";
+  if (["git_push", "deployment"].includes(actionType)) return "publishing";
+  if (["external_send", "reputation_action"].includes(actionType)) return "communications";
+  if (["financial_action"].includes(actionType)) return "financial";
+  if (["legal_action"].includes(actionType)) return "legal";
+  if (actionType.includes("delete") || actionType === "destructive_command") return "destructive";
+  if (actionType === "command") return "local_command";
+  return "general";
+}
+
+function buildAuthorityExplanation({ proposal, mission, matchedPolicies, riskFactors, summary }) {
+  return {
+    summary,
+    evidence: {
+      mission: mission
+        ? {
+            id: mission.id,
+            goal: mission.goal,
+            blockedActions: mission.blockedActions ?? [],
+            allowedActions: mission.allowedActions ?? [],
+          }
+        : null,
+      policies: matchedPolicies.map((policy) => ({
+        id: policy.id,
+        effect: policy.effect,
+        severity: policy.severity,
+        text: policy.text,
+        source: policy.source,
+      })),
+      proposal: {
+        actionType: proposal.actionType,
+        target: proposal.target,
+        externality: proposal.externality,
+      },
+      riskFactors,
+    },
+  };
+}
+
+function findMissionAuthorityOverride(mission = {}, proposal) {
+  return (mission.authorityOverrides ?? []).find((override) => overrideMatches(override, proposal));
+}
+
+function overrideMatches(override, proposal) {
+  const actionTypes = normalizeList(override.actionTypes, []);
+  const targetIncludes = normalizeList(override.targetIncludes, []);
+  const externalities = normalizeList(override.externalities, []);
+  const actionMatches = actionTypes.length === 0 || actionTypes.includes(proposal.actionType);
+  const target = String(proposal.target ?? "").toLowerCase();
+  const targetMatches = targetIncludes.length === 0 || targetIncludes.some((item) => target.includes(String(item).toLowerCase()));
+  const externalityMatches = externalities.length === 0 || externalities.includes(proposal.externality);
+  return actionMatches && targetMatches && externalityMatches;
 }
 
 function structuredPolicyMatches(policy, proposal) {

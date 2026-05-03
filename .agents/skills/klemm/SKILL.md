@@ -35,6 +35,15 @@ Record live work through the event protocol when possible:
 klemm event record --mission <mission-id> --agent agent-codex --type command_planned --summary "Codex plans a focused test run" --action-id decision-tests --action-type command --target "npm test -- test/klemm-next.test.js"
 ```
 
+For authenticated local adapters, register a client token and report the protocol version:
+
+```text
+klemm adapter token add --id codex-local --token <token> --versions 1,2
+klemm codex report --adapter-client codex-local --adapter-token <token> --protocol-version 2 --mission <mission-id> --type tool_call --tool shell --command "npm test"
+```
+
+Rejected adapter tokens or unsupported protocol versions must stop the agent from assuming Klemm recorded the activity.
+
 Prefer the Codex adapter wrappers when running as Codex:
 
 ```text
@@ -140,12 +149,15 @@ Structured policies and memory-source imports are available through:
 
 ```text
 add_structured_policy
+simulate_policy_decision
 import_memory_source
 import_context_source
 promote_memory_policy
 search_memories
 get_user_model_summary
 ```
+
+Use `klemm policy simulate` before adding broad policies or mission overrides. Policy Engine v2 returns risk score, action category, risk factors, matched policies, and evidence-backed explanations.
 
 Use context imports when the user wants Klemm to learn from their AI chat history, Codex runs, browser history, or repo history:
 
