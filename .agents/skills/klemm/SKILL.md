@@ -132,8 +132,26 @@ Structured policies and memory-source imports are available through:
 ```text
 add_structured_policy
 import_memory_source
+import_context_source
+promote_memory_policy
 search_memories
+get_user_model_summary
 ```
+
+Use context imports when the user wants Klemm to learn from their AI chat history, Codex runs, browser history, or repo history:
+
+```text
+klemm context import --provider chatgpt --file export.json
+klemm context import --provider claude --file claude-export.json
+klemm context import --provider codex --file codex.jsonl
+klemm context import --provider chrome_history --file ./History.sqlite
+klemm context import --provider git_history --file git.log
+klemm memory review --group-by-source
+klemm memory promote-policy <memory-id> --action-types git_push --target-includes github,origin
+klemm user model
+```
+
+Treat `klemm user model` as the compact profile that Codex and other agents can safely consume. It is distilled and evidence-linked; raw exports should remain local unless the user explicitly chooses otherwise.
 
 Use daemon lifecycle checks when relying on the local API:
 

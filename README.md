@@ -22,6 +22,11 @@ npm run klemm -- propose --id decision-push --mission mission-codex --actor Code
 npm run klemm -- queue
 npm run klemm -- deny decision-push "Review before publishing"
 npm run klemm -- memory ingest-export --source chatgpt_export --file export.json
+npm run klemm -- context import --provider chatgpt --file export.json
+npm run klemm -- context import --provider chrome_history --file "$HOME/Library/Application Support/Google/Chrome/Default/History"
+npm run klemm -- memory review --group-by-source
+npm run klemm -- memory promote-policy <memory-id> --action-types git_push --target-includes github,origin
+npm run klemm -- user model
 npm run klemm -- memory approve <memory-id> "Trusted preference"
 npm run klemm -- tui --mission mission-codex
 npm run klemm -- tui --interactive --mission mission-codex
@@ -137,6 +142,9 @@ Local endpoints:
 - `POST /api/memory/ingest`
 - `POST /api/memory/ingest-export`
 - `POST /api/memory/review`
+- `POST /api/memory/promote-policy`
+- `POST /api/context/import`
+- `GET /api/user/model`
 - `POST /api/supervised-runs`
 - `POST /api/os/observations`
 - `GET /api/os/status?mission=<id>`
@@ -202,14 +210,22 @@ When an event includes an action, Klemm immediately creates an authority decisio
 
 Use `klemm memory approve`, `klemm memory reject`, or `klemm memory pin` to promote or reject candidates after review.
 
-Memory v2 source import/search:
+Context importers preserve source evidence and quarantine hostile instructions before they can affect authority:
 
 ```bash
 npm run klemm -- memory import-source --source chatgpt --file export.json
+npm run klemm -- context import --provider chatgpt --file export.json
+npm run klemm -- context import --provider claude --file claude-export.json
+npm run klemm -- context import --provider codex --file codex.jsonl
+npm run klemm -- context import --provider chrome_history --file ./History.sqlite
+npm run klemm -- context import --provider git_history --file git.log
+npm run klemm -- memory review --group-by-source
+npm run klemm -- memory promote-policy <memory-id> --action-types deployment --target-includes prod,production
+npm run klemm -- user model
 npm run klemm -- memory search --query "deploy review"
 ```
 
-Imports now record provider-level source records in addition to distilled memory candidates.
+Imports now record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `user model` renders an agent-usable summary grouped into working style, authority boundaries, interests/projects, relationship context, and corrections.
 
 ## macOS Helper Scaffold
 

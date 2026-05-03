@@ -227,6 +227,42 @@ test("Klemm daemon exposes agent activity monitor endpoints", async () => {
   }
 });
 
+test("Klemm daemon exposes context import, memory policy promotion, and user model endpoints", async () => {
+  let state = createInitialKlemmState({ now: "2026-05-03T12:00:00.000Z" });
+  const server = createKlemmHttpServer({
+    getState: () => state,
+    saveState: (next) => {
+      state = next;
+    },
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  try {
+    const imported = await requestJson(port, "/api/context/import", {
+      provider: "chatgpt",
+      payload: JSON.stringify([{ role: "user", content: "I prefer terminal-first tools. Never let agents push to GitHub without approval." }]),
+    });
+    assert.equal(imported.memorySource.provider, "chatgpt");
+    assert.equal(imported.memorySource.recordCount, 1);
+    const memoryId = imported.memories[0].id;
+
+    const promoted = await requestJson(port, "/api/memory/promote-policy", {
+      memoryId,
+      actionTypes: ["git_push"],
+      targetIncludes: ["github", "origin"],
+    });
+    assert.equal(promoted.policy.sourceMemoryId, memoryId);
+
+    const model = await getJson(port, "/api/user/model");
+    assert.match(model.summary.text, /Klemm user model/);
+    assert.match(model.summary.text, /terminal-first/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 async function getJson(port, path) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`);
   assert.equal(response.status, 200);

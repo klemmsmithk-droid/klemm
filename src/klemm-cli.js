@@ -5,11 +5,13 @@ import { readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 import {
+  buildUserModelSummary,
   buildCodexContext,
   addStructuredPolicy,
   distillMemory,
   evaluateAgentAlignment,
   getKlemmStatus,
+  importContextSource,
   importMemorySource,
   ingestMemoryExport,
   normalizeAgentAdapterEnvelope,
@@ -24,6 +26,7 @@ import {
   renderKlemmDashboard,
   registerAgent,
   reviewMemory,
+  promoteMemoryToPolicy,
   startCodexHub,
   startMission,
   summarizeDebrief,
@@ -86,11 +89,14 @@ async function main() {
     if (command === "memory" && args[1] === "ingest") return await ingestMemoryFromCli(args.slice(2));
     if (command === "memory" && args[1] === "ingest-export") return await ingestMemoryExportFromCli(args.slice(2));
     if (command === "memory" && args[1] === "import-source") return await importMemorySourceFromCli(args.slice(2));
+    if (command === "context" && args[1] === "import") return await importContextSourceFromCli(args.slice(2));
     if (command === "memory" && args[1] === "search") return searchMemoryFromCli(args.slice(2));
-    if (command === "memory" && args[1] === "review") return printMemoryReview();
+    if (command === "memory" && args[1] === "review") return printMemoryReview(args.slice(2));
+    if (command === "memory" && args[1] === "promote-policy") return promoteMemoryPolicyFromCli(args.slice(2));
     if (command === "memory" && ["approve", "reject", "pin"].includes(args[1])) {
       return reviewMemoryFromCli(args.slice(2), memoryCommandToStatus(args[1]));
     }
+    if (command === "user" && args[1] === "model") return printUserModel(args.slice(2));
     if (command === "debrief") return printDebrief(args.slice(1));
     if (command === "tui") return await printTui(args.slice(1));
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
@@ -535,6 +541,34 @@ async function importMemorySourceFromCli(args) {
   console.log(`Distilled: ${memorySource.distilledCount}`);
 }
 
+async function importContextSourceFromCli(args) {
+  const flags = parseFlags(args);
+  const provider = flags.provider ?? flags.source ?? "unknown";
+  const sourceRef = flags.ref ?? flags.file ?? provider;
+  const payload =
+    flags.text ??
+    (flags.file && !(provider === "chrome_history" || provider === "chrome-history") ? await readFile(flags.file, "utf8") : "");
+  if (!payload && !flags.file) {
+    throw new Error("Usage: klemm context import --provider <provider> (--text <text> | --file <path>)");
+  }
+  const next = store.update((state) =>
+    importContextSource(state, {
+      provider,
+      sourceRef,
+      payload,
+      filePath: flags.file,
+    }),
+  );
+  const memorySource = next.memorySources[0];
+
+  console.log(`Context source imported: ${memorySource.id}`);
+  console.log(`Provider: ${memorySource.provider}`);
+  console.log(`Source: ${memorySource.sourceRef}`);
+  console.log(`Records: ${memorySource.recordCount}`);
+  console.log(`Distilled: ${memorySource.distilledCount}`);
+  console.log(`Quarantined: ${memorySource.quarantinedCount}`);
+}
+
 function searchMemoryFromCli(args) {
   const flags = parseFlags(args);
   const query = flags.query ?? args.join(" ");
@@ -546,14 +580,25 @@ function searchMemoryFromCli(args) {
   }
 }
 
-function printMemoryReview() {
+function printMemoryReview(args = []) {
+  const flags = parseFlags(args);
   const state = store.getState();
+  const pending = state.memories.filter((item) => item.status === "pending_review");
   console.log("Klemm memory review");
-  for (const memory of state.memories.filter((item) => item.status === "pending_review")) {
-    console.log(`- ${memory.id} [${memory.memoryClass}] confidence=${memory.confidence} source=${memory.source}: ${memory.text}`);
+  if (flags.groupBySource) {
+    const groups = groupBy(pending, (memory) => memory.source ?? "unknown");
+    for (const [source, memories] of groups) {
+      console.log(`Source: ${source}`);
+      for (const memory of memories) printMemoryCandidate(memory);
+    }
+  } else {
+    for (const memory of pending) printMemoryCandidate(memory);
   }
   for (const rejected of state.rejectedMemoryInputs.slice(0, 10)) {
     console.log(`- rejected ${rejected.id}: ${rejected.reason}`);
+  }
+  for (const quarantined of (state.memoryQuarantine ?? []).slice(0, 10)) {
+    console.log(`- quarantined ${quarantined.id}: ${quarantined.reason} source=${quarantined.source}`);
   }
 }
 
@@ -571,6 +616,37 @@ function reviewMemoryFromCli(args, status) {
 
   console.log(`Memory reviewed: ${memory.id} ${memory.status}`);
   console.log(`Note: ${memory.reviewNote || "none"}`);
+}
+
+function promoteMemoryPolicyFromCli(args) {
+  const [memoryId] = args;
+  const flags = parseFlags(args.slice(1));
+  if (!memoryId) throw new Error("Usage: klemm memory promote-policy <memory-id> [--action-types a,b] [--target-includes x,y]");
+  const next = store.update((state) =>
+    promoteMemoryToPolicy(state, {
+      memoryId,
+      actionTypes: normalizeListFlag(flags.actionTypes),
+      targetIncludes: normalizeListFlag(flags.targetIncludes),
+      externalities: normalizeListFlag(flags.externalities),
+      effect: flags.effect,
+      severity: flags.severity,
+    }),
+  );
+  const policy = next.policies[0];
+
+  console.log(`Policy promoted: ${policy.id}`);
+  console.log(`Source memory: ${policy.sourceMemoryId}`);
+  console.log(`Effect: ${policy.effect}`);
+  console.log(`Action types: ${policy.condition.actionTypes.join(",") || "any"}`);
+  console.log(`Target includes: ${policy.condition.targetIncludes.join(",") || "any"}`);
+}
+
+function printUserModel(args) {
+  const flags = parseFlags(args);
+  const summary = buildUserModelSummary(store.getState(), {
+    includePending: flags.pending !== false,
+  });
+  console.log(summary.text);
 }
 
 function printDebrief(args) {
@@ -1031,6 +1107,23 @@ function printDecision(decision) {
   if (decision.rewrite) console.log(`Rewrite: ${decision.rewrite}`);
 }
 
+function printMemoryCandidate(memory) {
+  const evidence = memory.evidence
+    ? ` evidence=${[memory.evidence.conversationId, memory.evidence.sessionId, memory.evidence.url, memory.evidence.commit].filter(Boolean).join("|") || memory.evidence.messageId || "attached"}`
+    : "";
+  console.log(`- ${memory.id} [${memory.memoryClass}] confidence=${memory.confidence} source=${memory.source} ref=${memory.sourceRef}${evidence}: ${memory.text}`);
+}
+
+function groupBy(items, keyFn) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return groups;
+}
+
 function parseFlags(args) {
   const flags = {};
   for (let index = 0; index < args.length; index += 1) {
@@ -1194,9 +1287,12 @@ Commands:
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json
   klemm memory import-source --source chatgpt --file export.json
+  klemm context import --provider chatgpt|claude|codex|chrome_history|git_history --file export.json
   klemm memory search --query "deploy review"
   klemm memory approve|reject|pin <memory-id> [note]
-  klemm memory review
+  klemm memory review [--group-by-source]
+  klemm memory promote-policy <memory-id> [--action-types git_push] [--target-includes github]
+  klemm user model [--pending]
   klemm debrief [--mission mission-id]
   klemm tui [--mission mission-id] [--interactive]
   klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] -- [args...]

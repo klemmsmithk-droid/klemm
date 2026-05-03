@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+
 const DEFAULT_ALLOWED_ACTIONS = ["read_files", "edit_local_code", "run_tests", "local_analysis"];
 const DEFAULT_BLOCKED_ACTIONS = [
   "external_send",
@@ -30,6 +33,7 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     queue: [],
     memories: [],
     memorySources: [],
+    memoryQuarantine: [],
     policies: [],
     imports: [],
     supervisedRuns: [],
@@ -228,6 +232,7 @@ export function addStructuredPolicy(state, options = {}) {
     severity: options.severity ?? "medium",
     source: options.source ?? "manual",
     sourceRef: options.sourceRef ?? options.source ?? "manual",
+    sourceMemoryId: options.sourceMemoryId,
     status: options.status ?? "active",
     confidence: options.confidence ?? 1,
     createdAt: now,
@@ -434,6 +439,123 @@ export function importMemorySource(state, options = {}) {
       summary: `${provider} memory source imported from ${sourceRef}.`,
     },
   );
+}
+
+export function importContextSource(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const provider = normalizeContextProvider(options.provider ?? options.source ?? "unknown");
+  const sourceRef = options.sourceRef ?? options.filePath ?? options.file ?? provider;
+  const records = extractContextRecords(provider, {
+    payload: options.payload ?? options.text ?? "",
+    filePath: options.filePath,
+    sourceRef,
+  });
+  const distilled = distillContextRecords(state, {
+    provider,
+    sourceRef,
+    records,
+    now,
+  });
+  const sourceRecord = {
+    id: options.id ?? `memory-source-${compactTimestamp(now)}-${(state.memorySources?.length ?? 0) + 1}`,
+    provider,
+    sourceRef,
+    importedAt: now,
+    recordCount: records.length,
+    messageCount: records.length,
+    distilledCount: distilled.distilledCount,
+    quarantinedCount: distilled.quarantinedCount,
+    rejectedCount: distilled.quarantinedCount,
+    duplicateCount: distilled.duplicateCount,
+  };
+
+  return updateState(
+    {
+      ...distilled.state,
+      memorySources: [sourceRecord, ...(distilled.state.memorySources ?? [])],
+    },
+    now,
+    {
+      type: "context_source_imported",
+      at: now,
+      memorySourceId: sourceRecord.id,
+      summary: `${provider} context source imported from ${sourceRef}.`,
+    },
+  );
+}
+
+export function promoteMemoryToPolicy(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const memoryId = options.memoryId;
+  if (!memoryId) throw new Error("memoryId is required");
+  const memory = (state.memories ?? []).find((item) => item.id === memoryId);
+  if (!memory) throw new Error(`Memory not found: ${memoryId}`);
+  const policyState = addStructuredPolicy(state, {
+    id: options.id ?? `policy-from-${memory.id}`,
+    name: options.name ?? oneLineText(memory.text, 96),
+    effect: options.effect ?? "queue",
+    severity: options.severity ?? (memory.memoryClass === "authority_boundary" ? "high" : "medium"),
+    source: "memory",
+    sourceRef: memory.sourceRef ?? memory.source,
+    sourceMemoryId: memory.id,
+    confidence: memory.confidence,
+    condition: {
+      actionTypes: options.actionTypes,
+      targetIncludes: options.targetIncludes,
+      externalities: options.externalities,
+    },
+    now,
+  });
+
+  return reviewMemory(policyState, {
+    memoryId,
+    status: memory.status === "pinned" ? "pinned" : "approved",
+    note: options.note ?? "Promoted to structured authority policy.",
+    now,
+  });
+}
+
+export function buildUserModelSummary(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const includePending = options.includePending ?? true;
+  const memories = (state.memories ?? []).filter((memory) =>
+    memory.status === "approved" || memory.status === "pinned" || (includePending && memory.status === "pending_review"),
+  );
+  const sections = {
+    identityPersonality: memories.filter((memory) => memory.memoryClass === "personality_interest"),
+    interestsProjects: memories.filter((memory) => ["project_context", "personality_interest"].includes(memory.memoryClass)),
+    workingStyle: memories.filter((memory) => memory.memoryClass === "standing_preference"),
+    authorityBoundaries: memories.filter((memory) => memory.memoryClass === "authority_boundary"),
+    relationshipContext: memories.filter((memory) => memory.memoryClass === "relationship_context"),
+    priorCorrections: memories.filter((memory) => memory.memoryClass === "prior_correction"),
+  };
+  const lines = [
+    "Klemm user model",
+    `Generated: ${now}`,
+    `Reviewed memories: ${(state.memories ?? []).filter((memory) => memory.status === "approved" || memory.status === "pinned").length}`,
+    `Pending candidates included: ${includePending ? "yes" : "no"}`,
+    "",
+    "Working style",
+    ...formatUserModelSection(sections.workingStyle),
+    "",
+    "Authority boundaries",
+    ...formatUserModelSection(sections.authorityBoundaries),
+    "",
+    "Interests and projects",
+    ...formatUserModelSection(sections.interestsProjects),
+    "",
+    "Relationship context",
+    ...formatUserModelSection(sections.relationshipContext),
+    "",
+    "Prior corrections",
+    ...formatUserModelSection(sections.priorCorrections),
+  ];
+
+  return {
+    generatedAt: now,
+    sections,
+    text: lines.join("\n"),
+  };
 }
 
 export function searchMemories(state, options = {}) {
@@ -971,6 +1093,372 @@ function activeMission(state) {
   return state.missions.find((mission) => mission.status === "active");
 }
 
+function extractContextRecords(provider, { payload = "", filePath, sourceRef } = {}) {
+  if (provider === "chrome_history" && filePath && !String(payload ?? "").trim() && looksLikeSqliteDatabase(filePath)) {
+    return extractChromeSqliteHistory(filePath, sourceRef);
+  }
+  const text = filePath && !String(payload ?? "").trim() ? readFileSync(filePath, "utf8") : String(payload ?? "");
+  if (provider === "chatgpt") return extractChatGptRecords(text, sourceRef);
+  if (provider === "claude") return extractClaudeRecords(text, sourceRef);
+  if (provider === "codex") return extractCodexRecords(text, sourceRef);
+  if (provider === "chrome_history") return extractChromeHistoryRecords(text, sourceRef);
+  if (provider === "git_history") return extractGitHistoryRecords(text, sourceRef);
+  return extractMemoryExportMessages(text).map((message, index) => ({
+    id: `${sourceRef}:${index}`,
+    provider,
+    sourceRef,
+    role: message.role,
+    content: message.content,
+    evidence: {
+      provider,
+      sourceRef,
+      messageId: `${sourceRef}:${index}`,
+    },
+  }));
+}
+
+function extractChatGptRecords(text, sourceRef) {
+  const parsed = parseJsonOrNull(text);
+  if (!parsed) return extractPlainTextRecords("chatgpt", text, sourceRef);
+  const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [parsed];
+  const records = [];
+  for (const conversation of conversations) {
+    if (conversation?.mapping && typeof conversation.mapping === "object") {
+      for (const [nodeId, node] of Object.entries(conversation.mapping)) {
+        const message = node?.message;
+        const content = extractMessageText(message?.content);
+        if (!content) continue;
+        records.push({
+          id: `${conversation.id ?? sourceRef}:${nodeId}`,
+          provider: "chatgpt",
+          sourceRef,
+          role: message?.author?.role ?? "unknown",
+          content,
+          createdAt: unixSecondsToIso(message?.create_time ?? conversation.create_time),
+          evidence: {
+            provider: "chatgpt",
+            sourceRef,
+            conversationId: conversation.id,
+            conversationTitle: conversation.title,
+            messageId: nodeId,
+          },
+        });
+      }
+      continue;
+    }
+    const content = extractMessageText(conversation.content ?? conversation.text ?? conversation.message?.content);
+    if (!content) continue;
+    records.push({
+      id: `${conversation.id ?? sourceRef}:${records.length}`,
+      provider: "chatgpt",
+      sourceRef,
+      role: conversation.role ?? conversation.author?.role ?? "unknown",
+      content,
+      createdAt: unixSecondsToIso(conversation.create_time),
+      evidence: {
+        provider: "chatgpt",
+        sourceRef,
+        conversationId: conversation.conversation_id ?? conversation.id,
+        conversationTitle: conversation.title,
+        messageId: conversation.message_id ?? `${records.length}`,
+      },
+    });
+  }
+  return records.length > 0 ? records : extractMemoryExportMessages(text).map((message, index) => ({
+    id: `${sourceRef}:${index}`,
+    provider: "chatgpt",
+    sourceRef,
+    role: message.role,
+    content: message.content,
+    evidence: { provider: "chatgpt", sourceRef, messageId: `${index}` },
+  }));
+}
+
+function extractClaudeRecords(text, sourceRef) {
+  const parsed = parseJsonOrNull(text);
+  if (!parsed) return extractPlainTextRecords("claude", text, sourceRef);
+  const conversations = Array.isArray(parsed) ? parsed : [parsed];
+  const records = [];
+  for (const conversation of conversations) {
+    const messages = conversation.chat_messages ?? conversation.messages ?? [];
+    for (const [index, message] of messages.entries()) {
+      const content = extractMessageText(message.text ?? message.content);
+      if (!content) continue;
+      records.push({
+        id: `${conversation.uuid ?? conversation.id ?? sourceRef}:${index}`,
+        provider: "claude",
+        sourceRef,
+        role: message.sender ?? message.role ?? "unknown",
+        content,
+        createdAt: message.created_at ?? message.createdAt,
+        evidence: {
+          provider: "claude",
+          sourceRef,
+          conversationId: conversation.uuid ?? conversation.id,
+          conversationTitle: conversation.name ?? conversation.title,
+          messageId: `${conversation.uuid ?? conversation.id ?? sourceRef}:${index}`,
+        },
+      });
+    }
+  }
+  return records;
+}
+
+function extractCodexRecords(text, sourceRef) {
+  const lines = String(text ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const records = [];
+  for (const [index, line] of lines.entries()) {
+    const parsed = parseJsonOrNull(line);
+    if (!parsed) {
+      records.push(...extractPlainTextRecords("codex", line, sourceRef, index));
+      continue;
+    }
+    const content = extractMessageText(parsed.message ?? parsed.content ?? parsed.text);
+    if (!content) continue;
+    records.push({
+      id: parsed.id ?? `${parsed.session_id ?? parsed.sessionId ?? sourceRef}:${index}`,
+      provider: "codex",
+      sourceRef,
+      role: parsed.role ?? "unknown",
+      content,
+      createdAt: parsed.created_at ?? parsed.createdAt,
+      evidence: {
+        provider: "codex",
+        sourceRef,
+        sessionId: parsed.session_id ?? parsed.sessionId,
+        messageId: parsed.id ?? `${index}`,
+      },
+    });
+  }
+  if (records.length > 0) return records;
+  return extractPlainTextRecords("codex", text, sourceRef);
+}
+
+function extractChromeHistoryRecords(text, sourceRef) {
+  const parsed = parseJsonOrNull(text);
+  if (Array.isArray(parsed)) {
+    return parsed.map((entry, index) => chromeHistoryRecord(entry, index, sourceRef)).filter(Boolean);
+  }
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      const [url, title = ""] = line.includes(",") ? line.split(/,(.*)/s) : [line, ""];
+      return chromeHistoryRecord({ url, title }, index, sourceRef);
+    })
+    .filter(Boolean);
+}
+
+function extractChromeSqliteHistory(filePath, sourceRef) {
+  const db = new DatabaseSync(filePath, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT url, title, CAST(last_visit_time AS TEXT) AS last_visit_time FROM urls ORDER BY last_visit_time DESC LIMIT 500")
+      .all()
+      .map((entry, index) => chromeHistoryRecord(entry, index, sourceRef))
+      .filter(Boolean);
+  } finally {
+    db.close();
+  }
+}
+
+function extractGitHistoryRecords(text, sourceRef) {
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      const parts = line.split("|");
+      const [hash, date, author, ...subjectParts] = parts.length >= 4 ? parts : [`commit-${index}`, "", "", line];
+      const subject = subjectParts.join("|").trim();
+      return {
+        id: `${sourceRef}:${hash || index}`,
+        provider: "git_history",
+        sourceRef,
+        role: "git",
+        content: subject ? `Git commit ${String(hash).slice(0, 12)}: ${subject}` : line,
+        createdAt: date || undefined,
+        evidence: {
+          provider: "git_history",
+          sourceRef,
+          commit: hash,
+          author,
+          date,
+        },
+      };
+    });
+}
+
+function distillContextRecords(state, { provider, sourceRef, records, now }) {
+  const memories = [];
+  const quarantine = [];
+  const rejected = [];
+  const seenMemoryTexts = new Set((state.memories ?? []).map((memory) => normalizeMemoryText(memory.text)));
+  let duplicateCount = 0;
+
+  for (const record of records) {
+    const text = String(record.content ?? "").trim();
+    if (!text) continue;
+    if (PROMPT_INJECTION_PATTERNS.some((pattern) => pattern.test(text))) {
+      const quarantined = {
+        id: `quarantine-${compactTimestamp(now)}-${(state.memoryQuarantine?.length ?? 0) + quarantine.length + 1}`,
+        provider,
+        source: provider,
+        sourceRef,
+        text,
+        reason: "prompt_injection",
+        evidence: record.evidence ?? { provider, sourceRef },
+        quarantinedAt: now,
+      };
+      quarantine.push(quarantined);
+      rejected.push({
+        id: `rejected-memory-${compactTimestamp(now)}-${(state.rejectedMemoryInputs?.length ?? 0) + rejected.length + 1}`,
+        source: provider,
+        sourceRef,
+        text,
+        reason: "Rejected likely prompt injection in imported user history.",
+        rejectedAt: now,
+      });
+      continue;
+    }
+
+    const memoryClass = classifyMemoryLine(text);
+    if (!memoryClass) continue;
+    const normalizedText = normalizeMemoryText(text);
+    if (seenMemoryTexts.has(normalizedText)) {
+      duplicateCount += 1;
+      continue;
+    }
+    seenMemoryTexts.add(normalizedText);
+    memories.push({
+      id: `memory-${compactTimestamp(now)}-${(state.memories?.length ?? 0) + memories.length + 1}`,
+      memoryClass,
+      text,
+      source: provider,
+      sourceRef,
+      confidence: inferMemoryConfidence(text, memoryClass),
+      status: "pending_review",
+      evidence: {
+        provider,
+        sourceRef,
+        ...(record.evidence ?? {}),
+      },
+      createdAt: now,
+    });
+  }
+
+  return {
+    state: updateState(
+      {
+        ...state,
+        memories: [...memories, ...(state.memories ?? [])],
+        memoryQuarantine: [...quarantine, ...(state.memoryQuarantine ?? [])],
+        rejectedMemoryInputs: [...rejected, ...(state.rejectedMemoryInputs ?? [])],
+        lastMemoryDistillation: {
+          duplicateCount,
+          distilledCount: memories.length,
+          rejectedCount: rejected.length,
+        },
+      },
+      now,
+      {
+        type: "context_memory_distilled",
+        at: now,
+        summary: `${memories.length} memory item(s) distilled from ${provider}; ${quarantine.length} quarantined.`,
+      },
+    ),
+    distilledCount: memories.length,
+    quarantinedCount: quarantine.length,
+    duplicateCount,
+  };
+}
+
+function extractPlainTextRecords(provider, text, sourceRef, offset = 0) {
+  return String(text ?? "")
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((content, index) => ({
+      id: `${sourceRef}:${offset + index}`,
+      provider,
+      sourceRef,
+      role: "unknown",
+      content,
+      evidence: {
+        provider,
+        sourceRef,
+        messageId: `${offset + index}`,
+      },
+    }));
+}
+
+function chromeHistoryRecord(entry, index, sourceRef) {
+  if (!entry?.url && !entry?.title) return null;
+  const title = String(entry.title ?? "").trim();
+  const url = String(entry.url ?? "").trim();
+  return {
+    id: `${sourceRef}:${entry.id ?? index}`,
+    provider: "chrome_history",
+    sourceRef,
+    role: "browser_history",
+    content: [title, url].filter(Boolean).join(" - "),
+    evidence: {
+      provider: "chrome_history",
+      sourceRef,
+      url,
+      title,
+      lastVisitTime: entry.last_visit_time ?? entry.lastVisitTime,
+    },
+  };
+}
+
+function extractMessageText(value) {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    return value.map((part) => extractMessageText(part)).filter(Boolean).join("\n").trim();
+  }
+  if (Array.isArray(value.parts)) return value.parts.map((part) => extractMessageText(part)).filter(Boolean).join("\n").trim();
+  if (typeof value.text === "string") return value.text.trim();
+  if (typeof value.content === "string" || Array.isArray(value.content)) return extractMessageText(value.content);
+  return "";
+}
+
+function parseJsonOrNull(text) {
+  try {
+    return JSON.parse(String(text ?? ""));
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeSqliteDatabase(filePath) {
+  try {
+    return readFileSync(filePath).subarray(0, 16).toString("utf8") === "SQLite format 3\0";
+  } catch {
+    return false;
+  }
+}
+
+function unixSecondsToIso(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return undefined;
+  return new Date(number * 1000).toISOString();
+}
+
+function normalizeContextProvider(provider) {
+  return String(provider ?? "unknown").trim().toLowerCase().replaceAll("-", "_") || "unknown";
+}
+
+function formatUserModelSection(memories) {
+  if (memories.length === 0) return ["- none reviewed yet"];
+  return memories.slice(0, 12).map((memory) => {
+    const status = memory.status === "pending_review" ? "pending" : memory.status;
+    return `- ${memory.text} (${status}, ${memory.source})`;
+  });
+}
+
 function extractMemoryExportMessages(text) {
   const rawText = String(text ?? "");
   try {
@@ -1295,6 +1783,11 @@ function clipTranscript(text) {
   return value.length > 4000 ? `${value.slice(0, 4000)}\n[truncated]` : value;
 }
 
+function oneLineText(value, maxLength = 160) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
 function normalizeOutcome(outcome) {
   if (outcome === "approved") return "approved";
   if (outcome === "denied") return "denied";
@@ -1307,10 +1800,13 @@ function classifyMemoryLine(line) {
   if (/\b(do not|don't|never|requires approval|without approval|blocked|boundary|boundaries)\b/i.test(line)) {
     return "authority_boundary";
   }
-  if (/\b(prefer|always|working style|terminal-first|cli-first)\b/i.test(line)) {
+  if (/\b(prefer|always|working style|terminal-first|cli-first|focused|run tests|before completion|review before risky)\b/i.test(line)) {
     return "standing_preference";
   }
-  if (/\b(love|hate|interest|building|project|ambitious|agentic)\b/i.test(line)) {
+  if (/\b(github|repo|repository|commit|supervision|monitor|docs?|history)\b/i.test(line)) {
+    return "project_context";
+  }
+  if (/\b(love|hate|interest|building|project|ambitious|agentic|infrastructure)\b/i.test(line)) {
     return "personality_interest";
   }
   if (/\b(customer|client|relationship|accounting|connector)\b/i.test(line)) {

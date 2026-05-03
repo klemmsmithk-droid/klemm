@@ -1,9 +1,11 @@
 import {
+  buildUserModelSummary,
   distillMemory,
   buildCodexContext,
   addStructuredPolicy,
   evaluateAgentAlignment,
   getKlemmStatus,
+  importContextSource,
   importMemorySource,
   ingestMemoryExport,
   normalizeAgentAdapterEnvelope,
@@ -15,6 +17,7 @@ import {
   recordSupervisedRun,
   renderKlemmDashboard,
   reviewMemory,
+  promoteMemoryToPolicy,
   searchMemories,
   registerAgent,
   startCodexHub,
@@ -111,6 +114,14 @@ export const KLEMM_MCP_TOOLS = [
   {
     name: "import_memory_source",
     description: "Import a provider-specific memory source and distill local memory candidates.",
+  },
+  {
+    name: "import_context_source",
+    description: "Import ChatGPT, Claude, Codex, browser history, or git history with evidence and quarantine.",
+  },
+  {
+    name: "promote_memory_policy",
+    description: "Promote a reviewed memory into a structured authority policy.",
   },
   {
     name: "search_memories",
@@ -220,9 +231,14 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
   }
 
   if (name === "get_user_model_summary") {
+    const summary = buildUserModelSummary(state, {
+      includePending: args.includePending ?? true,
+      now: args.now,
+    });
     return {
       state,
       result: {
+        summary,
         status: getKlemmStatus(state),
         memories: state.memories.slice(0, args.limit ?? 10).map((memory) => ({
           id: memory.id,
@@ -260,6 +276,23 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
   if (name === "import_memory_source") {
     const nextState = importMemorySource(state, args);
     return { state: nextState, result: { memorySource: nextState.memorySources[0], memories: nextState.memories } };
+  }
+
+  if (name === "import_context_source") {
+    const nextState = importContextSource(state, args);
+    return {
+      state: nextState,
+      result: {
+        memorySource: nextState.memorySources[0],
+        memories: nextState.memories,
+        quarantine: nextState.memoryQuarantine ?? [],
+      },
+    };
+  }
+
+  if (name === "promote_memory_policy") {
+    const nextState = promoteMemoryToPolicy(state, args);
+    return { state: nextState, result: { policy: nextState.policies[0] } };
   }
 
   if (name === "search_memories") {

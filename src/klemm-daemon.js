@@ -39,6 +39,10 @@ export function createKlemmHttpServer({ getState, saveState }) {
         return runTool(response, "codex_context", { missionId: url.searchParams.get("mission") }, { getState, saveState });
       }
 
+      if (request.method === "GET" && url.pathname === "/api/user/model") {
+        return runTool(response, "get_user_model_summary", { includePending: true }, { getState, saveState });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/codex/hub") {
         return runTool(response, "start_codex_hub", await readJson(request), { getState, saveState });
       }
@@ -73,6 +77,14 @@ export function createKlemmHttpServer({ getState, saveState }) {
 
       if (request.method === "POST" && url.pathname === "/api/memory/review") {
         return runTool(response, "review_memory", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/memory/promote-policy") {
+        return runTool(response, "promote_memory_policy", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/context/import") {
+        return runTool(response, "import_context_source", await readJson(request), { getState, saveState });
       }
 
       if (request.method === "POST" && url.pathname === "/api/supervised-runs") {

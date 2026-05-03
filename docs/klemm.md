@@ -22,6 +22,11 @@ npm run klemm -- propose --id decision-push --mission mission-codex --actor Code
 npm run klemm -- queue
 npm run klemm -- deny decision-push "Review before publishing"
 npm run klemm -- memory ingest-export --source chatgpt_export --file export.json
+npm run klemm -- context import --provider chatgpt --file export.json
+npm run klemm -- context import --provider chrome_history --file "$HOME/Library/Application Support/Google/Chrome/Default/History"
+npm run klemm -- memory review --group-by-source
+npm run klemm -- memory promote-policy <memory-id> --action-types git_push --target-includes github,origin
+npm run klemm -- user model
 npm run klemm -- memory approve <memory-id> "Trusted preference"
 npm run klemm -- tui --mission mission-codex
 npm run klemm -- tui --interactive --mission mission-codex
@@ -137,6 +142,9 @@ Local endpoints:
 - `POST /api/memory/ingest`
 - `POST /api/memory/ingest-export`
 - `POST /api/memory/review`
+- `POST /api/memory/promote-policy`
+- `POST /api/context/import`
+- `GET /api/user/model`
 - `POST /api/supervised-runs`
 - `POST /api/os/observations`
 - `GET /api/os/status?mission=<id>`
@@ -173,6 +181,23 @@ Unmanaged external processes are observe-and-alert only. Pause, kill, rewrite, a
 
 The repo includes `.agents/skills/klemm/SKILL.md`. When invoked as `/klemm`, Codex should register itself as the temporary hub, start or join a mission lease, ask Klemm before risky actions, and write a debrief when the user returns.
 
+## Context Imports
+
+Context importers preserve source evidence and quarantine hostile instructions before they can affect authority:
+
+```bash
+npm run klemm -- context import --provider chatgpt --file export.json
+npm run klemm -- context import --provider claude --file claude-export.json
+npm run klemm -- context import --provider codex --file codex.jsonl
+npm run klemm -- context import --provider chrome_history --file ./History.sqlite
+npm run klemm -- context import --provider git_history --file git.log
+npm run klemm -- memory review --group-by-source
+npm run klemm -- memory promote-policy <memory-id> --action-types deployment --target-includes prod,production
+npm run klemm -- user model
+```
+
+Imports record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `user model` renders an agent-usable summary grouped into working style, authority boundaries, interests/projects, relationship context, and corrections.
+
 ## Next Working Surfaces
 
 - `klemm codex hub`: one-command Codex hub dogfooding.
@@ -182,6 +207,9 @@ The repo includes `.agents/skills/klemm/SKILL.md`. When invoked as `/klemm`, Cod
 - `klemm event record`: agent event protocol for planned tools, commands, files, external actions, and lifecycle events.
 - `klemm memory ingest-export`: first AI chat export importer, with dedupe and review promotion.
 - `klemm memory import-source/search`: memory source records and search.
+- `klemm context import`: provider-specific ChatGPT, Claude, Codex, Chrome history, and git history importers with evidence.
+- `klemm memory promote-policy`: turn reviewed memory into structured authority policy.
+- `klemm user model`: agent-usable local profile summary from reviewed and pending memory candidates.
 - `klemm debrief`: inspection-first summary of events, rewrites, queue, and memory candidates.
 - `klemm tui --interactive`: lightweight terminal dashboard with approve/deny and memory-review commands.
 - `klemm supervise --capture`: transcript, exit code, duration, and file-change capture for supervised processes.
