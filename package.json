@@ -1,0 +1,21 @@
+{
+  "name": "klemm",
+  "version": "0.1.0",
+  "description": "Cross-agent personal authority layer",
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "node --no-warnings --test",
+    "klemm": "node --no-warnings src/klemm-cli.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "klemm": "./src/klemm-cli.js"
+  }
+}
