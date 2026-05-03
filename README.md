@@ -30,11 +30,13 @@ npm run klemm -- context import --provider chrome_history --file "$HOME/Library/
 npm run klemm -- memory review --group-by-source
 npm run klemm -- memory promote-policy <memory-id> --action-types git_push --target-includes github,origin
 npm run klemm -- user model
-npm run klemm -- sync add --id codex-history --provider codex --path ./codex.jsonl
-npm run klemm -- sync run
+npm run klemm -- sync add --id codex-history --provider codex --path ./codex.jsonl --interval-minutes 30
+npm run klemm -- sync plan
+npm run klemm -- sync run --due
 npm run klemm -- sync status
 npm run klemm -- memory approve <memory-id> "Trusted preference"
 npm run klemm -- tui --mission mission-codex --view memory
+npm run klemm -- tui --mission mission-codex --view trust --decision decision-push
 npm run klemm -- tui --interactive --mission mission-codex
 npm run klemm -- debrief --mission mission-codex
 npm run klemm -- run codex --mission mission-codex --dry-run -- --ask-for-approval on-request
@@ -44,12 +46,13 @@ npm run klemm -- monitor status --mission mission-codex
 npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
 npm run klemm -- policy simulate --mission mission-codex --type deployment --target "deploy prod" --external deployment
 npm run klemm -- adapter token add --id codex-local --token "$KLEMM_ADAPTER_TOKEN" --versions 1,2
-npm run klemm -- supervise --capture --mission mission-codex -- npm test
-npm run klemm -- supervised-runs
+npm run klemm -- supervise --capture --record-tree --timeout-ms 60000 --mission mission-codex -- npm test
+npm run klemm -- supervised-runs --details
 npm run klemm -- os snapshot --mission mission-codex --watch-path ./src
 npm run klemm -- os status --mission mission-codex
 npm run klemm -- os permissions
 npm run klemm -- daemon health --url http://127.0.0.1:8765
+npm run klemm -- doctor --pid-file ./data/klemm.pid --log-file ./data/logs/klemm-daemon.log --repair
 npm run klemm -- daemon install --output ./data/com.klemm.daemon.plist
 npm run klemm -- daemon migrate
 npm run klemm -- daemon start --dry-run
@@ -58,6 +61,7 @@ npm run klemm -- daemon kickstart --label com.klemm.daemon --dry-run
 npm run klemm -- daemon bootout --plist ./data/com.klemm.daemon.plist --dry-run
 npm run klemm -- daemon logs --tail 40
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
+npm run klemm -- daemon doctor --pid-file ./data/klemm.pid --repair
 npm run klemm -- install mcp --client codex
 npm run mcp
 ```
@@ -123,19 +127,20 @@ Alignment states:
 
 Interventions currently include `nudge`, `pause`, and `queue`. These are recorded into the audit trail and surfaced in debriefs and Codex context.
 
-`--watch-loop` emits heartbeat evaluations while a long-running process is still active, giving Klemm a live supervisory path instead of only post-run review. `--intercept-output` watches streamed stdout/stderr for risky action attempts such as `git push`, production deploys, credentials, OAuth changes, and destructive deletion; when detected, Klemm queues authority and terminates the supervised process.
+`--watch-loop` emits heartbeat evaluations while a long-running process is still active, giving Klemm a live supervisory path instead of only post-run review. `--intercept-output` watches streamed stdout/stderr for risky action attempts such as `git push`, production deploys, credentials, OAuth changes, and destructive deletion; when detected, Klemm queues authority and terminates the supervised process. Add `--capture --record-tree --timeout-ms <ms>` when you want durable transcripts, pid/process metadata, live-intervention details, and a hard runtime ceiling. Inspect them with `klemm supervised-runs --details`.
 
 ## Context Sync
 
 ```bash
-npm run klemm -- sync add --id chatgpt-export --provider chatgpt --path ./exports/chatgpt.json
+npm run klemm -- sync add --id chatgpt-export --provider chatgpt --path ./exports/chatgpt.json --interval-minutes 60
 npm run klemm -- sync add --id codex-history --provider codex --path ./codex.jsonl
 npm run klemm -- sync add --id chrome-history --provider chrome_history --path "$HOME/Library/Application Support/Google/Chrome/Default/History"
-npm run klemm -- sync run
+npm run klemm -- sync plan
+npm run klemm -- sync run --due
 npm run klemm -- sync status
 ```
 
-Sync sources are local files. Klemm checksums each source, skips unchanged inputs, snapshots imports into the local data directory, copies Chrome SQLite history before reading it, distills evidence-linked memories, and records sync runs for Codex context.
+Sync sources are local files. Klemm checksums each source, skips unchanged inputs, snapshots imports into the local data directory, copies Chrome SQLite history before reading it, distills evidence-linked memories, and records sync runs for Codex context. Scheduled sources use `--interval-minutes`; `sync plan` shows due and waiting sources, while `sync run --due` imports only sources whose `nextRunAt` has arrived and then advances the next run window.
 
 ## Agent Adapter Protocol
 
@@ -157,6 +162,22 @@ npm run klemm -- codex report --adapter-client codex-local --adapter-token "$KLE
 ```
 
 Authenticated adapter calls receive explicit acceptance, negotiated protocol version, and validation details. Bad tokens or unsupported versions are rejected before activity is recorded.
+
+Embeddable agents can use `src/klemm-adapter-sdk.js` to produce conformant envelopes:
+
+```js
+import { createKlemmAdapterClient } from "./src/klemm-adapter-sdk.js";
+
+const klemm = createKlemmAdapterClient({
+  adapterClientId: "codex-local",
+  adapterToken: process.env.KLEMM_ADAPTER_TOKEN,
+  protocolVersion: 2,
+  missionId: "mission-codex",
+  agentId: "agent-codex",
+});
+
+const envelope = klemm.toolCall({ tool: "shell", command: "npm test", summary: "Run tests" });
+```
 
 ## Policy Engine
 
@@ -186,7 +207,10 @@ npm run klemm -- daemon logs --tail 40
 npm run klemm -- daemon --host 127.0.0.1 --port 8765 --pid-file ./data/klemm.pid
 npm run klemm -- daemon health --url http://127.0.0.1:8765
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
+npm run klemm -- doctor --pid-file ./data/klemm.pid --log-file ./data/logs/klemm-daemon.log --repair
 ```
+
+`klemm doctor` and `klemm daemon doctor` migrate the local store, inspect pid/log/health readiness, record the check in the local store, and can repair stale pid files with `--repair`.
 
 Local endpoints:
 
@@ -298,7 +322,7 @@ This renders a LaunchAgent plist for a non-privileged Klemm daemon. Installing/l
 
 ## Terminal Dashboard
 
-`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, unresolved queue, memory candidates, recent interventions, and recent events. Focused views are available with `--view overview|memory|queue|agents|policies|model|logs`.
+`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, unresolved queue, memory candidates, recent interventions, and recent events. Focused views are available with `--view overview|memory|queue|agents|policies|model|logs|trust`. Use `--view trust --decision <decision-id>` to drill into risk factors, matched policies, and the decision explanation.
 
 `klemm tui --interactive` accepts stdin commands:
 
@@ -313,7 +337,7 @@ This renders a LaunchAgent plist for a non-privileged Klemm daemon. Installing/l
 
 ## Supervised Capture
 
-`klemm supervise --capture` records stdout, stderr, exit code, duration, and file changes for a supervised process. Use `klemm supervised-runs` to inspect captured runs.
+`klemm supervise --capture` records stdout, stderr, exit code, duration, and file changes for a supervised process. With `--record-tree`, `--timeout-ms`, and `--intercept-output`, captured runs also include pid/process metadata, timeout state, termination signal, and live interventions. Use `klemm supervised-runs --details` to inspect captured runs.
 
 ## Codex Skill
 

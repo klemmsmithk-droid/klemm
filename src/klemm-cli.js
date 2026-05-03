@@ -9,6 +9,7 @@ import { join, relative } from "node:path";
 import {
   addContextSyncSource,
   addAdapterClient,
+  buildContextSyncPlan,
   buildUserModelSummary,
   buildCodexContext,
   addStructuredPolicy,
@@ -109,6 +110,7 @@ async function main() {
     }
     if (command === "user" && args[1] === "model") return printUserModel(args.slice(2));
     if (command === "sync" && args[1] === "add") return addSyncSourceFromCli(args.slice(2));
+    if (command === "sync" && args[1] === "plan") return printContextSyncPlan(args.slice(2));
     if (command === "sync" && args[1] === "run") return await runContextSyncFromCli(args.slice(2));
     if (command === "sync" && args[1] === "status") return printSyncStatus(args.slice(2));
     if (command === "onboard") return await onboardFromCli(args.slice(1));
@@ -116,7 +118,7 @@ async function main() {
     if (command === "tui") return await printTui(args.slice(1));
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
     if (command === "supervise") return await superviseFromCli(args.slice(1));
-    if (command === "supervised-runs") return printSupervisedRuns();
+    if (command === "supervised-runs") return printSupervisedRuns(args.slice(1));
     if (command === "monitor" && args[1] === "status") return printMonitorStatus(args.slice(2));
     if (command === "monitor" && args[1] === "evaluate") return evaluateMonitorFromCli(args.slice(2));
     if (command === "policy" && args[1] === "add") return addPolicyFromCli(args.slice(2));
@@ -128,6 +130,7 @@ async function main() {
     if (command === "os" && args[1] === "snapshot") return await recordOsSnapshotFromCli(args.slice(2));
     if (command === "os" && args[1] === "status") return printOsStatus(args.slice(2));
     if (command === "os" && args[1] === "permissions") return printOsPermissions();
+    if (command === "doctor") return await doctorFromCli(args.slice(1));
     if (command === "daemon") {
       await startDaemonFromCli(args.slice(1));
       return;
@@ -284,6 +287,7 @@ async function setupKlemmFromCli(args) {
 }
 
 async function startDaemonFromCli(args) {
+  if (args[0] === "doctor") return await doctorFromCli(args.slice(1));
   if (args[0] === "health") return await printDaemonHealth(args.slice(1));
   if (args[0] === "install") return await installDaemonFromCli(args.slice(1));
   if (args[0] === "migrate") return migrateDaemonStoreFromCli(args.slice(1));
@@ -323,6 +327,74 @@ async function startDaemonFromCli(args) {
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
   });
+}
+
+async function doctorFromCli(args) {
+  const flags = parseFlags(args);
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const pidFile = flags.pidFile ?? join(dataDir, "klemm.pid");
+  const logFile = flags.logFile ?? join(dataDir, "logs", "klemm-daemon.log");
+  const url = flags.url ?? `http://${flags.host ?? "127.0.0.1"}:${flags.port ?? process.env.KLEMM_PORT ?? 8765}`;
+  const checks = [];
+  let exitCode = 0;
+
+  const migrated = store.update((state) => migrateKlemmState(state));
+  checks.push({ name: "Store", status: "ok", detail: `Schema version: ${migrated.schemaVersion ?? migrated.version ?? 1}` });
+
+  const pid = await readPidFile(pidFile);
+  if (!pid) {
+    checks.push({ name: "PID file", status: existsSync(pidFile) ? "invalid" : "missing", detail: pidFile });
+  } else if (isProcessRunning(pid)) {
+    checks.push({ name: "PID file", status: "running", detail: `PID: ${pid}` });
+  } else if (flags.repair) {
+    try {
+      await unlink(pidFile);
+    } catch {
+      // Already removed by another lifecycle command.
+    }
+    checks.push({ name: "PID file", status: "stale repaired", detail: `Removed stale PID ${pid}` });
+  } else {
+    checks.push({ name: "PID file", status: "stale", detail: `PID: ${pid}` });
+    exitCode = 1;
+  }
+
+  checks.push({ name: "Logs", status: existsSync(logFile) ? "ok" : "missing", detail: logFile });
+
+  if (flags.skipHealth) {
+    checks.push({ name: "Health", status: "skipped", detail: url });
+  } else {
+    try {
+      const response = await fetch(`${String(url).replace(/\/$/, "")}/api/health`);
+      checks.push({ name: "Health", status: response.ok ? "ok" : `http_${response.status}`, detail: url });
+      if (!response.ok) exitCode = 1;
+    } catch (error) {
+      checks.push({ name: "Health", status: "unreachable", detail: error.message });
+      exitCode = 1;
+    }
+  }
+
+  store.update((state) => ({
+    ...state,
+    daemonChecks: [
+      {
+        id: `doctor-${Date.now()}`,
+        dataDir,
+        pidFile,
+        logFile,
+        url,
+        checks,
+        createdAt: new Date().toISOString(),
+      },
+      ...(state.daemonChecks ?? []),
+    ],
+  }));
+
+  console.log("Klemm doctor");
+  for (const check of checks) {
+    console.log(`${check.name}: ${check.status}`);
+    if (check.name === "Store") console.log(check.detail);
+  }
+  process.exitCode = exitCode;
 }
 
 async function installDaemonFromCli(args) {
@@ -1036,12 +1108,32 @@ function addSyncSourceFromCli(args) {
       provider: flags.provider,
       path: flags.path,
       sourceRef: flags.ref ?? flags.path,
+      intervalMinutes: flags.intervalMinutes,
+      nextRunAt: flags.nextRunAt,
+      now: flags.now,
     }),
   );
   const source = next.contextSyncSources.find((item) => item.id === flags.id);
   console.log(`Sync source added: ${source.id}`);
   console.log(`Provider: ${source.provider}`);
   console.log(`Path: ${source.path}`);
+  if (source.intervalMinutes) console.log(`Interval minutes: ${source.intervalMinutes}`);
+  if (source.nextRunAt) console.log(`Next run: ${source.nextRunAt}`);
+}
+
+function printContextSyncPlan(args) {
+  const flags = parseFlags(args);
+  const plan = buildContextSyncPlan(store.getState(), {
+    id: flags.id,
+    now: flags.now,
+  });
+  console.log("Context sync plan");
+  console.log(`Now: ${plan.now}`);
+  console.log(`Sources: ${plan.planned.length}`);
+  console.log(`Due sources: ${plan.due.length}`);
+  for (const item of plan.planned) {
+    console.log(`- ${item.sourceId} ${item.reason} next=${item.nextRunAt} interval=${item.intervalMinutes}`);
+  }
 }
 
 async function onboardFromCli(args) {
@@ -1100,27 +1192,34 @@ async function onboardFromCli(args) {
 async function runContextSyncFromCli(args) {
   const flags = parseFlags(args);
   const state = store.getState();
-  const sources = (state.contextSyncSources ?? []).filter((source) => source.enabled !== false && (!flags.id || source.id === flags.id));
+  const plan = buildContextSyncPlan(state, { id: flags.id, now: flags.now });
+  const sources = flags.due
+    ? plan.due.map((item) => item.source)
+    : (state.contextSyncSources ?? []).filter((source) => source.enabled !== false && (!flags.id || source.id === flags.id));
   let imported = 0;
   let skipped = 0;
   let quarantined = 0;
+  let scheduled = 0;
   for (const source of sources) {
-    const result = await syncOneSource(source);
+    const result = await syncOneSource(source, { dueRun: Boolean(flags.due), now: flags.now });
     imported += result.imported ? 1 : 0;
     skipped += result.skipped ? 1 : 0;
     quarantined += result.quarantinedCount;
+    scheduled += result.nextRunAt ? 1 : 0;
   }
   console.log("Context sync complete");
   console.log(`Sources: ${sources.length}`);
   console.log(`Imported: ${imported}`);
   console.log(`Skipped unchanged: ${skipped}`);
   console.log(`Quarantined: ${quarantined}`);
+  console.log(`Scheduled next: ${scheduled}`);
 }
 
-async function syncOneSource(source) {
-  const startedAt = new Date().toISOString();
+async function syncOneSource(source, { dueRun = false, now } = {}) {
+  const startedAt = now ?? new Date().toISOString();
   const buffer = await readFile(source.path);
   const checksum = createHash("sha256").update(buffer).digest("hex");
+  const nextRunAt = computeNextRunAt(source, startedAt);
   if (checksum === source.lastChecksum) {
     const runState = store.update((state) =>
       recordContextSyncRun(state, {
@@ -1130,6 +1229,8 @@ async function syncOneSource(source) {
         status: "skipped_unchanged",
         checksum,
         skippedCount: 1,
+        dueRun,
+        nextRunAt,
         startedAt,
       }),
     );
@@ -1137,9 +1238,10 @@ async function syncOneSource(source) {
     store.update((state) =>
       updateContextSyncSource(state, source.id, {
         lastRunId: run.id,
+        nextRunAt,
       }),
     );
-    return { skipped: true, quarantinedCount: 0 };
+    return { skipped: true, quarantinedCount: 0, nextRunAt };
   }
 
   const snapshotPath = await snapshotSyncSource(source, buffer);
@@ -1164,6 +1266,8 @@ async function syncOneSource(source) {
       distilledCount: importedState.memories.length - before.memories.length,
       quarantinedCount: memorySource.quarantinedCount ?? 0,
       snapshotPath,
+      dueRun,
+      nextRunAt,
       startedAt,
     }),
   );
@@ -1173,9 +1277,16 @@ async function syncOneSource(source) {
       lastChecksum: checksum,
       lastImportedAt: run.finishedAt,
       lastRunId: run.id,
+      nextRunAt,
     }),
   );
-  return { imported: true, quarantinedCount: memorySource.quarantinedCount ?? 0 };
+  return { imported: true, quarantinedCount: memorySource.quarantinedCount ?? 0, nextRunAt };
+}
+
+function computeNextRunAt(source, now) {
+  const intervalMinutes = Number(source.intervalMinutes ?? 0);
+  if (intervalMinutes <= 0) return undefined;
+  return new Date(Date.parse(now) + intervalMinutes * 60_000).toISOString();
 }
 
 async function snapshotSyncSource(source, buffer) {
@@ -1217,7 +1328,7 @@ function printDebrief(args) {
 
 async function printTui(args) {
   const flags = parseFlags(args);
-  console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: flags.view ?? "overview", logFile: flags.logFile }));
+  console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: flags.view ?? "overview", logFile: flags.logFile, decision: flags.decision }));
   if (!flags.interactive) return;
 
   console.log("Interactive Klemm TUI");
@@ -1230,7 +1341,7 @@ async function printTui(args) {
     }
     const [command, subcommand, id, ...noteParts] = splitShellLike(line);
     if (command === "tab") {
-      console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: subcommand ?? "overview", logFile: flags.logFile }));
+      console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: subcommand ?? "overview", logFile: flags.logFile, decision: flags.decision }));
       continue;
     }
     if (command === "model") {
@@ -1249,7 +1360,7 @@ async function printTui(args) {
   }
 }
 
-function renderTuiView(state, { missionId, view = "overview", logFile } = {}) {
+function renderTuiView(state, { missionId, view = "overview", logFile, decision: decisionId } = {}) {
   const normalized = String(view ?? "overview").toLowerCase();
   const header = ["Klemm TUI", `View: ${normalized}`];
   if (normalized === "overview") return [...header, renderKlemmDashboard(state, { missionId })].join("\n");
@@ -1286,7 +1397,32 @@ function renderTuiView(state, { missionId, view = "overview", logFile } = {}) {
   if (normalized === "logs") {
     return [...header, "Logs", `Log file: ${logFile ?? join(KLEMM_DATA_DIR, "logs", "klemm-daemon.log")}`].join("\n");
   }
+  if (normalized === "trust" || normalized === "decision") {
+    const decision = state.decisions.find((item) => item.id === decisionId) ?? state.decisions[0];
+    return [...header, renderDecisionDetail(decision)].join("\n");
+  }
   return [...header, `Unknown view: ${view}`].join("\n");
+}
+
+function renderDecisionDetail(decision) {
+  if (!decision) return "Decision Detail\n- none";
+  return [
+    "Decision Detail",
+    `${decision.id} ${decision.decision} ${decision.riskLevel} score=${decision.riskScore ?? "n/a"}`,
+    `Actor: ${decision.actor}`,
+    `Action: ${decision.actionType} ${decision.target}`,
+    `Reason: ${decision.reason}`,
+    "Risk factors:",
+    ...((decision.riskFactors ?? []).length
+      ? decision.riskFactors.map((factor) => `- ${factor.id}: ${factor.label ?? factor.reason ?? factor.weight ?? ""}`)
+      : ["- none"]),
+    "Matched policies:",
+    ...((decision.matchedPolicies ?? []).length
+      ? decision.matchedPolicies.map((policy) => `- ${policy.id}: ${policy.name}`)
+      : ["- none"]),
+    "Explanation:",
+    decision.explanation?.summary ?? decision.reason ?? "No explanation recorded.",
+  ].join("\n");
 }
 
 async function superviseFromCli(args) {
@@ -1316,6 +1452,8 @@ async function superviseFromCli(args) {
       missionId: flags.mission,
       watchLoop: flags.watchLoop,
       watchIntervalMs: flags.watchIntervalMs,
+      recordTree: flags.recordTree,
+      timeoutMs: flags.timeoutMs,
       onLiveOutput: flags.interceptOutput ? buildLiveOutputInterceptor(flags) : null,
     });
     if (flags.capture) persistCapturedRun(flags, decision.rewrite, result, commandCwd);
@@ -1341,6 +1479,8 @@ async function superviseFromCli(args) {
     missionId: flags.mission,
     watchLoop: flags.watchLoop,
     watchIntervalMs: flags.watchIntervalMs,
+    recordTree: flags.recordTree,
+    timeoutMs: flags.timeoutMs,
     onLiveOutput: flags.interceptOutput ? buildLiveOutputInterceptor(flags) : null,
   });
   if (flags.capture) persistCapturedRun(flags, target, result, commandCwd);
@@ -1411,13 +1551,26 @@ async function runRuntimeFromCli(args) {
     console.log("Klemm rewrote runtime command");
     console.log(`Rewrite: ${decision.rewrite}`);
   }
-  const result = await runSupervisedProcess(commandToRun, { cwd: commandCwd, capture: flags.capture });
+  const result = await runSupervisedProcess(commandToRun, {
+    cwd: commandCwd,
+    capture: flags.capture,
+    recordTree: flags.recordTree,
+    timeoutMs: flags.timeoutMs,
+  });
   if (flags.capture) persistCapturedRun(flags, commandToRun.join(" "), result, commandCwd);
   console.log(`Klemm runtime exit: ${result.status}`);
   process.exitCode = result.status;
 }
 
-async function runSupervisedProcess(command, { cwd = process.cwd(), capture = false, watchLoop = false, watchIntervalMs = 1000, onLiveOutput = null } = {}) {
+async function runSupervisedProcess(command, {
+  cwd = process.cwd(),
+  capture = false,
+  watchLoop = false,
+  watchIntervalMs = 1000,
+  recordTree = false,
+  timeoutMs,
+  onLiveOutput = null,
+} = {}) {
   const startedAt = new Date().toISOString();
   const beforeSnapshot = capture ? await snapshotFiles(cwd) : new Map();
   const started = Date.now();
@@ -1428,12 +1581,32 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
       stdio: ["ignore", "pipe", "pipe"],
     });
     let heartbeat;
+    let timeout;
+    let terminationSignal;
+    let timedOut = false;
+    const processTree = recordTree
+      ? [
+          {
+            pid: child.pid,
+            command: command.join(" "),
+            relationship: "root",
+          },
+        ]
+      : [];
     if (watchLoop) {
       const interval = Math.max(25, Number(watchIntervalMs ?? 1000));
       heartbeat = setInterval(() => {
         const elapsedMs = Date.now() - started;
         process.stdout.write(`Klemm heartbeat: ${elapsedMs}ms elapsed for ${command.join(" ")}\n`);
       }, interval);
+    }
+    if (timeoutMs) {
+      timeout = setTimeout(() => {
+        timedOut = true;
+        terminationSignal = "SIGTERM";
+        process.stdout.write(`Klemm timeout intervention: ${timeoutMs}ms elapsed for ${command.join(" ")}\n`);
+        child.kill("SIGTERM");
+      }, Number(timeoutMs));
     }
     let stdout = "";
     let stderr = "";
@@ -1455,6 +1628,7 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
         command: command.join(" "),
       });
       if (liveIntervention) {
+        terminationSignal = "SIGTERM";
         process.stdout.write(`Klemm live intervention: ${liveIntervention.decision.decision} ${liveIntervention.decision.actionType} ${liveIntervention.decision.id}\n`);
         child.kill("SIGTERM");
       }
@@ -1467,11 +1641,22 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
     });
     child.on("error", (error) => {
       if (heartbeat) clearInterval(heartbeat);
+      if (timeout) clearTimeout(timeout);
       reject(error);
     });
-    child.on("close", (status) => {
+    child.on("close", (status, signal) => {
       if (heartbeat) clearInterval(heartbeat);
-      resolve({ status: liveIntervention ? 2 : status ?? 1, stdout, stderr, liveInterventions: liveIntervention ? [liveIntervention] : [] });
+      if (timeout) clearTimeout(timeout);
+      resolve({
+        status: liveIntervention || timedOut ? 2 : status ?? 1,
+        stdout,
+        stderr,
+        pid: child.pid,
+        processTree,
+        terminationSignal: terminationSignal ?? signal,
+        timedOut,
+        liveInterventions: liveIntervention ? [liveIntervention] : [],
+      });
     });
   });
   const afterSnapshot = capture ? await snapshotFiles(cwd) : new Map();
@@ -1555,11 +1740,16 @@ function persistCapturedRun(flags, command, result, cwd) {
       missionId: flags.mission,
       command,
       cwd,
+      pid: result.pid,
+      processTree: result.processTree,
+      terminationSignal: result.terminationSignal,
+      timedOut: result.timedOut,
       exitCode: result.status,
       durationMs: result.durationMs,
       stdout: result.stdout.trim(),
       stderr: result.stderr.trim(),
       fileChanges: result.fileChanges,
+      liveInterventions: result.liveInterventions,
       startedAt: result.startedAt,
       finishedAt: result.finishedAt,
     }),
@@ -1567,7 +1757,8 @@ function persistCapturedRun(flags, command, result, cwd) {
   console.log(`Capture ID: ${next.supervisedRuns[0].id}`);
 }
 
-function printSupervisedRuns() {
+function printSupervisedRuns(args = []) {
+  const flags = parseFlags(args);
   const runs = store.getState().supervisedRuns ?? [];
   console.log("Supervised runs");
   if (runs.length === 0) {
@@ -1575,8 +1766,11 @@ function printSupervisedRuns() {
     return;
   }
   for (const run of runs) {
+    const detail = flags.details
+      ? ` pid=${run.pid ?? "unknown"} tree=${run.processTree?.length ?? 0} termination=${run.terminationSignal ?? "none"} interventions=${run.liveInterventions?.length ?? 0}`
+      : "";
     console.log(
-      `- ${run.id} mission=${run.missionId ?? "none"} exit=${run.exitCode} durationMs=${run.durationMs} files=${run.fileChanges.join(",") || "none"} stdout=${oneLine(run.stdout)} stderr=${oneLine(run.stderr)}`,
+      `- ${run.id} mission=${run.missionId ?? "none"} exit=${run.exitCode} durationMs=${run.durationMs}${detail} files=${run.fileChanges.join(",") || "none"} stdout=${oneLine(run.stdout)} stderr=${oneLine(run.stderr)}`,
     );
   }
 }
@@ -1855,6 +2049,15 @@ async function readPidFile(pidFile) {
   }
 }
 
+function isProcessRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function buildCodexSkillTemplate() {
   return [
     "---",
@@ -2057,15 +2260,16 @@ Commands:
   klemm memory review [--group-by-source]
   klemm memory promote-policy <memory-id> [--action-types git_push] [--target-includes github]
   klemm user model [--pending]
-  klemm sync add --id source-id --provider codex --path export.jsonl
-  klemm sync run [--id source-id]
+  klemm sync add --id source-id --provider codex --path export.jsonl [--interval-minutes 30]
+  klemm sync plan [--id source-id]
+  klemm sync run [--id source-id] [--due]
   klemm sync status
   klemm onboard --stdin
   klemm debrief [--mission mission-id]
-  klemm tui [--mission mission-id] [--view overview|memory|queue|agents|policies|model|logs] [--interactive]
-  klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] -- [args...]
-  klemm supervise [--mission mission-id] [--capture] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
-  klemm supervised-runs
+  klemm tui [--mission mission-id] [--view overview|memory|queue|agents|policies|model|logs|trust] [--decision decision-id] [--interactive]
+  klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
+  klemm supervise [--mission mission-id] [--capture] [--record-tree] [--timeout-ms 60000] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
+  klemm supervised-runs [--details]
   klemm monitor status [--mission mission-id]
   klemm monitor evaluate [--mission mission-id] [--agent agent-id]
   klemm policy add --id policy-id --name "..." --action-types deployment --target-includes prod
@@ -2077,7 +2281,8 @@ Commands:
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions
-  klemm daemon install|migrate|start|stop|restart|logs|bootstrap|bootout|kickstart
+  klemm doctor [--pid-file path] [--log-file path] [--repair]
+  klemm daemon install|migrate|start|stop|restart|logs|doctor|bootstrap|bootout|kickstart
   klemm daemon [--host 127.0.0.1] [--port 8765] [--pid-file path]
   klemm daemon health [--url http://127.0.0.1:8765]
   klemm daemon status --pid-file path

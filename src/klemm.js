@@ -40,6 +40,7 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     onboardingProfiles: [],
     watchPaths: [],
     adapterClients: [],
+    daemonChecks: [],
     schemaMigrations: [],
     policies: [],
     imports: [],
@@ -732,6 +733,8 @@ export function migrateKlemmState(state, { now = new Date().toISOString(), targe
     setupRuns: state.setupRuns ?? [],
     onboardingProfiles: state.onboardingProfiles ?? [],
     watchPaths: state.watchPaths ?? [],
+    adapterClients: state.adapterClients ?? [],
+    daemonChecks: state.daemonChecks ?? [],
     schemaMigrations: state.schemaMigrations ?? [],
     policies: state.policies ?? [],
     agentActivities: state.agentActivities ?? [],
@@ -765,12 +768,15 @@ export function migrateKlemmState(state, { now = new Date().toISOString(), targe
 export function addContextSyncSource(state, options = {}) {
   const now = options.now ?? new Date().toISOString();
   const id = options.id ?? `sync-source-${compactTimestamp(now)}-${(state.contextSyncSources?.length ?? 0) + 1}`;
+  const intervalMinutes = Number(options.intervalMinutes ?? options.interval ?? 0);
   const source = {
     id,
     provider: normalizeContextProvider(options.provider ?? "unknown"),
     path: options.path ?? options.filePath,
     sourceRef: options.sourceRef ?? options.path ?? options.provider ?? "unknown",
     enabled: options.enabled ?? true,
+    intervalMinutes,
+    nextRunAt: options.nextRunAt ?? (intervalMinutes > 0 ? now : undefined),
     lastChecksum: options.lastChecksum,
     lastImportedAt: options.lastImportedAt,
     lastRunId: options.lastRunId,
@@ -825,6 +831,8 @@ export function recordContextSyncRun(state, options = {}) {
     distilledCount: Number(options.distilledCount ?? 0),
     quarantinedCount: Number(options.quarantinedCount ?? 0),
     snapshotPath: options.snapshotPath,
+    dueRun: Boolean(options.dueRun),
+    nextRunAt: options.nextRunAt,
     startedAt: options.startedAt ?? now,
     finishedAt: now,
   };
@@ -842,6 +850,36 @@ export function recordContextSyncRun(state, options = {}) {
       summary: `${run.sourceId ?? run.provider} sync ${run.status}.`,
     },
   );
+}
+
+export function buildContextSyncPlan(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const sourceId = options.id ?? options.sourceId;
+  const nowMs = Date.parse(now);
+  const planned = (state.contextSyncSources ?? [])
+    .filter((source) => source.enabled !== false)
+    .filter((source) => !sourceId || source.id === sourceId)
+    .map((source) => {
+      const intervalMinutes = Number(source.intervalMinutes ?? 0);
+      const nextRunAt = source.nextRunAt ?? source.lastImportedAt ?? source.createdAt ?? now;
+      const due = intervalMinutes <= 0 || Date.parse(nextRunAt) <= nowMs;
+      return {
+        source,
+        sourceId: source.id,
+        provider: source.provider,
+        due,
+        nextRunAt,
+        intervalMinutes,
+        reason: due ? "due" : "waiting",
+      };
+    });
+
+  return {
+    now,
+    planned,
+    due: planned.filter((item) => item.due),
+    waiting: planned.filter((item) => !item.due),
+  };
 }
 
 export function reviewMemory(state, options = {}) {
@@ -1059,11 +1097,16 @@ export function recordSupervisedRun(state, options = {}) {
     missionId: options.missionId,
     command: options.command ?? "",
     cwd: options.cwd ?? "",
+    pid: options.pid,
+    processTree: options.processTree ?? [],
+    terminationSignal: options.terminationSignal,
+    timedOut: Boolean(options.timedOut),
     exitCode: options.exitCode ?? 0,
     durationMs: options.durationMs ?? 0,
     stdout: clipTranscript(options.stdout ?? ""),
     stderr: clipTranscript(options.stderr ?? ""),
     fileChanges: options.fileChanges ?? [],
+    liveInterventions: options.liveInterventions ?? [],
     startedAt: options.startedAt ?? now,
     finishedAt: now,
   };
