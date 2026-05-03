@@ -87,6 +87,21 @@ export function createKlemmHttpServer({ getState, saveState }) {
         return runTool(response, "get_os_status", { missionId: url.searchParams.get("mission") }, { getState, saveState });
       }
 
+      if (request.method === "POST" && url.pathname === "/api/monitor/activity") {
+        return runTool(response, "record_agent_activity", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/monitor/evaluate") {
+        return runTool(response, "evaluate_agent_alignment", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/monitor/status") {
+        return runTool(response, "get_agent_monitor", {
+          missionId: url.searchParams.get("mission"),
+          agentId: url.searchParams.get("agent"),
+        }, { getState, saveState });
+      }
+
       sendJson(response, 404, { error: "not_found" });
     } catch (error) {
       sendJson(response, 500, { error: error.message });

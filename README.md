@@ -25,6 +25,9 @@ npm run klemm -- tui --interactive --mission mission-codex
 npm run klemm -- debrief --mission mission-codex
 npm run klemm -- run codex --mission mission-codex --dry-run -- --ask-for-approval on-request
 npm run klemm -- run shell --mission mission-codex -- node -e "console.log('safe local work')"
+npm run klemm -- supervise --watch --mission mission-codex -- npm test
+npm run klemm -- monitor status --mission mission-codex
+npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
 npm run klemm -- supervise --capture --mission mission-codex -- npm test
 npm run klemm -- supervised-runs
 npm run klemm -- os snapshot --mission mission-codex --watch-path ./src
@@ -46,6 +49,26 @@ npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe
 `klemm run` is the named agent runtime wrapper. It registers the profile as a supervised agent, normalizes the launch command into an authority proposal, blocks or queues risky launches before execution, and can run in `--dry-run` mode for adapter dogfooding.
 
 `klemm supervise` remains the lower-level process wrapper for direct commands. Both surfaces classify commands before launch. High-risk commands are queued before execution. Safe rewrites can replace a broad reversible command with a narrower command.
+
+## Continuous Agent Monitor
+
+```bash
+npm run klemm -- supervise --watch --mission mission-codex -- npm test
+npm run klemm -- monitor status --mission mission-codex
+npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
+```
+
+Klemm continuously observes supervised agent work as an activity stream. `supervise --watch` records the command, exit status, file changes when capture is enabled, transcript excerpts, and duration, then evaluates alignment against the active mission.
+
+Alignment states:
+
+- `on_track`: recent work matches the mission.
+- `needs_nudge`: the agent hit a soft failure or needs course correction.
+- `scope_drift`: the agent appears to be working outside the mission.
+- `stuck`: repeated failures suggest the agent is looping or blocked.
+- `unsafe`: observed work contains a dangerous pattern that should be queued.
+
+Interventions currently include `nudge`, `pause`, and `queue`. These are recorded into the audit trail and surfaced in debriefs and Codex context.
 
 ## Policy Engine
 
@@ -77,6 +100,9 @@ Local endpoints:
 - `POST /api/supervised-runs`
 - `POST /api/os/observations`
 - `GET /api/os/status?mission=<id>`
+- `POST /api/monitor/activity`
+- `POST /api/monitor/evaluate`
+- `GET /api/monitor/status?mission=<id>&agent=<id>`
 - `GET /api/debrief?mission=<id>`
 
 ## OS Observation Layer

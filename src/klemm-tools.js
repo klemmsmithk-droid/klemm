@@ -1,9 +1,11 @@
 import {
   distillMemory,
   buildCodexContext,
+  evaluateAgentAlignment,
   getKlemmStatus,
   ingestMemoryExport,
   proposeAction,
+  recordAgentActivity,
   recordAgentEvent,
   recordOsObservation,
   recordQueuedDecision,
@@ -82,6 +84,18 @@ export const KLEMM_MCP_TOOLS = [
     name: "get_os_status",
     description: "Return recent OS observations for a mission.",
   },
+  {
+    name: "record_agent_activity",
+    description: "Record observed agent work into Klemm's continuous activity stream.",
+  },
+  {
+    name: "evaluate_agent_alignment",
+    description: "Evaluate recent agent activity against the current mission and user authority model.",
+  },
+  {
+    name: "get_agent_monitor",
+    description: "Return recent agent activities, alignment reports, and active interventions for a mission.",
+  },
 ];
 
 export function executeKlemmTool(name, args = {}, { state } = {}) {
@@ -130,6 +144,23 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
       result: {
         event: nextState.agentEvents[0],
         decision: args.action?.id ? nextState.decisions.find((decision) => decision.id === args.action.id) : null,
+      },
+    };
+  }
+
+  if (name === "record_agent_activity") {
+    const nextState = recordAgentActivity(state, args);
+    return { state: nextState, result: { activity: nextState.agentActivities[0] } };
+  }
+
+  if (name === "evaluate_agent_alignment") {
+    const nextState = evaluateAgentAlignment(state, args);
+    const alignmentReport = nextState.alignmentReports[0];
+    return {
+      state: nextState,
+      result: {
+        alignmentReport,
+        intervention: nextState.agentInterventions.find((intervention) => intervention.alignmentReportId === alignmentReport.id) ?? null,
       },
     };
   }
@@ -216,5 +247,31 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
     };
   }
 
+  if (name === "get_agent_monitor") {
+    return {
+      state,
+      result: buildAgentMonitorResult(state, args),
+    };
+  }
+
   throw new Error(`Unknown Klemm tool: ${name}`);
+}
+
+function buildAgentMonitorResult(state, args = {}) {
+  const missionId = args.missionId;
+  const agentId = args.agentId;
+  return {
+    activities: (state.agentActivities ?? [])
+      .filter((activity) => !missionId || activity.missionId === missionId)
+      .filter((activity) => !agentId || activity.agentId === agentId)
+      .slice(0, args.limit ?? 20),
+    alignmentReports: (state.alignmentReports ?? [])
+      .filter((report) => !missionId || report.missionId === missionId)
+      .filter((report) => !agentId || report.agentId === agentId)
+      .slice(0, args.limit ?? 20),
+    interventions: (state.agentInterventions ?? [])
+      .filter((intervention) => !missionId || intervention.missionId === missionId)
+      .filter((intervention) => !agentId || intervention.agentId === agentId)
+      .slice(0, args.limit ?? 20),
+  };
 }

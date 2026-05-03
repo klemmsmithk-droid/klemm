@@ -185,6 +185,48 @@ test("Klemm daemon exposes OS observation snapshot and status endpoints", async 
   }
 });
 
+test("Klemm daemon exposes agent activity monitor endpoints", async () => {
+  let state = createInitialKlemmState({ now: "2026-05-03T12:00:00.000Z" });
+  const server = createKlemmHttpServer({
+    getState: () => state,
+    saveState: (next) => {
+      state = next;
+    },
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+
+  try {
+    await requestJson(port, "/api/mission/start", {
+      id: "mission-api-monitor",
+      goal: "Run reliable tests.",
+    });
+    const activity = await requestJson(port, "/api/monitor/activity", {
+      missionId: "mission-api-monitor",
+      agentId: "agent-codex",
+      type: "command",
+      summary: "npm test failed",
+      target: "npm test",
+      exitCode: 1,
+    });
+    assert.equal(activity.activity.agentId, "agent-codex");
+
+    const evaluated = await requestJson(port, "/api/monitor/evaluate", {
+      missionId: "mission-api-monitor",
+      agentId: "agent-codex",
+    });
+    assert.equal(evaluated.alignmentReport.state, "needs_nudge");
+    assert.equal(evaluated.intervention.type, "nudge");
+
+    const status = await getJson(port, "/api/monitor/status?mission=mission-api-monitor");
+    assert.equal(status.activities.length, 1);
+    assert.equal(status.alignmentReports[0].state, "needs_nudge");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 async function getJson(port, path) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`);
   assert.equal(response.status, 200);

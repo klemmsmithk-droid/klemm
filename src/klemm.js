@@ -32,6 +32,9 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     imports: [],
     supervisedRuns: [],
     osObservations: [],
+    agentActivities: [],
+    alignmentReports: [],
+    agentInterventions: [],
     rejectedMemoryInputs: [],
     auditEvents: [
       {
@@ -433,6 +436,94 @@ export function recordAgentEvent(state, options = {}) {
   });
 }
 
+export function recordAgentActivity(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const mission = findMission(state, options.missionId);
+  const activity = {
+    id: options.id ?? `activity-${compactTimestamp(now)}-${(state.agentActivities?.length ?? 0) + 1}`,
+    missionId: options.missionId ?? mission?.id,
+    agentId: options.agentId ?? options.actor ?? "unknown_agent",
+    type: normalizeActivityType(options.type),
+    summary: options.summary ?? "Agent activity recorded.",
+    target: options.target ?? "",
+    command: options.command ?? "",
+    exitCode: options.exitCode,
+    fileChanges: options.fileChanges ?? [],
+    evidence: options.evidence ?? {},
+    createdAt: now,
+  };
+
+  return updateState(
+    {
+      ...state,
+      agentActivities: [activity, ...(state.agentActivities ?? [])],
+    },
+    now,
+    {
+      type: "agent_activity_recorded",
+      at: now,
+      missionId: activity.missionId,
+      agentId: activity.agentId,
+      activityId: activity.id,
+      summary: `${activity.type}: ${activity.summary}`,
+    },
+  );
+}
+
+export function evaluateAgentAlignment(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const mission = findMission(state, options.missionId);
+  const missionId = options.missionId ?? mission?.id;
+  const agentId = options.agentId;
+  const activities = (state.agentActivities ?? [])
+    .filter((activity) => !missionId || activity.missionId === missionId)
+    .filter((activity) => !agentId || activity.agentId === agentId)
+    .slice(0, 12);
+  const evaluation = classifyAlignment({ mission, activities });
+  const report = {
+    id: options.id ?? `alignment-${compactTimestamp(now)}-${(state.alignmentReports?.length ?? 0) + 1}`,
+    missionId,
+    agentId: agentId ?? activities[0]?.agentId ?? "unknown_agent",
+    state: evaluation.state,
+    reason: evaluation.reason,
+    confidence: evaluation.confidence,
+    evidenceActivityIds: activities.slice(0, 5).map((activity) => activity.id),
+    createdAt: now,
+  };
+  const intervention = buildAgentIntervention(report, evaluation, mission, now, state.agentInterventions?.length ?? 0);
+  const next = updateState(
+    {
+      ...state,
+      alignmentReports: [report, ...(state.alignmentReports ?? [])],
+      agentInterventions: intervention ? [intervention, ...(state.agentInterventions ?? [])] : state.agentInterventions ?? [],
+    },
+    now,
+    {
+      type: "alignment_evaluated",
+      at: now,
+      missionId,
+      agentId: report.agentId,
+      alignmentReportId: report.id,
+      summary: `${report.agentId} alignment ${report.state}: ${report.reason}`,
+    },
+  );
+
+  if (!intervention) return next;
+
+  return recordAgentEvent(next, {
+    id: `event-${intervention.id}`,
+    missionId,
+    agentId: "klemm-monitor",
+    type: "alignment_intervention",
+    summary: `${intervention.type}: ${intervention.message}`,
+    payload: {
+      alignmentReportId: report.id,
+      intervention,
+    },
+    now,
+  });
+}
+
 export function recordOsObservation(state, observation = {}) {
   const now = observation.observedAt ?? observation.now ?? new Date().toISOString();
   const normalized = {
@@ -527,6 +618,9 @@ export function getKlemmStatus(state, { now = new Date().toISOString() } = {}) {
     importCount: (state.imports ?? []).length,
     supervisedRunCount: (state.supervisedRuns ?? []).length,
     osObservationCount: (state.osObservations ?? []).length,
+    agentActivityCount: (state.agentActivities ?? []).length,
+    alignmentReportCount: (state.alignmentReports ?? []).length,
+    activeInterventionCount: (state.agentInterventions ?? []).filter((intervention) => intervention.status === "active").length,
     recentDecisionCount: state.decisions.length,
     auditEventCount: state.auditEvents.length,
   };
@@ -546,6 +640,8 @@ export function summarizeDebrief(state, { missionId } = {}) {
   const memoryCandidates = state.memories.filter((memory) => memory.status === "pending_review").length;
   const supervisedRuns = mission ? (state.supervisedRuns ?? []).filter((run) => run.missionId === mission.id) : state.supervisedRuns ?? [];
   const osObservations = mission ? (state.osObservations ?? []).filter((observation) => observation.missionId === mission.id) : state.osObservations ?? [];
+  const alignmentReports = mission ? (state.alignmentReports ?? []).filter((report) => report.missionId === mission.id) : state.alignmentReports ?? [];
+  const agentInterventions = mission ? (state.agentInterventions ?? []).filter((intervention) => intervention.missionId === mission.id) : state.agentInterventions ?? [];
   const lines = [
     "Klemm debrief",
     `Mission: ${mission?.id ?? "all"}`,
@@ -561,6 +657,9 @@ export function summarizeDebrief(state, { missionId } = {}) {
     `Memory candidates: ${memoryCandidates}`,
     `Supervised runs: ${supervisedRuns.length}`,
     `OS observations: ${osObservations.length}`,
+    `Agent activities: ${mission ? (state.agentActivities ?? []).filter((activity) => activity.missionId === mission.id).length : (state.agentActivities ?? []).length}`,
+    `Latest alignment: ${alignmentReports[0]?.state ?? "none"}`,
+    `Active interventions: ${agentInterventions.filter((intervention) => intervention.status === "active").length}`,
     "Recent events:",
     ...events.slice(0, 5).map((event) => `- ${event.id} ${event.type}: ${event.summary}`),
     "Recent interventions:",
@@ -583,6 +682,7 @@ export function renderKlemmDashboard(state, { missionId, now = new Date().toISOS
   const events = mission ? (state.agentEvents ?? []).filter((event) => event.missionId === mission.id) : state.agentEvents ?? [];
   const supervisedRuns = mission ? (state.supervisedRuns ?? []).filter((run) => run.missionId === mission.id) : state.supervisedRuns ?? [];
   const osObservations = mission ? (state.osObservations ?? []).filter((observation) => observation.missionId === mission.id) : state.osObservations ?? [];
+  const alignmentReports = mission ? (state.alignmentReports ?? []).filter((report) => report.missionId === mission.id) : state.alignmentReports ?? [];
 
   return [
     "Klemm",
@@ -594,6 +694,7 @@ export function renderKlemmDashboard(state, { missionId, now = new Date().toISOS
     `Events: ${events.length}`,
     `Supervised runs: ${supervisedRuns.length}`,
     `OS observations: ${osObservations.length}`,
+    `Latest alignment: ${alignmentReports[0]?.state ?? "none"}`,
     "Recent interventions",
     ...(decisions.length === 0
       ? ["- none"]
@@ -621,6 +722,9 @@ export function buildCodexContext(state, { missionId, now = new Date().toISOStri
     trustedMemories: state.memories.filter((memory) => memory.status === "approved" || memory.status === "pinned").slice(0, 8),
     supervisedRuns: (state.supervisedRuns ?? []).filter((run) => !mission || run.missionId === mission.id).slice(0, 5),
     osObservations: (state.osObservations ?? []).filter((observation) => !mission || observation.missionId === mission.id).slice(0, 5),
+    agentActivities: (state.agentActivities ?? []).filter((activity) => !mission || activity.missionId === mission.id).slice(0, 8),
+    alignmentReports: (state.alignmentReports ?? []).filter((report) => !mission || report.missionId === mission.id).slice(0, 5),
+    agentInterventions: (state.agentInterventions ?? []).filter((intervention) => !mission || intervention.missionId === mission.id).slice(0, 5),
   };
 }
 
@@ -763,9 +867,16 @@ function normalizeEventType(type) {
     "agent_finished",
     "user_returned",
     "os_observation_alert",
+    "alignment_intervention",
     "agent_event",
   ]);
   return known.has(value) ? value : "agent_event";
+}
+
+function normalizeActivityType(type) {
+  const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
+  const known = new Set(["command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "activity"]);
+  return known.has(value) ? value : "activity";
 }
 
 function findMission(state, missionId) {
@@ -856,6 +967,106 @@ function memoryPolicyMatches(text, haystack) {
 
 function sentence(parts, fallback) {
   return parts.length > 0 ? `${parts.join("; ")}.` : fallback;
+}
+
+function classifyAlignment({ mission, activities }) {
+  if (activities.length === 0) {
+    return {
+      state: "on_track",
+      reason: "No concerning activity has been observed.",
+      confidence: 0.55,
+    };
+  }
+
+  const recentFailures = activities.filter((activity) => activity.type === "command" && Number(activity.exitCode) !== 0 && activity.exitCode !== undefined);
+  if (recentFailures.length >= 3) {
+    return {
+      state: "stuck",
+      reason: `${recentFailures.length} recent failing command(s) suggest the agent is looping or blocked.`,
+      confidence: 0.86,
+    };
+  }
+
+  const unsafe = activities.find((activity) => /\b(rm -rf|sudo|git push|deploy --prod|delete|credential|oauth|secret|token)\b/i.test(`${activity.summary} ${activity.target} ${activity.command}`));
+  if (unsafe) {
+    return {
+      state: "unsafe",
+      reason: `Observed potentially unsafe activity: ${unsafe.summary}`,
+      confidence: 0.84,
+    };
+  }
+
+  const drift = activities.find((activity) => activityLooksOutOfScope(activity, mission));
+  if (drift) {
+    return {
+      state: "scope_drift",
+      reason: `Observed work outside mission scope: ${drift.summary}`,
+      confidence: 0.74,
+    };
+  }
+
+  if (recentFailures.length > 0) {
+    return {
+      state: "needs_nudge",
+      reason: `${recentFailures.length} recent failing command(s) need a course correction before more work continues.`,
+      confidence: 0.68,
+    };
+  }
+
+  return {
+    state: "on_track",
+    reason: "Recent activity matches the mission and no concerning pattern was detected.",
+    confidence: 0.72,
+  };
+}
+
+function buildAgentIntervention(report, evaluation, mission, now, interventionCount) {
+  if (evaluation.state === "on_track") return null;
+  const typeByState = {
+    needs_nudge: "nudge",
+    scope_drift: "nudge",
+    stuck: "pause",
+    unsafe: "queue",
+  };
+  const type = typeByState[evaluation.state] ?? "nudge";
+  return {
+    id: `intervention-${compactTimestamp(now)}-${interventionCount + 1}`,
+    missionId: report.missionId,
+    agentId: report.agentId,
+    alignmentReportId: report.id,
+    type,
+    status: "active",
+    message: buildInterventionMessage(type, evaluation, mission),
+    createdAt: now,
+  };
+}
+
+function buildInterventionMessage(type, evaluation, mission) {
+  const goal = mission?.goal ?? "the current mission";
+  if (type === "pause") return `Pause and reassess: ${evaluation.reason} Stay anchored to ${goal}.`;
+  if (type === "queue") return `Queue for user review: ${evaluation.reason}`;
+  return `Nudge: ${evaluation.reason} Refocus on ${goal}.`;
+}
+
+function activityLooksOutOfScope(activity, mission) {
+  if (!mission?.goal) return false;
+  const goalTerms = importantTerms(mission.goal);
+  if (goalTerms.length === 0) return false;
+  const activityText = `${activity.summary} ${activity.target} ${activity.command} ${(activity.fileChanges ?? []).join(" ")}`.toLowerCase();
+  if (goalTerms.some((term) => activityText.includes(term))) return false;
+  if (activity.type === "file_change" && /\b(marketing|homepage|landing|pricing|blog|social)\b/i.test(activityText)) return true;
+  return false;
+}
+
+function importantTerms(text) {
+  const stop = new Set(["the", "and", "for", "with", "this", "that", "while", "agent", "agents", "implement", "build", "fix", "improve", "run"]);
+  return String(text ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 4 && !stop.has(term))
+    .slice(0, 8);
 }
 
 function normalizeMemoryReviewStatus(status) {

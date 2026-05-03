@@ -100,9 +100,20 @@ klemm tui --mission <mission-id>
 When executing local commands under Klemm, prefer capture mode:
 
 ```text
-klemm supervise --capture --mission <mission-id> -- npm test
+klemm supervise --capture --watch --mission <mission-id> -- npm test
 klemm supervised-runs
+klemm monitor status --mission <mission-id>
 ```
+
+Record live agent work into the continuous monitor whenever possible:
+
+```text
+record_agent_activity
+evaluate_agent_alignment
+get_agent_monitor
+```
+
+Klemm is not only an approval checkpoint. It should continuously evaluate whether agents remain aligned with the mission. Watch for scope drift, repeated failures, unsafe patterns, and work that no longer serves the user's current intent.
 
 Use daemon lifecycle checks when relying on the local API:
 

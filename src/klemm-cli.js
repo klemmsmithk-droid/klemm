@@ -6,8 +6,10 @@ import { join, relative } from "node:path";
 import {
   buildCodexContext,
   distillMemory,
+  evaluateAgentAlignment,
   getKlemmStatus,
   ingestMemoryExport,
+  recordAgentActivity,
   proposeAction,
   recordAgentEvent,
   recordOsObservation,
@@ -83,6 +85,8 @@ async function main() {
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
     if (command === "supervise") return await superviseFromCli(args.slice(1));
     if (command === "supervised-runs") return printSupervisedRuns();
+    if (command === "monitor" && args[1] === "status") return printMonitorStatus(args.slice(2));
+    if (command === "monitor" && args[1] === "evaluate") return evaluateMonitorFromCli(args.slice(2));
     if (command === "os" && args[1] === "snapshot") return await recordOsSnapshotFromCli(args.slice(2));
     if (command === "os" && args[1] === "status") return printOsStatus(args.slice(2));
     if (command === "os" && args[1] === "permissions") return printOsPermissions();
@@ -494,6 +498,11 @@ async function superviseFromCli(args) {
     console.log(`Rewrite: ${decision.rewrite}`);
     const result = await runSupervisedProcess(splitShellLike(decision.rewrite), { cwd: commandCwd, capture: flags.capture, missionId: flags.mission });
     if (flags.capture) persistCapturedRun(flags, decision.rewrite, result, commandCwd);
+    if (flags.watch) recordAndPrintAlignment(flags, {
+      actor: flags.actor ?? "supervised_process",
+      command: decision.rewrite,
+      result,
+    });
     console.log(`Klemm supervised exit: ${result.status}`);
     process.exitCode = result.status;
     return;
@@ -507,6 +516,11 @@ async function superviseFromCli(args) {
 
   const result = await runSupervisedProcess(command, { cwd: commandCwd, capture: flags.capture, missionId: flags.mission });
   if (flags.capture) persistCapturedRun(flags, target, result, commandCwd);
+  if (flags.watch) recordAndPrintAlignment(flags, {
+    actor: flags.actor ?? "supervised_process",
+    command: target,
+    result,
+  });
   console.log(`Klemm supervised exit: ${result.status}`);
   process.exitCode = result.status;
 }
@@ -638,6 +652,73 @@ function printSupervisedRuns() {
       `- ${run.id} mission=${run.missionId ?? "none"} exit=${run.exitCode} durationMs=${run.durationMs} files=${run.fileChanges.join(",") || "none"} stdout=${oneLine(run.stdout)} stderr=${oneLine(run.stderr)}`,
     );
   }
+}
+
+function recordAndPrintAlignment(flags, { actor, command, result }) {
+  const withActivity = store.update((state) =>
+    recordAgentActivity(state, {
+      missionId: flags.mission,
+      agentId: actor,
+      type: "command",
+      summary: `${command} exited ${result.status}`,
+      target: command,
+      command,
+      exitCode: result.status,
+      fileChanges: result.fileChanges,
+      evidence: {
+        stdout: oneLine(result.stdout),
+        stderr: oneLine(result.stderr),
+        durationMs: result.durationMs,
+      },
+    }),
+  );
+  const activity = withActivity.agentActivities[0];
+  const evaluated = store.update((state) =>
+    evaluateAgentAlignment(state, {
+      missionId: flags.mission,
+      agentId: activity.agentId,
+    }),
+  );
+  const report = evaluated.alignmentReports[0];
+  const intervention = evaluated.agentInterventions.find((item) => item.alignmentReportId === report.id);
+
+  console.log(`Klemm activity: ${activity.id}`);
+  console.log(`Klemm alignment: ${report.state}`);
+  console.log(`Reason: ${report.reason}`);
+  if (intervention) console.log(`Intervention: ${intervention.type} ${intervention.message}`);
+}
+
+function printMonitorStatus(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const activities = (state.agentActivities ?? []).filter((activity) => !flags.mission || activity.missionId === flags.mission);
+  const reports = (state.alignmentReports ?? []).filter((report) => !flags.mission || report.missionId === flags.mission);
+  const interventions = (state.agentInterventions ?? []).filter((intervention) => !flags.mission || intervention.missionId === flags.mission);
+
+  console.log("Agent monitor");
+  console.log(`Activities: ${activities.length}`);
+  console.log(`Latest alignment: ${reports[0]?.state ?? "none"}`);
+  console.log(`Active interventions: ${interventions.filter((intervention) => intervention.status === "active").length}`);
+  for (const report of reports.slice(0, 5)) {
+    console.log(`- ${report.id} ${report.state} agent=${report.agentId}: ${report.reason}`);
+  }
+}
+
+function evaluateMonitorFromCli(args) {
+  const flags = parseFlags(args);
+  const next = store.update((state) =>
+    evaluateAgentAlignment(state, {
+      missionId: flags.mission,
+      agentId: flags.agent,
+    }),
+  );
+  const report = next.alignmentReports[0];
+  const intervention = next.agentInterventions.find((item) => item.alignmentReportId === report.id);
+
+  console.log(`Klemm alignment: ${report.state}`);
+  console.log(`Report: ${report.id}`);
+  console.log(`Reason: ${report.reason}`);
+  if (intervention) console.log(`Intervention: ${intervention.type} ${intervention.message}`);
 }
 
 async function recordOsSnapshotFromCli(args) {
@@ -867,8 +948,10 @@ Commands:
   klemm debrief [--mission mission-id]
   klemm tui [--mission mission-id] [--interactive]
   klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] -- [args...]
-  klemm supervise [--mission mission-id] [--capture] [--cwd path] -- <command> [args...]
+  klemm supervise [--mission mission-id] [--capture] [--watch] [--cwd path] -- <command> [args...]
   klemm supervised-runs
+  klemm monitor status [--mission mission-id]
+  klemm monitor evaluate [--mission mission-id] [--agent agent-id]
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions

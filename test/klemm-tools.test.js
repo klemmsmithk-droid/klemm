@@ -25,6 +25,9 @@ test("Klemm MCP-style tools expose the cross-agent authority surface", () => {
     "codex_context",
     "record_os_observation",
     "get_os_status",
+    "record_agent_activity",
+    "evaluate_agent_alignment",
+    "get_agent_monitor",
   ]);
 });
 
@@ -90,6 +93,43 @@ test("Klemm tool dispatcher records OS observations for compatible agents", () =
   }, { state: observationResult.state });
 
   assert.equal(statusResult.result.osObservations.length, 1);
+});
+
+test("Klemm tool dispatcher records activity and evaluates agent alignment", () => {
+  const initial = createInitialKlemmState({ now: "2026-05-03T12:00:00.000Z" });
+  const missionResult = executeKlemmTool("start_mission", {
+    id: "mission-tool-monitor",
+    goal: "Run reliable tests.",
+    now: "2026-05-03T12:00:00.000Z",
+  }, { state: initial });
+
+  const activityResult = executeKlemmTool("record_agent_activity", {
+    missionId: "mission-tool-monitor",
+    agentId: "agent-codex",
+    type: "command",
+    summary: "npm test failed",
+    target: "npm test",
+    exitCode: 1,
+    now: "2026-05-03T12:01:00.000Z",
+  }, { state: missionResult.state });
+
+  assert.equal(activityResult.result.activity.agentId, "agent-codex");
+
+  const evaluated = executeKlemmTool("evaluate_agent_alignment", {
+    missionId: "mission-tool-monitor",
+    agentId: "agent-codex",
+    now: "2026-05-03T12:02:00.000Z",
+  }, { state: activityResult.state });
+
+  assert.equal(evaluated.result.alignmentReport.state, "needs_nudge");
+  assert.equal(evaluated.result.intervention.type, "nudge");
+
+  const status = executeKlemmTool("get_agent_monitor", {
+    missionId: "mission-tool-monitor",
+  }, { state: evaluated.state });
+
+  assert.equal(status.result.activities.length, 1);
+  assert.equal(status.result.alignmentReports[0].state, "needs_nudge");
 });
 
 test("Klemm Codex skill teaches Codex to register as hub and ask before risky actions", async () => {
