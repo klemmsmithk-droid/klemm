@@ -8,6 +8,8 @@ Klemm is not only an MCP tool. The MCP-style tool surface is an adapter; the loc
 
 ```bash
 npm run klemm -- status
+npm run klemm -- setup --data-dir ./data --codex-dir ./codex-klemm --codex-history ./codex.jsonl --never "Never let agents deploy production without approval." --dry-run-launchctl
+npm run klemm -- onboard --stdin
 npm run klemm -- codex hub --id mission-codex --goal "Dogfood Codex supervision"
 npm run klemm -- codex event --mission mission-codex --type command_planned --summary "Codex plans focused tests" --action-id decision-tests --action-type command --target "npm test"
 npm run klemm -- codex context --mission mission-codex
@@ -49,6 +51,9 @@ npm run klemm -- daemon health --url http://127.0.0.1:8765
 npm run klemm -- daemon install --output ./data/com.klemm.daemon.plist
 npm run klemm -- daemon migrate
 npm run klemm -- daemon start --dry-run
+npm run klemm -- daemon bootstrap --plist ./data/com.klemm.daemon.plist --dry-run
+npm run klemm -- daemon kickstart --label com.klemm.daemon --dry-run
+npm run klemm -- daemon bootout --plist ./data/com.klemm.daemon.plist --dry-run
 npm run klemm -- daemon logs --tail 40
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
 npm run klemm -- install mcp --client codex
@@ -70,6 +75,17 @@ Klemm includes a real stdio MCP server. It speaks JSON-RPC 2.0, supports `initia
 `klemm install mcp` prints or writes MCP client config snippets that point compatible clients at the local Klemm stdio server.
 
 `klemm codex install` writes a Codex-ready bundle: `/klemm` skill instructions, a Codex MCP config, and a `klemm-codex` wrapper that routes Codex commands through Klemm's watched runtime.
+
+## Setup And Onboarding
+
+```bash
+npm run klemm -- setup --data-dir "$HOME/Library/Application Support/Klemm" --codex-dir "$HOME/.codex/klemm" --codex-history ./codex.jsonl --never "Never let agents push or deploy without approval." --dry-run-launchctl
+npm run klemm -- onboard --stdin
+```
+
+`klemm setup` is the one-command installer path. It writes the LaunchAgent plist, migrates the local store, installs the Codex skill/MCP/wrapper bundle, registers default sync sources, promotes explicit "never" boundaries into memory-backed policies, and prints the launchctl/health plan.
+
+`klemm onboard --stdin` is the first-run terminal wizard surface. It records an authority boundary, a repo/watch path, an optional Codex history source, and a working-style preference; approved answers become reviewed memories and structured policies.
 
 ## Agent Runtime Wrapper
 
@@ -149,6 +165,9 @@ npm run klemm -- daemon migrate
 npm run klemm -- daemon start --dry-run
 npm run klemm -- daemon stop --dry-run
 npm run klemm -- daemon restart --dry-run
+npm run klemm -- daemon bootstrap --plist ./data/com.klemm.daemon.plist --dry-run
+npm run klemm -- daemon kickstart --label com.klemm.daemon --dry-run
+npm run klemm -- daemon bootout --plist ./data/com.klemm.daemon.plist --dry-run
 npm run klemm -- daemon logs --tail 40
 npm run klemm -- daemon --host 127.0.0.1 --port 8765 --pid-file ./data/klemm.pid
 npm run klemm -- daemon health --url http://127.0.0.1:8765

@@ -19,8 +19,12 @@ When the user invokes `/klemm supervise this session` or equivalent:
 Use the Klemm local CLI or MCP-style tools when available:
 
 ```text
+klemm setup --data-dir ./data --codex-dir ./codex-klemm --codex-history ./codex.jsonl --never "Never let agents push or deploy without approval." --dry-run-launchctl
+klemm onboard --stdin
 klemm codex hub --id <mission-id> --goal "<goal>"
 ```
+
+Use `klemm setup` for first install: it writes the daemon plist, migrates the store, installs Codex integration, registers sync sources, promotes explicit boundaries, and prints the health/launchctl plan. Use `klemm onboard --stdin` for first-run preference capture.
 
 ## Authority Checks
 
@@ -168,6 +172,9 @@ Use daemon lifecycle checks when relying on the local API:
 klemm daemon install --output ./data/com.klemm.daemon.plist
 klemm daemon migrate
 klemm daemon start --dry-run
+klemm daemon bootstrap --plist ./data/com.klemm.daemon.plist --dry-run
+klemm daemon kickstart --label com.klemm.daemon --dry-run
+klemm daemon bootout --plist ./data/com.klemm.daemon.plist --dry-run
 klemm daemon logs --tail 40
 klemm daemon health --url http://127.0.0.1:8765
 klemm daemon status --pid-file ./data/klemm.pid

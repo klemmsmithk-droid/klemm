@@ -36,6 +36,9 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     memoryQuarantine: [],
     contextSyncSources: [],
     contextSyncRuns: [],
+    setupRuns: [],
+    onboardingProfiles: [],
+    watchPaths: [],
     schemaMigrations: [],
     policies: [],
     imports: [],
@@ -631,6 +634,7 @@ export function renderLaunchAgentPlist(options = {}) {
     `${dataDir}/klemm.pid`,
   ];
   return `<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd LaunchAgent for Klemm -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -668,6 +672,9 @@ export function migrateKlemmState(state, { now = new Date().toISOString(), targe
     memoryQuarantine: state.memoryQuarantine ?? [],
     contextSyncSources: state.contextSyncSources ?? [],
     contextSyncRuns: state.contextSyncRuns ?? [],
+    setupRuns: state.setupRuns ?? [],
+    onboardingProfiles: state.onboardingProfiles ?? [],
+    watchPaths: state.watchPaths ?? [],
     schemaMigrations: state.schemaMigrations ?? [],
     policies: state.policies ?? [],
     agentActivities: state.agentActivities ?? [],

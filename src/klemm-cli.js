@@ -84,6 +84,7 @@ async function main() {
     if (command === "codex" && args[1] === "report") return recordCodexAdapterReportFromCli(args.slice(2));
     if (command === "codex" && args[1] === "run") return await runCodexWatchedCommandFromCli(args.slice(2));
     if (command === "codex" && args[1] === "install") return await installCodexIntegrationFromCli(args.slice(2));
+    if (command === "setup") return await setupKlemmFromCli(args.slice(1));
     if (command === "mission" && args[1] === "start") return startMissionFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
@@ -107,6 +108,7 @@ async function main() {
     if (command === "sync" && args[1] === "add") return addSyncSourceFromCli(args.slice(2));
     if (command === "sync" && args[1] === "run") return await runContextSyncFromCli(args.slice(2));
     if (command === "sync" && args[1] === "status") return printSyncStatus(args.slice(2));
+    if (command === "onboard") return await onboardFromCli(args.slice(1));
     if (command === "debrief") return printDebrief(args.slice(1));
     if (command === "tui") return await printTui(args.slice(1));
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
@@ -217,6 +219,65 @@ async function installCodexIntegrationFromCli(args) {
   console.log(`Wrapper: ${wrapperPath}`);
 }
 
+async function setupKlemmFromCli(args) {
+  const flags = parseFlags(args);
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const plistPath = flags.plist ?? flags.output ?? join(dataDir, "com.klemm.daemon.plist");
+  const codexDir = flags.codexDir ?? join(dataDir, "codex-integration");
+  const pidFile = flags.pidFile ?? join(dataDir, "klemm.pid");
+  const logFile = flags.logFile ?? join(dataDir, "logs", "klemm-daemon.log");
+
+  console.log("Klemm setup");
+  await installDaemonFromCli(["--output", plistPath, "--data-dir", dataDir, "--pid-file", pidFile, "--log-file", logFile]);
+  migrateDaemonStoreFromCli();
+  await installCodexIntegrationFromCli(["--output-dir", codexDir, "--data-dir", dataDir]);
+
+  if (flags.codexHistory) {
+    addSyncSourceFromCli(["--id", "codex-history", "--provider", "codex", "--path", flags.codexHistory]);
+  }
+  if (flags.chatgptExport) {
+    addSyncSourceFromCli(["--id", "chatgpt-export", "--provider", "chatgpt", "--path", flags.chatgptExport]);
+  }
+  if (flags.claudeExport) {
+    addSyncSourceFromCli(["--id", "claude-export", "--provider", "claude", "--path", flags.claudeExport]);
+  }
+  if (flags.chromeHistory) {
+    addSyncSourceFromCli(["--id", "chrome-history", "--provider", "chrome_history", "--path", flags.chromeHistory]);
+  }
+  if (flags.watchRepo) {
+    recordWatchPath(flags.watchRepo, { kind: "repo" });
+    console.log(`Watch path added: ${flags.watchRepo}`);
+  }
+  if (flags.never) {
+    promoteBoundaryText(flags.never, { source: "setup", note: "Setup authority boundary." });
+  }
+
+  store.update((state) => ({
+    ...state,
+    setupRuns: [
+      {
+        id: `setup-${Date.now()}`,
+        dataDir,
+        plistPath,
+        codexDir,
+        dryRunLaunchctl: Boolean(flags.dryRunLaunchctl),
+        createdAt: new Date().toISOString(),
+      },
+      ...(state.setupRuns ?? []),
+    ],
+  }));
+
+  if (flags.dryRunLaunchctl) {
+    await launchctlFromCli("bootstrap", ["--plist", plistPath, "--dry-run"]);
+  }
+
+  console.log("Klemm setup complete");
+  console.log(`Daemon plist: ${plistPath}`);
+  console.log(`Codex integration: ${codexDir}`);
+  console.log(`Health check: klemm daemon health --url http://127.0.0.1:${flags.port ?? process.env.KLEMM_PORT ?? 8765}`);
+  console.log("Klemm is watching");
+}
+
 async function startDaemonFromCli(args) {
   if (args[0] === "health") return await printDaemonHealth(args.slice(1));
   if (args[0] === "install") return await installDaemonFromCli(args.slice(1));
@@ -226,6 +287,9 @@ async function startDaemonFromCli(args) {
   if (args[0] === "restart") return await restartDaemonProcessFromCli(args.slice(1));
   if (args[0] === "logs") return await printDaemonLogs(args.slice(1));
   if (args[0] === "status") return await printDaemonProcessStatus(args.slice(1));
+  if (args[0] === "bootstrap") return await launchctlFromCli("bootstrap", args.slice(1));
+  if (args[0] === "bootout") return await launchctlFromCli("bootout", args.slice(1));
+  if (args[0] === "kickstart") return await launchctlFromCli("kickstart", args.slice(1));
   const flags = parseFlags(args);
   const port = Number(flags.port ?? process.env.KLEMM_PORT ?? 8765);
   const host = flags.host ?? "127.0.0.1";
@@ -379,6 +443,44 @@ async function printDaemonLogs(args) {
   for (const line of content.split(/\r?\n/).filter(Boolean).slice(-tail)) {
     console.log(line);
   }
+}
+
+async function launchctlFromCli(action, args) {
+  const flags = parseFlags(args);
+  const domain = flags.domain ?? `gui/${process.getuid?.() ?? 501}`;
+  const label = flags.label ?? "com.klemm.daemon";
+  const plist = flags.plist ?? join(flags.dataDir ?? KLEMM_DATA_DIR, "com.klemm.daemon.plist");
+  let command;
+  if (action === "bootstrap") command = ["launchctl", "bootstrap", domain, plist];
+  if (action === "bootout") command = ["launchctl", "bootout", domain, plist];
+  if (action === "kickstart") command = ["launchctl", "kickstart", "-k", `${domain}/${label}`];
+  if (!command) throw new Error(`Unknown launchctl action: ${action}`);
+
+  if (flags.dryRun) {
+    console.log(`LaunchAgent ${action} dry run`);
+    console.log(command.join(" "));
+    return;
+  }
+
+  const result = await runCommand(command, { env: process.env });
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  process.exitCode = result.status;
+}
+
+async function runCommand(command, { env = process.env } = {}) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command[0], command.slice(1), {
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status: status ?? 1, stdout, stderr }));
+  });
 }
 
 async function printDaemonHealth(args) {
@@ -812,6 +914,74 @@ function promoteMemoryPolicyFromCli(args) {
   console.log(`Target includes: ${policy.condition.targetIncludes.join(",") || "any"}`);
 }
 
+function promoteBoundaryText(text, { source = "manual", note = "Promoted authority boundary." } = {}) {
+  const distilled = store.update((state) =>
+    distillMemory(state, {
+      source,
+      sourceRef: source,
+      text,
+    }),
+  );
+  const memory = distilled.memories[0];
+  if (!memory) return null;
+  const reviewed = store.update((state) =>
+    reviewMemory(state, {
+      memoryId: memory.id,
+      status: "approved",
+      note,
+    }),
+  );
+  const policyState = store.update((state) =>
+    promoteMemoryToPolicy(state, {
+      memoryId: memory.id,
+      actionTypes: inferPolicyActionTypes(text),
+      targetIncludes: inferPolicyTargetIncludes(text),
+      note,
+    }),
+  );
+  const policy = policyState.policies[0];
+  console.log(`Memory reviewed: ${reviewed.memories.find((item) => item.id === memory.id)?.id} approved`);
+  console.log(`Policy promoted: ${policy.id}`);
+  return policy;
+}
+
+function inferPolicyActionTypes(text) {
+  const value = String(text ?? "").toLowerCase();
+  if (/push|github/.test(value)) return ["git_push"];
+  if (/deploy|production|prod/.test(value)) return ["deployment"];
+  if (/send|email|post|publish/.test(value)) return ["external_send"];
+  if (/oauth/.test(value)) return ["oauth_scope_change"];
+  if (/credential|secret|token/.test(value)) return ["credential_change"];
+  if (/delete|remove/.test(value)) return ["delete_data"];
+  return [];
+}
+
+function inferPolicyTargetIncludes(text) {
+  const value = String(text ?? "").toLowerCase();
+  const targets = [];
+  if (/github/.test(value)) targets.push("github", "origin");
+  if (/production/.test(value)) targets.push("production");
+  if (/\bprod\b/.test(value)) targets.push("prod");
+  if (/email/.test(value)) targets.push("email");
+  return [...new Set(targets)];
+}
+
+function recordWatchPath(path, { kind = "path" } = {}) {
+  const now = new Date().toISOString();
+  store.update((state) => ({
+    ...state,
+    watchPaths: [
+      {
+        id: `watch-${Date.now()}`,
+        path,
+        kind,
+        createdAt: now,
+      },
+      ...(state.watchPaths ?? []).filter((item) => item.path !== path),
+    ],
+  }));
+}
+
 function printUserModel(args) {
   const flags = parseFlags(args);
   const summary = buildUserModelSummary(store.getState(), {
@@ -837,6 +1007,59 @@ function addSyncSourceFromCli(args) {
   console.log(`Sync source added: ${source.id}`);
   console.log(`Provider: ${source.provider}`);
   console.log(`Path: ${source.path}`);
+}
+
+async function onboardFromCli(args) {
+  const flags = parseFlags(args);
+  if (!flags.stdin) {
+    console.log("Klemm onboarding");
+    console.log("Run with --stdin to provide answers non-interactively.");
+    console.log("Prompts: authority boundary, watch path, Codex history path, working preference, approve yes/no.");
+    return;
+  }
+  const answers = (await readStdin()).split(/\r?\n/).map((line) => line.trim());
+  const [boundary, watchPath, codexHistory, preference, approveAnswer] = answers;
+  const approve = /^y(es)?$/i.test(approveAnswer ?? "");
+
+  console.log("Klemm onboarding");
+  if (boundary) promoteBoundaryText(boundary, { source: "onboarding", note: "Onboarding authority boundary." });
+  if (watchPath) {
+    recordWatchPath(watchPath, { kind: "repo" });
+    console.log(`Watch path added: ${watchPath}`);
+  }
+  if (codexHistory) {
+    addSyncSourceFromCli(["--id", "codex-history", "--provider", "codex", "--path", codexHistory]);
+  }
+  if (preference) {
+    const next = store.update((state) =>
+      distillMemory(state, {
+        source: "onboarding",
+        sourceRef: "onboarding",
+        text: preference,
+      }),
+    );
+    const memory = next.memories[0];
+    if (approve && memory) {
+      store.update((state) => reviewMemory(state, { memoryId: memory.id, status: "approved", note: "Approved during onboarding." }));
+      console.log(`Memory reviewed: ${memory.id} approved`);
+    }
+  }
+  store.update((state) => ({
+    ...state,
+    onboardingProfiles: [
+      {
+        id: `onboarding-${Date.now()}`,
+        authorityBoundary: boundary,
+        watchPath,
+        codexHistory,
+        preference,
+        approvedPreference: approve,
+        createdAt: new Date().toISOString(),
+      },
+      ...(state.onboardingProfiles ?? []),
+    ],
+  }));
+  console.log("Onboarding complete");
 }
 
 async function runContextSyncFromCli(args) {
@@ -1730,6 +1953,7 @@ function printHelp() {
 Klemm CLI
 
 Commands:
+  klemm setup [--data-dir path] [--codex-dir path] [--codex-history path] [--never "..."] [--dry-run-launchctl]
   klemm status
   klemm codex hub --goal "..." [--id mission-codex]
   klemm codex event --mission mission-id --type command_planned --summary "..." --action-id decision-id --action-type command --target "npm test"
@@ -1758,6 +1982,7 @@ Commands:
   klemm sync add --id source-id --provider codex --path export.jsonl
   klemm sync run [--id source-id]
   klemm sync status
+  klemm onboard --stdin
   klemm debrief [--mission mission-id]
   klemm tui [--mission mission-id] [--view overview|memory|queue|agents|policies|model|logs] [--interactive]
   klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] -- [args...]
@@ -1772,7 +1997,7 @@ Commands:
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions
-  klemm daemon install|migrate|start|stop|restart|logs
+  klemm daemon install|migrate|start|stop|restart|logs|bootstrap|bootout|kickstart
   klemm daemon [--host 127.0.0.1] [--port 8765] [--pid-file path]
   klemm daemon health [--url http://127.0.0.1:8765]
   klemm daemon status --pid-file path
