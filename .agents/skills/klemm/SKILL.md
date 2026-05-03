@@ -37,7 +37,12 @@ Prefer the Codex adapter wrappers when running as Codex:
 klemm codex event --mission <mission-id> --type command_planned --summary "Codex plans a focused test run" --action-id decision-tests --action-type command --target "npm test -- test/klemm-next.test.js"
 klemm codex context --mission <mission-id>
 klemm codex debrief --mission <mission-id>
+klemm codex dogfood --id <mission-id> --goal "<goal>" --plan "<plan>"
+klemm codex report --mission <mission-id> --type tool_call --tool shell --command "npm test"
+klemm codex run --mission <mission-id> -- npm test
 ```
+
+Use `klemm codex dogfood` when starting a real `/klemm` session. Use `klemm codex report` for plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` so commands flow through supervised watch-loop monitoring with `agent-codex` as the actor.
 
 When launching agent runtimes through Klemm, use the named wrapper:
 
@@ -136,6 +141,7 @@ Use daemon lifecycle checks when relying on the local API:
 klemm daemon health --url http://127.0.0.1:8765
 klemm daemon status --pid-file ./data/klemm.pid
 node --no-warnings src/klemm-mcp-server.js
+klemm install mcp --client codex
 ```
 
 Use OS observation when the user asks Klemm to watch the local machine:

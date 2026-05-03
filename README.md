@@ -12,6 +12,9 @@ npm run klemm -- codex hub --id mission-codex --goal "Dogfood Codex supervision"
 npm run klemm -- codex event --mission mission-codex --type command_planned --summary "Codex plans focused tests" --action-id decision-tests --action-type command --target "npm test"
 npm run klemm -- codex context --mission mission-codex
 npm run klemm -- codex debrief --mission mission-codex
+npm run klemm -- codex dogfood --id mission-codex --goal "Dogfood Codex supervision" --plan "Report plan, run watched tests, debrief."
+npm run klemm -- codex report --mission mission-codex --type tool_call --tool shell --command "npm test"
+npm run klemm -- codex run --mission mission-codex -- npm test
 npm run klemm -- mission start --id mission-codex --hub codex --goal "Build Klemm while Kyle is AFK" --allow read_files,edit_local_code,run_tests --block git_push,external_send,credential_change,oauth_scope_change --rewrite
 npm run klemm -- agent register --id agent-codex --mission mission-codex --name Codex --kind coding_agent
 npm run klemm -- event record --mission mission-codex --agent agent-codex --type command_planned --summary "Codex plans a test run" --action-id decision-tests --action-type command --target "npm test"
@@ -35,6 +38,7 @@ npm run klemm -- os status --mission mission-codex
 npm run klemm -- os permissions
 npm run klemm -- daemon health --url http://127.0.0.1:8765
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
+npm run klemm -- install mcp --client codex
 npm run mcp
 ```
 
@@ -43,9 +47,14 @@ npm run mcp
 ```bash
 npm run mcp
 klemm mcp stdio
+npm run klemm -- install mcp --client codex
+npm run klemm -- install mcp --client claude-desktop
+npm run klemm -- install mcp --client generic --output ./klemm-mcp.json
 ```
 
 Klemm includes a real stdio MCP server. It speaks JSON-RPC 2.0, supports `initialize`, `tools/list`, and `tools/call`, and exposes the same authority, monitor, memory, policy, OS, and adapter tools used by the CLI/daemon.
+
+`klemm install mcp` prints or writes MCP client config snippets that point compatible clients at the local Klemm stdio server.
 
 ## Agent Runtime Wrapper
 
@@ -169,6 +178,9 @@ Codex-specific adapter commands:
 - `klemm codex event` records a Codex event with stable `agent-codex` defaults.
 - `klemm codex context` returns a JSON packet with mission, queue, recent events, decisions, memory candidates, trusted memories, and supervised runs.
 - `klemm codex debrief` prints a Codex-ready debrief packet.
+- `klemm codex dogfood` starts a hub mission and records the opening plan as an adapter activity.
+- `klemm codex report` records normalized adapter envelopes for plans, tool calls, diffs, uncertainty, and subagents.
+- `klemm codex run` executes commands through `klemm supervise --watch-loop` with `agent-codex` as the actor.
 
 ## Agent Events
 

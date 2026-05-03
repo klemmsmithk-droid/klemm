@@ -12,6 +12,7 @@ import {
   getKlemmStatus,
   importMemorySource,
   ingestMemoryExport,
+  normalizeAgentAdapterEnvelope,
   renderLaunchAgentPlist,
   searchMemories,
   recordAgentActivity,
@@ -70,6 +71,9 @@ async function main() {
     if (command === "codex" && args[1] === "event") return recordCodexEventFromCli(args.slice(2));
     if (command === "codex" && args[1] === "context") return printCodexContext(args.slice(2));
     if (command === "codex" && args[1] === "debrief") return printCodexDebrief(args.slice(2));
+    if (command === "codex" && args[1] === "dogfood") return startCodexDogfoodFromCli(args.slice(2));
+    if (command === "codex" && args[1] === "report") return recordCodexAdapterReportFromCli(args.slice(2));
+    if (command === "codex" && args[1] === "run") return await runCodexWatchedCommandFromCli(args.slice(2));
     if (command === "mission" && args[1] === "start") return startMissionFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
@@ -97,6 +101,7 @@ async function main() {
     if (command === "policy" && args[1] === "add") return addPolicyFromCli(args.slice(2));
     if (command === "helper" && args[1] === "launch-agent") return renderLaunchAgentFromCli(args.slice(2));
     if (command === "mcp" && args[1] === "stdio") return printMcpCommand();
+    if (command === "install" && args[1] === "mcp") return await installMcpFromCli(args.slice(2));
     if (command === "os" && args[1] === "snapshot") return await recordOsSnapshotFromCli(args.slice(2));
     if (command === "os" && args[1] === "status") return printOsStatus(args.slice(2));
     if (command === "os" && args[1] === "permissions") return printOsPermissions();
@@ -130,6 +135,35 @@ function startCodexHubFromCli(args) {
   console.log(`Agent: ${agent.id} (${agent.kind})`);
   console.log(`Allowed: ${mission.allowedActions.join(",")}`);
   console.log(`Blocked: ${mission.blockedActions.join(",")}`);
+}
+
+function startCodexDogfoodFromCli(args) {
+  const flags = parseFlags(args);
+  const next = store.update((state) =>
+    startCodexHub(state, {
+      id: flags.id,
+      goal: flags.goal ?? "Dogfood Klemm's Codex adapter.",
+      durationMinutes: flags.duration ? Number(flags.duration) : undefined,
+      escalationChannel: flags.escalation,
+    }),
+  );
+  const mission = next.missions[0];
+  const withPlan = store.update((state) =>
+    recordAgentActivity(state, normalizeAgentAdapterEnvelope({
+      protocolVersion: 1,
+      missionId: mission.id,
+      agentId: "agent-codex",
+      event: "plan",
+      summary: flags.plan ?? `Codex dogfood plan for ${mission.goal}`,
+      plan: flags.plan ?? "",
+    }).activity),
+  );
+  const activity = withPlan.agentActivities[0];
+
+  console.log(`Codex dogfood session ready: ${mission.id}`);
+  console.log(`Goal: ${mission.goal}`);
+  console.log(`Adapter activity: ${activity.id}`);
+  console.log(`Next command: klemm supervise --watch-loop --mission ${mission.id} -- <command>`);
 }
 
 async function startDaemonFromCli(args) {
@@ -288,6 +322,61 @@ function printCodexDebrief(args) {
   const flags = parseFlags(args);
   console.log("Codex debrief packet");
   console.log(summarizeDebrief(store.getState(), { missionId: flags.mission }));
+}
+
+function recordCodexAdapterReportFromCli(args) {
+  const flags = parseFlags(args);
+  const envelope = normalizeAgentAdapterEnvelope({
+    protocolVersion: 1,
+    missionId: flags.mission,
+    agentId: flags.agent ?? "agent-codex",
+    event: flags.type ?? "activity",
+    summary: flags.summary,
+    target: flags.target,
+    command: flags.command,
+    toolCall: flags.tool
+      ? {
+          name: flags.tool,
+          arguments: flags.command ? { command: flags.command } : {},
+        }
+      : undefined,
+    diff: flags.file ? { files: normalizeListFlag(flags.file) } : undefined,
+    uncertainty: flags.uncertainty,
+  });
+  let next = store.update((state) => recordAgentActivity(state, envelope.activity));
+  let decision = null;
+  if (envelope.action) {
+    next = store.update((state) => proposeAction(state, buildCommandProposal(splitShellLike(envelope.action.target), {
+      missionId: envelope.action.missionId,
+      actor: envelope.action.actor,
+    })));
+    decision = next.decisions[0];
+  }
+  const activity = next.agentActivities[0];
+
+  console.log("Codex adapter envelope recorded");
+  console.log(`Activity: ${activity.id}`);
+  console.log(`Type: ${envelope.type}`);
+  if (decision) printDecision(decision);
+}
+
+async function runCodexWatchedCommandFromCli(args) {
+  const separator = args.indexOf("--");
+  const flagArgs = separator >= 0 ? args.slice(0, separator) : [];
+  const command = separator >= 0 ? args.slice(separator + 1) : args;
+  const flags = parseFlags(flagArgs);
+  if (command.length === 0) throw new Error("Usage: klemm codex run --mission <id> -- <command> [args...]");
+  return await superviseFromCli([
+    "--mission",
+    flags.mission,
+    "--actor",
+    flags.agent ?? "agent-codex",
+    "--watch-loop",
+    "--watch-interval-ms",
+    String(flags.watchIntervalMs ?? 1000),
+    "--",
+    ...command,
+  ]);
 }
 
 function printAgents() {
@@ -885,6 +974,55 @@ function printMcpCommand() {
   console.log(`node --no-warnings ${join(dirname(new URL(import.meta.url).pathname), "klemm-mcp-server.js")}`);
 }
 
+async function installMcpFromCli(args) {
+  const flags = parseFlags(args);
+  const client = flags.client ?? "generic";
+  const config = buildMcpClientConfig({ client });
+  const rendered = JSON.stringify(config, null, 2);
+  if (flags.output) {
+    await writeFile(flags.output, `${rendered}\n`, "utf8");
+    console.log(`MCP config written: ${flags.output}`);
+    console.log(`Client: ${client}`);
+    return;
+  }
+
+  console.log(`Klemm MCP config for ${client}`);
+  console.log(rendered);
+}
+
+function buildMcpClientConfig({ client } = {}) {
+  const serverPath = join(dirname(new URL(import.meta.url).pathname), "klemm-mcp-server.js");
+  const base = {
+    command: process.execPath,
+    args: ["--no-warnings", serverPath],
+    env: {
+      KLEMM_DATA_DIR: process.env.KLEMM_DATA_DIR || join(process.cwd(), "data"),
+    },
+  };
+  if (client === "codex") {
+    return {
+      mcpServers: {
+        klemm: {
+          ...base,
+          description: "Klemm personal authority layer for Codex and subagents.",
+        },
+      },
+    };
+  }
+  if (client === "claude-desktop") {
+    return {
+      mcpServers: {
+        klemm: base,
+      },
+    };
+  }
+  return {
+    mcpServers: {
+      klemm: base,
+    },
+  };
+}
+
 function printDecision(decision) {
   console.log(`Decision: ${decision.decision}`);
   console.log(`Risk: ${decision.riskLevel}`);
@@ -919,6 +1057,14 @@ function collectRepeatedFlag(args, flagName) {
     }
   }
   return values;
+}
+
+function normalizeListFlag(value) {
+  if (Array.isArray(value)) return value;
+  return String(value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function toCamel(value) {
@@ -1035,6 +1181,9 @@ Commands:
   klemm codex event --mission mission-id --type command_planned --summary "..." --action-id decision-id --action-type command --target "npm test"
   klemm codex context --mission mission-id
   klemm codex debrief --mission mission-id
+  klemm codex dogfood --id mission-id --goal "..." --plan "..."
+  klemm codex report --mission mission-id --type tool_call --tool shell --command "npm test"
+  klemm codex run --mission mission-id -- <command> [args...]
   klemm mission start --hub codex --goal "..." [--allow a,b] [--block x,y] [--rewrite]
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
   klemm event record --mission mission-id --agent agent-codex --type command_planned --summary "..."
@@ -1058,6 +1207,7 @@ Commands:
   klemm policy add --id policy-id --name "..." --action-types deployment --target-includes prod
   klemm helper launch-agent [--program /usr/local/bin/klemm] [--data-dir path]
   klemm mcp stdio
+  klemm install mcp --client codex|claude-desktop|generic [--output path]
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions
