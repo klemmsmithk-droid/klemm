@@ -166,7 +166,7 @@ test("adapter protocol validates versions and local client tokens", () => {
 test("CLI policy simulate and adapter token flows work together", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-policy-v2-"));
   const env = { KLEMM_DATA_DIR: dataDir };
-  await runKlemm(["mission", "start", "--id", "mission-cli-policy", "--goal", "Simulate authority"]);
+  await runKlemm(["mission", "start", "--id", "mission-cli-policy", "--goal", "Simulate authority"], { env });
   const policy = await runKlemm(["policy", "add", "--id", "policy-cli-prod", "--name", "Prod deploy review", "--action-types", "deployment", "--target-includes", "prod"], { env });
   assert.equal(policy.status, 0, policy.stderr);
 
