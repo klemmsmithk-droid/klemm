@@ -40,9 +40,11 @@ klemm codex debrief --mission <mission-id>
 klemm codex dogfood --id <mission-id> --goal "<goal>" --plan "<plan>"
 klemm codex report --mission <mission-id> --type tool_call --tool shell --command "npm test"
 klemm codex run --mission <mission-id> -- npm test
+klemm codex install --output-dir ./codex-klemm --data-dir ./data
 ```
 
 Use `klemm codex dogfood` when starting a real `/klemm` session. Use `klemm codex report` for plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` so commands flow through supervised watch-loop monitoring with `agent-codex` as the actor.
+Use `klemm codex install` to write the skill, MCP config, and wrapper bundle for a Codex environment.
 
 When launching agent runtimes through Klemm, use the named wrapper:
 
@@ -106,6 +108,7 @@ When executing local commands under Klemm, prefer capture mode:
 
 ```text
 klemm supervise --capture --watch --mission <mission-id> -- npm test
+klemm supervise --intercept-output --watch-loop --mission <mission-id> -- npm test
 klemm supervised-runs
 klemm monitor status --mission <mission-id>
 ```
@@ -126,6 +129,8 @@ For long-running commands, prefer live watch loops:
 ```text
 klemm supervise --watch-loop --watch-interval-ms 1000 --mission <mission-id> -- npm test
 ```
+
+Use `--intercept-output` when an agent might try to perform risky actions indirectly. Klemm watches stdout/stderr for attempts such as GitHub pushes, production deploys, credentials/OAuth changes, and destructive deletion, then queues authority and terminates the supervised process.
 
 Structured policies and memory-source imports are available through:
 
@@ -149,13 +154,21 @@ klemm context import --provider git_history --file git.log
 klemm memory review --group-by-source
 klemm memory promote-policy <memory-id> --action-types git_push --target-includes github,origin
 klemm user model
+klemm sync add --id codex-history --provider codex --path ./codex.jsonl
+klemm sync run
+klemm sync status
 ```
 
 Treat `klemm user model` as the compact profile that Codex and other agents can safely consume. It is distilled and evidence-linked; raw exports should remain local unless the user explicitly chooses otherwise.
+Use `sync add/run/status` for recurring local context imports. Sync checksums sources, skips unchanged inputs, snapshots imports locally, and exposes sync state in `klemm codex context`.
 
 Use daemon lifecycle checks when relying on the local API:
 
 ```text
+klemm daemon install --output ./data/com.klemm.daemon.plist
+klemm daemon migrate
+klemm daemon start --dry-run
+klemm daemon logs --tail 40
 klemm daemon health --url http://127.0.0.1:8765
 klemm daemon status --pid-file ./data/klemm.pid
 node --no-warnings src/klemm-mcp-server.js

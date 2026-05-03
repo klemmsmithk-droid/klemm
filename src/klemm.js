@@ -34,6 +34,9 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     memories: [],
     memorySources: [],
     memoryQuarantine: [],
+    contextSyncSources: [],
+    contextSyncRuns: [],
+    schemaMigrations: [],
     policies: [],
     imports: [],
     supervisedRuns: [],
@@ -615,6 +618,18 @@ export function renderLaunchAgentPlist(options = {}) {
   const label = options.label ?? "com.klemm.daemon";
   const program = options.program ?? "klemm";
   const dataDir = options.dataDir ?? "$HOME/Library/Application Support/Klemm";
+  const stdoutPath = options.stdoutPath ?? `${dataDir}/logs/klemm-daemon.log`;
+  const stderrPath = options.stderrPath ?? `${dataDir}/logs/klemm-daemon.err.log`;
+  const programArguments = options.programArguments ?? [
+    program,
+    "daemon",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "8765",
+    "--pid-file",
+    `${dataDir}/klemm.pid`,
+  ];
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -623,14 +638,7 @@ export function renderLaunchAgentPlist(options = {}) {
   <string>${escapeXml(label)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${escapeXml(program)}</string>
-    <string>daemon</string>
-    <string>--host</string>
-    <string>127.0.0.1</string>
-    <string>--port</string>
-    <string>8765</string>
-    <string>--pid-file</string>
-    <string>${escapeXml(dataDir)}/klemm.pid</string>
+${programArguments.map((argument) => `    <string>${escapeXml(argument)}</string>`).join("\n")}
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -641,8 +649,135 @@ export function renderLaunchAgentPlist(options = {}) {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>StandardOutPath</key>
+  <string>${escapeXml(stdoutPath)}</string>
+  <key>StandardErrorPath</key>
+  <string>${escapeXml(stderrPath)}</string>
 </dict>
 </plist>`;
+}
+
+export function migrateKlemmState(state, { now = new Date().toISOString(), targetVersion = 2 } = {}) {
+  const currentVersion = Number(state.schemaVersion ?? state.version ?? 1);
+  const next = {
+    ...state,
+    version: Math.max(Number(state.version ?? 1), 1),
+    schemaVersion: Math.max(currentVersion, targetVersion),
+    memories: state.memories ?? [],
+    memorySources: state.memorySources ?? [],
+    memoryQuarantine: state.memoryQuarantine ?? [],
+    contextSyncSources: state.contextSyncSources ?? [],
+    contextSyncRuns: state.contextSyncRuns ?? [],
+    schemaMigrations: state.schemaMigrations ?? [],
+    policies: state.policies ?? [],
+    agentActivities: state.agentActivities ?? [],
+    alignmentReports: state.alignmentReports ?? [],
+    agentInterventions: state.agentInterventions ?? [],
+  };
+  if (currentVersion >= targetVersion && (state.contextSyncSources ?? null) && (state.schemaMigrations ?? null)) return next;
+
+  return updateState(
+    {
+      ...next,
+      schemaMigrations: [
+        {
+          id: `migration-${compactTimestamp(now)}-${(next.schemaMigrations?.length ?? 0) + 1}`,
+          fromVersion: currentVersion,
+          toVersion: targetVersion,
+          appliedAt: now,
+        },
+        ...(next.schemaMigrations ?? []),
+      ],
+    },
+    now,
+    {
+      type: "schema_migrated",
+      at: now,
+      summary: `Klemm schema migrated from ${currentVersion} to ${targetVersion}.`,
+    },
+  );
+}
+
+export function addContextSyncSource(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const id = options.id ?? `sync-source-${compactTimestamp(now)}-${(state.contextSyncSources?.length ?? 0) + 1}`;
+  const source = {
+    id,
+    provider: normalizeContextProvider(options.provider ?? "unknown"),
+    path: options.path ?? options.filePath,
+    sourceRef: options.sourceRef ?? options.path ?? options.provider ?? "unknown",
+    enabled: options.enabled ?? true,
+    lastChecksum: options.lastChecksum,
+    lastImportedAt: options.lastImportedAt,
+    lastRunId: options.lastRunId,
+    createdAt: options.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  return updateState(
+    {
+      ...state,
+      contextSyncSources: [source, ...withoutId(state.contextSyncSources ?? [], id)],
+    },
+    now,
+    {
+      type: "context_sync_source_added",
+      at: now,
+      contextSyncSourceId: id,
+      summary: `${source.provider} sync source ${id} added.`,
+    },
+  );
+}
+
+export function updateContextSyncSource(state, sourceId, patch = {}, { now = new Date().toISOString() } = {}) {
+  return updateState(
+    {
+      ...state,
+      contextSyncSources: (state.contextSyncSources ?? []).map((source) =>
+        source.id === sourceId ? { ...source, ...patch, updatedAt: now } : source,
+      ),
+    },
+    now,
+    {
+      type: "context_sync_source_updated",
+      at: now,
+      contextSyncSourceId: sourceId,
+      summary: `${sourceId} sync source updated.`,
+    },
+  );
+}
+
+export function recordContextSyncRun(state, options = {}) {
+  const now = options.finishedAt ?? options.now ?? new Date().toISOString();
+  const run = {
+    id: options.id ?? `sync-run-${compactTimestamp(now)}-${(state.contextSyncRuns?.length ?? 0) + 1}`,
+    sourceId: options.sourceId,
+    provider: options.provider,
+    sourceRef: options.sourceRef,
+    status: options.status ?? "imported",
+    checksum: options.checksum,
+    importedCount: Number(options.importedCount ?? 0),
+    skippedCount: Number(options.skippedCount ?? 0),
+    distilledCount: Number(options.distilledCount ?? 0),
+    quarantinedCount: Number(options.quarantinedCount ?? 0),
+    snapshotPath: options.snapshotPath,
+    startedAt: options.startedAt ?? now,
+    finishedAt: now,
+  };
+
+  return updateState(
+    {
+      ...state,
+      contextSyncRuns: [run, ...(state.contextSyncRuns ?? [])],
+    },
+    now,
+    {
+      type: "context_sync_run_recorded",
+      at: now,
+      contextSyncRunId: run.id,
+      summary: `${run.sourceId ?? run.provider} sync ${run.status}.`,
+    },
+  );
 }
 
 export function reviewMemory(state, options = {}) {
@@ -1009,6 +1144,11 @@ export function buildCodexContext(state, { missionId, now = new Date().toISOStri
     agentActivities: (state.agentActivities ?? []).filter((activity) => !mission || activity.missionId === mission.id).slice(0, 8),
     alignmentReports: (state.alignmentReports ?? []).filter((report) => !mission || report.missionId === mission.id).slice(0, 5),
     agentInterventions: (state.agentInterventions ?? []).filter((intervention) => !mission || intervention.missionId === mission.id).slice(0, 5),
+    userModelSummary: buildUserModelSummary(state, { now, includePending: true }),
+    contextSync: {
+      sources: (state.contextSyncSources ?? []).slice(0, 10),
+      runs: (state.contextSyncRuns ?? []).slice(0, 10),
+    },
   };
 }
 

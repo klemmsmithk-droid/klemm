@@ -15,6 +15,7 @@ npm run klemm -- codex debrief --mission mission-codex
 npm run klemm -- codex dogfood --id mission-codex --goal "Dogfood Codex supervision" --plan "Report plan, run watched tests, debrief."
 npm run klemm -- codex report --mission mission-codex --type tool_call --tool shell --command "npm test"
 npm run klemm -- codex run --mission mission-codex -- npm test
+npm run klemm -- codex install --output-dir ./codex-klemm --data-dir ./data
 npm run klemm -- mission start --id mission-codex --hub codex --goal "Build Klemm while Kyle is AFK" --allow read_files,edit_local_code,run_tests --block git_push,external_send,credential_change,oauth_scope_change --rewrite
 npm run klemm -- agent register --id agent-codex --mission mission-codex --name Codex --kind coding_agent
 npm run klemm -- event record --mission mission-codex --agent agent-codex --type command_planned --summary "Codex plans a test run" --action-id decision-tests --action-type command --target "npm test"
@@ -27,13 +28,16 @@ npm run klemm -- context import --provider chrome_history --file "$HOME/Library/
 npm run klemm -- memory review --group-by-source
 npm run klemm -- memory promote-policy <memory-id> --action-types git_push --target-includes github,origin
 npm run klemm -- user model
+npm run klemm -- sync add --id codex-history --provider codex --path ./codex.jsonl
+npm run klemm -- sync run
+npm run klemm -- sync status
 npm run klemm -- memory approve <memory-id> "Trusted preference"
-npm run klemm -- tui --mission mission-codex
+npm run klemm -- tui --mission mission-codex --view memory
 npm run klemm -- tui --interactive --mission mission-codex
 npm run klemm -- debrief --mission mission-codex
 npm run klemm -- run codex --mission mission-codex --dry-run -- --ask-for-approval on-request
 npm run klemm -- run shell --mission mission-codex -- node -e "console.log('safe local work')"
-npm run klemm -- supervise --watch --mission mission-codex -- npm test
+npm run klemm -- supervise --watch --intercept-output --mission mission-codex -- npm test
 npm run klemm -- monitor status --mission mission-codex
 npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
 npm run klemm -- supervise --capture --mission mission-codex -- npm test
@@ -42,6 +46,10 @@ npm run klemm -- os snapshot --mission mission-codex --watch-path ./src
 npm run klemm -- os status --mission mission-codex
 npm run klemm -- os permissions
 npm run klemm -- daemon health --url http://127.0.0.1:8765
+npm run klemm -- daemon install --output ./data/com.klemm.daemon.plist
+npm run klemm -- daemon migrate
+npm run klemm -- daemon start --dry-run
+npm run klemm -- daemon logs --tail 40
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
 npm run klemm -- install mcp --client codex
 npm run mcp
@@ -60,6 +68,8 @@ npm run klemm -- install mcp --client generic --output ./klemm-mcp.json
 Klemm includes a real stdio MCP server. It speaks JSON-RPC 2.0, supports `initialize`, `tools/list`, and `tools/call`, and exposes the same authority, monitor, memory, policy, OS, and adapter tools used by the CLI/daemon.
 
 `klemm install mcp` prints or writes MCP client config snippets that point compatible clients at the local Klemm stdio server.
+
+`klemm codex install` writes a Codex-ready bundle: `/klemm` skill instructions, a Codex MCP config, and a `klemm-codex` wrapper that routes Codex commands through Klemm's watched runtime.
 
 ## Agent Runtime Wrapper
 
@@ -95,7 +105,19 @@ Alignment states:
 
 Interventions currently include `nudge`, `pause`, and `queue`. These are recorded into the audit trail and surfaced in debriefs and Codex context.
 
-`--watch-loop` emits heartbeat evaluations while a long-running process is still active, giving Klemm a live supervisory path instead of only post-run review.
+`--watch-loop` emits heartbeat evaluations while a long-running process is still active, giving Klemm a live supervisory path instead of only post-run review. `--intercept-output` watches streamed stdout/stderr for risky action attempts such as `git push`, production deploys, credentials, OAuth changes, and destructive deletion; when detected, Klemm queues authority and terminates the supervised process.
+
+## Context Sync
+
+```bash
+npm run klemm -- sync add --id chatgpt-export --provider chatgpt --path ./exports/chatgpt.json
+npm run klemm -- sync add --id codex-history --provider codex --path ./codex.jsonl
+npm run klemm -- sync add --id chrome-history --provider chrome_history --path "$HOME/Library/Application Support/Google/Chrome/Default/History"
+npm run klemm -- sync run
+npm run klemm -- sync status
+```
+
+Sync sources are local files. Klemm checksums each source, skips unchanged inputs, snapshots imports into the local data directory, copies Chrome SQLite history before reading it, distills evidence-linked memories, and records sync runs for Codex context.
 
 ## Agent Adapter Protocol
 
@@ -122,6 +144,12 @@ npm run klemm -- policy add --id policy-prod --name "Production deploy approval"
 ## Daemon
 
 ```bash
+npm run klemm -- daemon install --output ./data/com.klemm.daemon.plist --data-dir ./data
+npm run klemm -- daemon migrate
+npm run klemm -- daemon start --dry-run
+npm run klemm -- daemon stop --dry-run
+npm run klemm -- daemon restart --dry-run
+npm run klemm -- daemon logs --tail 40
 npm run klemm -- daemon --host 127.0.0.1 --port 8765 --pid-file ./data/klemm.pid
 npm run klemm -- daemon health --url http://127.0.0.1:8765
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
@@ -237,10 +265,12 @@ This renders a LaunchAgent plist for a non-privileged Klemm daemon. Installing/l
 
 ## Terminal Dashboard
 
-`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, unresolved queue, memory candidates, recent interventions, and recent events.
+`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, unresolved queue, memory candidates, recent interventions, and recent events. Focused views are available with `--view overview|memory|queue|agents|policies|model|logs`.
 
 `klemm tui --interactive` accepts stdin commands:
 
+- `tab overview|memory|queue|agents|policies|model|logs`
+- `model`
 - `approve <decision-id> [note]`
 - `deny <decision-id> [note]`
 - `memory approve <memory-id> [note]`

@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, openSync } from "node:fs";
 import { dirname } from "node:path";
-import { readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 import {
+  addContextSyncSource,
   buildUserModelSummary,
   buildCodexContext,
   addStructuredPolicy,
@@ -14,8 +17,10 @@ import {
   importContextSource,
   importMemorySource,
   ingestMemoryExport,
+  migrateKlemmState,
   normalizeAgentAdapterEnvelope,
   renderLaunchAgentPlist,
+  recordContextSyncRun,
   searchMemories,
   recordAgentActivity,
   proposeAction,
@@ -30,6 +35,7 @@ import {
   startCodexHub,
   startMission,
   summarizeDebrief,
+  updateContextSyncSource,
 } from "./klemm.js";
 import { createKlemmHttpServer } from "./klemm-daemon.js";
 import {
@@ -39,7 +45,7 @@ import {
   defaultMacOsPermissionSnapshot,
   parseProcessTable,
 } from "./klemm-os.js";
-import { createKlemmStore } from "./klemm-store.js";
+import { createKlemmStore, KLEMM_DATA_DIR } from "./klemm-store.js";
 
 const store = createKlemmStore();
 
@@ -77,6 +83,7 @@ async function main() {
     if (command === "codex" && args[1] === "dogfood") return startCodexDogfoodFromCli(args.slice(2));
     if (command === "codex" && args[1] === "report") return recordCodexAdapterReportFromCli(args.slice(2));
     if (command === "codex" && args[1] === "run") return await runCodexWatchedCommandFromCli(args.slice(2));
+    if (command === "codex" && args[1] === "install") return await installCodexIntegrationFromCli(args.slice(2));
     if (command === "mission" && args[1] === "start") return startMissionFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
@@ -97,6 +104,9 @@ async function main() {
       return reviewMemoryFromCli(args.slice(2), memoryCommandToStatus(args[1]));
     }
     if (command === "user" && args[1] === "model") return printUserModel(args.slice(2));
+    if (command === "sync" && args[1] === "add") return addSyncSourceFromCli(args.slice(2));
+    if (command === "sync" && args[1] === "run") return await runContextSyncFromCli(args.slice(2));
+    if (command === "sync" && args[1] === "status") return printSyncStatus(args.slice(2));
     if (command === "debrief") return printDebrief(args.slice(1));
     if (command === "tui") return await printTui(args.slice(1));
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
@@ -172,8 +182,49 @@ function startCodexDogfoodFromCli(args) {
   console.log(`Next command: klemm supervise --watch-loop --mission ${mission.id} -- <command>`);
 }
 
+async function installCodexIntegrationFromCli(args) {
+  const flags = parseFlags(args);
+  const outputDir = flags.outputDir ?? join(KLEMM_DATA_DIR, "codex-integration");
+  const skillDir = join(outputDir, "skills", "klemm");
+  const binDir = join(outputDir, "bin");
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  await mkdir(skillDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+
+  const sourceSkillPath = join(process.cwd(), ".agents", "skills", "klemm", "SKILL.md");
+  let skill = "";
+  try {
+    skill = await readFile(sourceSkillPath, "utf8");
+  } catch {
+    skill = buildCodexSkillTemplate();
+  }
+  await writeFile(join(skillDir, "SKILL.md"), skill, "utf8");
+  await writeFile(join(outputDir, "mcp.json"), `${JSON.stringify(buildMcpClientConfig({ client: "codex", dataDir }), null, 2)}\n`, "utf8");
+  const wrapper = [
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    `export KLEMM_DATA_DIR="${dataDir.replaceAll('"', '\\"')}"`,
+    `exec "${process.execPath}" --no-warnings "${new URL(import.meta.url).pathname}" codex run "$@"`,
+    "",
+  ].join("\n");
+  const wrapperPath = join(binDir, "klemm-codex");
+  await writeFile(wrapperPath, wrapper, "utf8");
+  await chmod(wrapperPath, 0o755);
+
+  console.log(`Codex integration installed: ${outputDir}`);
+  console.log(`Skill: ${join(skillDir, "SKILL.md")}`);
+  console.log(`MCP config: ${join(outputDir, "mcp.json")}`);
+  console.log(`Wrapper: ${wrapperPath}`);
+}
+
 async function startDaemonFromCli(args) {
   if (args[0] === "health") return await printDaemonHealth(args.slice(1));
+  if (args[0] === "install") return await installDaemonFromCli(args.slice(1));
+  if (args[0] === "migrate") return migrateDaemonStoreFromCli(args.slice(1));
+  if (args[0] === "start") return await startDaemonProcessFromCli(args.slice(1));
+  if (args[0] === "stop") return await stopDaemonProcessFromCli(args.slice(1));
+  if (args[0] === "restart") return await restartDaemonProcessFromCli(args.slice(1));
+  if (args[0] === "logs") return await printDaemonLogs(args.slice(1));
   if (args[0] === "status") return await printDaemonProcessStatus(args.slice(1));
   const flags = parseFlags(args);
   const port = Number(flags.port ?? process.env.KLEMM_PORT ?? 8765);
@@ -205,6 +256,131 @@ async function startDaemonFromCli(args) {
   });
 }
 
+async function installDaemonFromCli(args) {
+  const flags = parseFlags(args);
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const logsDir = join(dataDir, "logs");
+  const output = flags.output ?? join(dataDir, "com.klemm.daemon.plist");
+  const cliPath = new URL(import.meta.url).pathname;
+  await mkdir(logsDir, { recursive: true });
+  const plist = renderLaunchAgentPlist({
+    label: flags.label,
+    program: flags.program ?? process.execPath,
+    dataDir,
+    programArguments: [
+      flags.program ?? process.execPath,
+      "--no-warnings",
+      cliPath,
+      "daemon",
+      "--host",
+      flags.host ?? "127.0.0.1",
+      "--port",
+      String(flags.port ?? process.env.KLEMM_PORT ?? 8765),
+      "--pid-file",
+      flags.pidFile ?? join(dataDir, "klemm.pid"),
+    ],
+    stdoutPath: flags.logFile ?? join(logsDir, "klemm-daemon.log"),
+    stderrPath: flags.errorLogFile ?? join(logsDir, "klemm-daemon.err.log"),
+  });
+  await writeFile(output, `${plist}\n`, "utf8");
+
+  console.log(`Daemon installed: ${output}`);
+  console.log(`Data dir: ${dataDir}`);
+  console.log(`Logs: ${logsDir}`);
+}
+
+function migrateDaemonStoreFromCli() {
+  const next = store.update((state) => migrateKlemmState(state));
+  console.log("Daemon store migrated");
+  console.log(`Schema version: ${next.schemaVersion}`);
+  console.log(`Migrations: ${(next.schemaMigrations ?? []).length}`);
+}
+
+async function startDaemonProcessFromCli(args) {
+  const flags = parseFlags(args);
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const pidFile = flags.pidFile ?? join(dataDir, "klemm.pid");
+  const logFile = flags.logFile ?? join(dataDir, "logs", "klemm-daemon.log");
+  const errorLogFile = flags.errorLogFile ?? join(dataDir, "logs", "klemm-daemon.err.log");
+  const port = String(flags.port ?? process.env.KLEMM_PORT ?? 8765);
+  const host = flags.host ?? "127.0.0.1";
+  const cliPath = new URL(import.meta.url).pathname;
+  const commandArgs = ["--no-warnings", cliPath, "daemon", "--host", host, "--port", port, "--pid-file", pidFile];
+  await mkdir(dirname(logFile), { recursive: true });
+  await mkdir(dirname(pidFile), { recursive: true });
+
+  if (flags.dryRun) {
+    console.log("Daemon start dry run");
+    console.log(`Command: ${process.execPath} ${commandArgs.join(" ")}`);
+    console.log(`PID file: ${pidFile}`);
+    console.log(`Log file: ${logFile}`);
+    return;
+  }
+
+  const stdoutFd = openSync(logFile, "a");
+  const stderrFd = openSync(errorLogFile, "a");
+  const child = spawn(process.execPath, commandArgs, {
+    detached: true,
+    stdio: ["ignore", stdoutFd, stderrFd],
+    env: { ...process.env, KLEMM_DATA_DIR: dataDir },
+  });
+  child.unref();
+  console.log(`Daemon started: ${child.pid}`);
+  console.log(`PID file: ${pidFile}`);
+  console.log(`Log file: ${logFile}`);
+}
+
+async function stopDaemonProcessFromCli(args) {
+  const flags = parseFlags(args);
+  const pidFile = flags.pidFile ?? join(flags.dataDir ?? KLEMM_DATA_DIR, "klemm.pid");
+  const pid = await readPidFile(pidFile);
+  if (!pid) {
+    console.log("Daemon process: not running");
+    console.log(`PID file: ${pidFile}`);
+    return;
+  }
+  if (flags.dryRun) {
+    console.log(`Daemon stop dry run: ${pid}`);
+    return;
+  }
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // It may already be gone.
+  }
+  try {
+    await unlink(pidFile);
+  } catch {
+    // The pid file may already be gone.
+  }
+  console.log(`Daemon stopped: ${pid}`);
+}
+
+async function restartDaemonProcessFromCli(args) {
+  await stopDaemonProcessFromCli(args);
+  await startDaemonProcessFromCli(args);
+}
+
+async function printDaemonLogs(args) {
+  const flags = parseFlags(args);
+  const logFile = flags.logFile ?? join(flags.dataDir ?? KLEMM_DATA_DIR, "logs", "klemm-daemon.log");
+  const tail = Number(flags.tail ?? 40);
+  let content = "";
+  try {
+    content = await readFile(logFile, "utf8");
+  } catch {
+    console.log("Daemon logs");
+    console.log(`Log file: ${logFile}`);
+    console.log("No log file found.");
+    return;
+  }
+  console.log("Daemon logs");
+  console.log(`Log file: ${logFile}`);
+  for (const line of content.split(/\r?\n/).filter(Boolean).slice(-tail)) {
+    console.log(line);
+  }
+}
+
 async function printDaemonHealth(args) {
   const flags = parseFlags(args);
   const url = flags.url ?? `http://${flags.host ?? "127.0.0.1"}:${flags.port ?? process.env.KLEMM_PORT ?? 8765}`;
@@ -223,18 +399,11 @@ async function printDaemonProcessStatus(args) {
   const pidFile = flags.pidFile ?? process.env.KLEMM_PID_FILE;
   if (!pidFile) throw new Error("Usage: klemm daemon status --pid-file <path>");
 
-  let pid;
-  try {
-    pid = Number((await readFile(pidFile, "utf8")).trim());
-  } catch {
+  const pid = await readPidFile(pidFile);
+  if (!pid) {
     console.log("Daemon process: not running");
     console.log(`PID file: ${pidFile}`);
-    return;
-  }
-
-  if (!Number.isFinite(pid) || pid <= 0) {
-    console.log("Daemon process: not running");
-    console.log(`PID file: ${pidFile}`);
+    if (flags.logFile) console.log(`Log file: ${flags.logFile}`);
     return;
   }
 
@@ -243,10 +412,12 @@ async function printDaemonProcessStatus(args) {
     console.log("Daemon process: running");
     console.log(`PID: ${pid}`);
     console.log(`PID file: ${pidFile}`);
+    if (flags.logFile) console.log(`Log file: ${flags.logFile}`);
   } catch {
     console.log("Daemon process: not running");
     console.log(`PID: ${pid}`);
     console.log(`PID file: ${pidFile}`);
+    if (flags.logFile) console.log(`Log file: ${flags.logFile}`);
   }
 }
 
@@ -649,6 +820,138 @@ function printUserModel(args) {
   console.log(summary.text);
 }
 
+function addSyncSourceFromCli(args) {
+  const flags = parseFlags(args);
+  if (!flags.id || !flags.provider || !flags.path) {
+    throw new Error("Usage: klemm sync add --id <id> --provider <provider> --path <path>");
+  }
+  const next = store.update((state) =>
+    addContextSyncSource(state, {
+      id: flags.id,
+      provider: flags.provider,
+      path: flags.path,
+      sourceRef: flags.ref ?? flags.path,
+    }),
+  );
+  const source = next.contextSyncSources.find((item) => item.id === flags.id);
+  console.log(`Sync source added: ${source.id}`);
+  console.log(`Provider: ${source.provider}`);
+  console.log(`Path: ${source.path}`);
+}
+
+async function runContextSyncFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const sources = (state.contextSyncSources ?? []).filter((source) => source.enabled !== false && (!flags.id || source.id === flags.id));
+  let imported = 0;
+  let skipped = 0;
+  let quarantined = 0;
+  for (const source of sources) {
+    const result = await syncOneSource(source);
+    imported += result.imported ? 1 : 0;
+    skipped += result.skipped ? 1 : 0;
+    quarantined += result.quarantinedCount;
+  }
+  console.log("Context sync complete");
+  console.log(`Sources: ${sources.length}`);
+  console.log(`Imported: ${imported}`);
+  console.log(`Skipped unchanged: ${skipped}`);
+  console.log(`Quarantined: ${quarantined}`);
+}
+
+async function syncOneSource(source) {
+  const startedAt = new Date().toISOString();
+  const buffer = await readFile(source.path);
+  const checksum = createHash("sha256").update(buffer).digest("hex");
+  if (checksum === source.lastChecksum) {
+    const runState = store.update((state) =>
+      recordContextSyncRun(state, {
+        sourceId: source.id,
+        provider: source.provider,
+        sourceRef: source.sourceRef,
+        status: "skipped_unchanged",
+        checksum,
+        skippedCount: 1,
+        startedAt,
+      }),
+    );
+    const run = runState.contextSyncRuns[0];
+    store.update((state) =>
+      updateContextSyncSource(state, source.id, {
+        lastRunId: run.id,
+      }),
+    );
+    return { skipped: true, quarantinedCount: 0 };
+  }
+
+  const snapshotPath = await snapshotSyncSource(source, buffer);
+  const before = store.getState();
+  const importedState = store.update((state) =>
+    importContextSource(state, {
+      provider: source.provider,
+      sourceRef: source.sourceRef ?? source.path,
+      payload: source.provider === "chrome_history" ? "" : buffer.toString("utf8"),
+      filePath: source.provider === "chrome_history" ? snapshotPath : undefined,
+    }),
+  );
+  const memorySource = importedState.memorySources[0];
+  const runState = store.update((state) =>
+    recordContextSyncRun(state, {
+      sourceId: source.id,
+      provider: source.provider,
+      sourceRef: source.sourceRef,
+      status: "imported",
+      checksum,
+      importedCount: 1,
+      distilledCount: importedState.memories.length - before.memories.length,
+      quarantinedCount: memorySource.quarantinedCount ?? 0,
+      snapshotPath,
+      startedAt,
+    }),
+  );
+  const run = runState.contextSyncRuns[0];
+  store.update((state) =>
+    updateContextSyncSource(state, source.id, {
+      lastChecksum: checksum,
+      lastImportedAt: run.finishedAt,
+      lastRunId: run.id,
+    }),
+  );
+  return { imported: true, quarantinedCount: memorySource.quarantinedCount ?? 0 };
+}
+
+async function snapshotSyncSource(source, buffer) {
+  const snapshotsDir = join(KLEMM_DATA_DIR, "sync-snapshots");
+  await mkdir(snapshotsDir, { recursive: true });
+  const suffix = source.provider === "chrome_history" ? ".sqlite" : ".txt";
+  const snapshotPath = join(snapshotsDir, `${source.id}-${Date.now()}${suffix}`);
+  if (source.provider === "chrome_history") {
+    await copyFile(source.path, snapshotPath);
+  } else {
+    await writeFile(snapshotPath, buffer);
+  }
+  return snapshotPath;
+}
+
+function printSyncStatus(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const sources = (state.contextSyncSources ?? []).filter((source) => !flags.id || source.id === flags.id);
+  console.log("Context sync status");
+  if (sources.length === 0) {
+    console.log("No sync sources configured.");
+    return;
+  }
+  for (const source of sources) {
+    console.log(
+      `- ${source.id} ${source.provider} path=${source.path} enabled=${source.enabled !== false} lastImported=${source.lastImportedAt ?? "never"} lastRun=${source.lastRunId ?? "none"}`,
+    );
+  }
+  for (const run of (state.contextSyncRuns ?? []).slice(0, 8)) {
+    console.log(`- run ${run.id} source=${run.sourceId} status=${run.status} distilled=${run.distilledCount} quarantined=${run.quarantinedCount}`);
+  }
+}
+
 function printDebrief(args) {
   const flags = parseFlags(args);
   console.log(summarizeDebrief(store.getState(), { missionId: flags.mission }));
@@ -656,11 +959,11 @@ function printDebrief(args) {
 
 async function printTui(args) {
   const flags = parseFlags(args);
-  console.log(renderKlemmDashboard(store.getState(), { missionId: flags.mission }));
+  console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: flags.view ?? "overview", logFile: flags.logFile }));
   if (!flags.interactive) return;
 
   console.log("Interactive Klemm TUI");
-  console.log("Commands: approve|deny <decision-id> [note], memory approve|reject|pin <memory-id> [note], quit");
+  console.log("Commands: tab <overview|memory|queue|agents|policies|model|logs>, model, approve|deny <decision-id> [note], memory approve|reject|pin <memory-id> [note], quit");
   const input = await readStdin();
   for (const line of input.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
     if (line === "quit" || line === "exit") {
@@ -668,6 +971,14 @@ async function printTui(args) {
       return;
     }
     const [command, subcommand, id, ...noteParts] = splitShellLike(line);
+    if (command === "tab") {
+      console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: subcommand ?? "overview", logFile: flags.logFile }));
+      continue;
+    }
+    if (command === "model") {
+      console.log(buildUserModelSummary(store.getState()).text);
+      continue;
+    }
     if (command === "approve" || command === "deny" || command === "rewrite") {
       recordQueueOutcome([subcommand, id, ...noteParts].filter(Boolean), command === "deny" ? "denied" : command === "approve" ? "approved" : "rewritten");
       continue;
@@ -678,6 +989,46 @@ async function printTui(args) {
     }
     console.log(`Unknown interactive command: ${line}`);
   }
+}
+
+function renderTuiView(state, { missionId, view = "overview", logFile } = {}) {
+  const normalized = String(view ?? "overview").toLowerCase();
+  const header = ["Klemm TUI", `View: ${normalized}`];
+  if (normalized === "overview") return [...header, renderKlemmDashboard(state, { missionId })].join("\n");
+  if (normalized === "memory") {
+    return [
+      ...header,
+      "Memory Review",
+      ...(state.memories ?? []).slice(0, 12).map((memory) => `- ${memory.id} ${memory.status} [${memory.memoryClass}] ${memory.text}`),
+      "Quarantine",
+      ...((state.memoryQuarantine ?? []).slice(0, 8).map((item) => `- ${item.id} ${item.reason}: ${oneLine(item.text)}`)),
+    ].join("\n");
+  }
+  if (normalized === "queue") {
+    const queue = (state.queue ?? []).filter((item) => item.status === "queued");
+    return [...header, "Queue", ...(queue.length ? queue.map((item) => `- ${item.id} ${item.riskLevel} ${item.actionType} ${item.target}`) : ["- none"])].join("\n");
+  }
+  if (normalized === "agents") {
+    return [
+      ...header,
+      "Agents",
+      ...((state.agents ?? []).map((agent) => `- ${agent.id} ${agent.status} mission=${agent.missionId} kind=${agent.kind}`)),
+      "Monitor",
+      ...((state.alignmentReports ?? []).slice(0, 8).map((report) => `- ${report.id} ${report.state}: ${report.reason}`)),
+    ].join("\n");
+  }
+  if (normalized === "policies") {
+    return [
+      ...header,
+      "Policies",
+      ...((state.policies ?? []).map((policy) => `- ${policy.id} ${policy.effect} ${policy.name}`)),
+    ].join("\n");
+  }
+  if (normalized === "model") return [...header, buildUserModelSummary(state).text].join("\n");
+  if (normalized === "logs") {
+    return [...header, "Logs", `Log file: ${logFile ?? join(KLEMM_DATA_DIR, "logs", "klemm-daemon.log")}`].join("\n");
+  }
+  return [...header, `Unknown view: ${view}`].join("\n");
 }
 
 async function superviseFromCli(args) {
@@ -707,6 +1058,7 @@ async function superviseFromCli(args) {
       missionId: flags.mission,
       watchLoop: flags.watchLoop,
       watchIntervalMs: flags.watchIntervalMs,
+      onLiveOutput: flags.interceptOutput ? buildLiveOutputInterceptor(flags) : null,
     });
     if (flags.capture) persistCapturedRun(flags, decision.rewrite, result, commandCwd);
     if (flags.watch) recordAndPrintAlignment(flags, {
@@ -731,6 +1083,7 @@ async function superviseFromCli(args) {
     missionId: flags.mission,
     watchLoop: flags.watchLoop,
     watchIntervalMs: flags.watchIntervalMs,
+    onLiveOutput: flags.interceptOutput ? buildLiveOutputInterceptor(flags) : null,
   });
   if (flags.capture) persistCapturedRun(flags, target, result, commandCwd);
   if (flags.watch || flags.watchLoop) recordAndPrintAlignment(flags, {
@@ -806,7 +1159,7 @@ async function runRuntimeFromCli(args) {
   process.exitCode = result.status;
 }
 
-async function runSupervisedProcess(command, { cwd = process.cwd(), capture = false, watchLoop = false, watchIntervalMs = 1000 } = {}) {
+async function runSupervisedProcess(command, { cwd = process.cwd(), capture = false, watchLoop = false, watchIntervalMs = 1000, onLiveOutput = null } = {}) {
   const startedAt = new Date().toISOString();
   const beforeSnapshot = capture ? await snapshotFiles(cwd) : new Map();
   const started = Date.now();
@@ -826,13 +1179,33 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
     }
     let stdout = "";
     let stderr = "";
+    let liveIntervention = null;
+    const handleOutput = (stream, chunk) => {
+      const text = chunk.toString();
+      if (stream === "stdout") {
+        stdout += text;
+        process.stdout.write(chunk);
+      } else {
+        stderr += text;
+        process.stderr.write(chunk);
+      }
+      if (!onLiveOutput || liveIntervention) return;
+      liveIntervention = onLiveOutput({
+        stream,
+        text,
+        transcript: `${stdout}\n${stderr}`,
+        command: command.join(" "),
+      });
+      if (liveIntervention) {
+        process.stdout.write(`Klemm live intervention: ${liveIntervention.decision.decision} ${liveIntervention.decision.actionType} ${liveIntervention.decision.id}\n`);
+        child.kill("SIGTERM");
+      }
+    };
     child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      process.stdout.write(chunk);
+      handleOutput("stdout", chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-      process.stderr.write(chunk);
+      handleOutput("stderr", chunk);
     });
     child.on("error", (error) => {
       if (heartbeat) clearInterval(heartbeat);
@@ -840,7 +1213,7 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
     });
     child.on("close", (status) => {
       if (heartbeat) clearInterval(heartbeat);
-      resolve({ status: status ?? 1, stdout, stderr });
+      resolve({ status: liveIntervention ? 2 : status ?? 1, stdout, stderr, liveInterventions: liveIntervention ? [liveIntervention] : [] });
     });
   });
   const afterSnapshot = capture ? await snapshotFiles(cwd) : new Map();
@@ -851,6 +1224,71 @@ async function runSupervisedProcess(command, { cwd = process.cwd(), capture = fa
     durationMs: Date.now() - started,
     fileChanges: capture ? diffSnapshots(beforeSnapshot, afterSnapshot) : [],
   };
+}
+
+function buildLiveOutputInterceptor(flags) {
+  return ({ text, transcript }) => {
+    const proposal = buildLiveOutputProposal(text, transcript, {
+      missionId: flags.mission,
+      actor: flags.actor ?? "supervised_process",
+    });
+    if (!proposal) return null;
+    const next = store.update((state) => proposeAction(state, proposal));
+    return {
+      decision: next.decisions[0],
+      matchedText: oneLine(text),
+    };
+  };
+}
+
+function buildLiveOutputProposal(text, transcript, { missionId, actor } = {}) {
+  const haystack = `${text}\n${transcript}`;
+  if (/\bgit\s+push\b/i.test(haystack)) {
+    return {
+      id: `live-output-${Date.now()}`,
+      missionId,
+      actor,
+      actionType: "git_push",
+      target: oneLine(text),
+      externality: "git_push",
+      missionRelevance: "related",
+    };
+  }
+  if (/\bdeploy\b.*\b(prod|production)\b|\b(vercel|netlify|fly|railway)\b.*\bdeploy\b/i.test(haystack)) {
+    return {
+      id: `live-output-${Date.now()}`,
+      missionId,
+      actor,
+      actionType: "deployment",
+      target: oneLine(text),
+      externality: "deployment",
+      missionRelevance: "related",
+    };
+  }
+  if (/\b(secret|token|credential|api[-_ ]?key|oauth)\b/i.test(haystack)) {
+    return {
+      id: `live-output-${Date.now()}`,
+      missionId,
+      actor,
+      actionType: /oauth/i.test(haystack) ? "oauth_scope_change" : "credential_change",
+      target: oneLine(text),
+      externality: "credential_surface",
+      credentialImpact: true,
+      missionRelevance: "related",
+    };
+  }
+  if (/\brm\s+-rf\b|\bdelete\b.*\b(production|database|bucket|account)\b/i.test(haystack)) {
+    return {
+      id: `live-output-${Date.now()}`,
+      missionId,
+      actor,
+      actionType: "delete_data",
+      target: oneLine(text),
+      externality: "local_only",
+      missionRelevance: "related",
+    };
+  }
+  return null;
 }
 
 function persistCapturedRun(flags, command, result, cwd) {
@@ -1053,7 +1491,7 @@ function printMcpCommand() {
 async function installMcpFromCli(args) {
   const flags = parseFlags(args);
   const client = flags.client ?? "generic";
-  const config = buildMcpClientConfig({ client });
+  const config = buildMcpClientConfig({ client, dataDir: flags.dataDir });
   const rendered = JSON.stringify(config, null, 2);
   if (flags.output) {
     await writeFile(flags.output, `${rendered}\n`, "utf8");
@@ -1066,13 +1504,13 @@ async function installMcpFromCli(args) {
   console.log(rendered);
 }
 
-function buildMcpClientConfig({ client } = {}) {
+function buildMcpClientConfig({ client, dataDir } = {}) {
   const serverPath = join(dirname(new URL(import.meta.url).pathname), "klemm-mcp-server.js");
   const base = {
     command: process.execPath,
     args: ["--no-warnings", serverPath],
     env: {
-      KLEMM_DATA_DIR: process.env.KLEMM_DATA_DIR || join(process.cwd(), "data"),
+      KLEMM_DATA_DIR: dataDir ?? process.env.KLEMM_DATA_DIR ?? join(process.cwd(), "data"),
     },
   };
   if (client === "codex") {
@@ -1105,6 +1543,29 @@ function printDecision(decision) {
   console.log(`Decision ID: ${decision.id}`);
   console.log(`Reason: ${decision.reason}`);
   if (decision.rewrite) console.log(`Rewrite: ${decision.rewrite}`);
+}
+
+async function readPidFile(pidFile) {
+  try {
+    const pid = Number((await readFile(pidFile, "utf8")).trim());
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildCodexSkillTemplate() {
+  return [
+    "---",
+    "name: klemm",
+    "description: Use when Codex should operate under Klemm's local authority layer.",
+    "---",
+    "",
+    "# Klemm",
+    "",
+    "Start with `klemm codex hub`, fetch `klemm codex context`, run commands through `klemm codex run`, ask authority before risky actions, and debrief with `klemm codex debrief`.",
+    "",
+  ].join("\n");
 }
 
 function printMemoryCandidate(memory) {
@@ -1277,6 +1738,7 @@ Commands:
   klemm codex dogfood --id mission-id --goal "..." --plan "..."
   klemm codex report --mission mission-id --type tool_call --tool shell --command "npm test"
   klemm codex run --mission mission-id -- <command> [args...]
+  klemm codex install --output-dir path [--data-dir path]
   klemm mission start --hub codex --goal "..." [--allow a,b] [--block x,y] [--rewrite]
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
   klemm event record --mission mission-id --agent agent-codex --type command_planned --summary "..."
@@ -1293,10 +1755,13 @@ Commands:
   klemm memory review [--group-by-source]
   klemm memory promote-policy <memory-id> [--action-types git_push] [--target-includes github]
   klemm user model [--pending]
+  klemm sync add --id source-id --provider codex --path export.jsonl
+  klemm sync run [--id source-id]
+  klemm sync status
   klemm debrief [--mission mission-id]
-  klemm tui [--mission mission-id] [--interactive]
+  klemm tui [--mission mission-id] [--view overview|memory|queue|agents|policies|model|logs] [--interactive]
   klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] -- [args...]
-  klemm supervise [--mission mission-id] [--capture] [--watch] [--watch-loop] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
+  klemm supervise [--mission mission-id] [--capture] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs
   klemm monitor status [--mission mission-id]
   klemm monitor evaluate [--mission mission-id] [--agent agent-id]
@@ -1307,6 +1772,7 @@ Commands:
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions
+  klemm daemon install|migrate|start|stop|restart|logs
   klemm daemon [--host 127.0.0.1] [--port 8765] [--pid-file path]
   klemm daemon health [--url http://127.0.0.1:8765]
   klemm daemon status --pid-file path
