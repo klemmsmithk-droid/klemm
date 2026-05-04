@@ -142,6 +142,347 @@ export function startMission(state, options = {}) {
   );
 }
 
+export function startGoal(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const id = options.id ?? `goal-${compactTimestamp(now)}`;
+  const objective = options.text ?? options.objective ?? options.goal;
+  if (!objective) throw new Error("goal objective is required");
+  const missionId = options.missionId ?? options.mission ?? `mission-${id}`;
+  const missionState = startMission(state, {
+    id: missionId,
+    hub: options.hub ?? "klemm_goal",
+    goal: objective,
+    allowedActions: options.allowedActions ?? DEFAULT_ALLOWED_ACTIONS,
+    blockedActions: options.blockedActions ?? [...DEFAULT_BLOCKED_ACTIONS, "deployment"],
+    rewriteAllowed: options.rewriteAllowed ?? true,
+    escalationChannel: options.escalationChannel ?? "klemm_goal_queue",
+    durationMinutes: options.durationMinutes,
+    expiresAt: options.expiresAt,
+    now,
+  });
+  const goal = {
+    id,
+    objective,
+    successCriteria: options.success ?? options.successCriteria ?? "",
+    missionId,
+    status: options.status ?? "active",
+    budgetTurns: Number(options.budgetTurns ?? 8),
+    watchPaths: normalizeList(options.watchPaths ?? options.watchPath, []),
+    attachedAgents: [],
+    ticks: [],
+    evidence: [],
+    riskHints: [],
+    createdAt: now,
+  };
+
+  return updateState(
+    {
+      ...missionState,
+      goals: [goal, ...(missionState.goals ?? []).filter((item) => item.id !== id)],
+      observationEvents: [
+        {
+          id: `observation-event-${compactTimestamp(now)}-goal-start`,
+          type: "goal_started",
+          missionId,
+          goalId: id,
+          summary: objective,
+          createdAt: now,
+        },
+        ...(missionState.observationEvents ?? []),
+      ],
+    },
+    now,
+    {
+      type: "goal_started",
+      at: now,
+      missionId,
+      goalId: id,
+      summary: objective,
+    },
+  );
+}
+
+export function attachGoalAgent(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const goal = findGoal(state, options.id ?? options.goalId ?? options.goal ?? options.missionId);
+  if (!goal) throw new Error(`Goal not found: ${options.id ?? options.goalId ?? options.goal ?? "missing"}`);
+  const agentId = options.agentId ?? options.agent ?? options.actor;
+  if (!agentId) throw new Error("agentId is required");
+  const withAgent = registerAgent(state, {
+    id: agentId,
+    missionId: goal.missionId,
+    name: options.name ?? agentId,
+    kind: options.kind ?? "agent",
+    command: options.command ?? "",
+    now,
+  });
+  const attached = {
+    agentId,
+    kind: options.kind ?? "agent",
+    command: options.command ?? "",
+    source: options.source,
+    attachedAt: now,
+  };
+
+  return updateState(
+    {
+      ...withAgent,
+      goals: (withAgent.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              attachedAgents: [attached, ...(item.attachedAgents ?? []).filter((agent) => agent.agentId !== agentId)],
+            }
+          : item,
+      ),
+      observationEvents: [
+        {
+          id: `observation-event-${compactTimestamp(now)}-goal-agent`,
+          type: "goal_agent_attached",
+          missionId: goal.missionId,
+          goalId: goal.id,
+          agentId,
+          summary: `${agentId} attached to ${goal.id}`,
+          createdAt: now,
+        },
+        ...(withAgent.observationEvents ?? []),
+      ],
+    },
+    now,
+    {
+      type: "goal_agent_attached",
+      at: now,
+      missionId: goal.missionId,
+      goalId: goal.id,
+      agentId,
+      summary: `${agentId} attached to ${goal.id}`,
+    },
+  );
+}
+
+export function recordGoalTick(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const goal = findGoal(state, options.id ?? options.goalId ?? options.goal ?? options.missionId);
+  if (!goal) throw new Error(`Goal not found: ${options.id ?? options.goalId ?? options.goal ?? "missing"}`);
+  const changedFiles = normalizeList(options.changedFiles ?? options.changedFile, []);
+  const evidence = normalizeList(options.evidence, []);
+  const assessment = assessGoalTick(goal, {
+    summary: options.summary,
+    agentOutput: options.agentOutput,
+    changedFiles,
+  });
+  const tick = {
+    id: options.tickId ?? `goal-tick-${compactTimestamp(now)}-${((goal.ticks ?? []).length ?? 0) + 1}`,
+    goalId: goal.id,
+    at: now,
+    agentId: options.agentId ?? options.agent ?? "unknown_agent",
+    summary: redactSensitiveText(options.summary ?? "Goal tick recorded."),
+    changedFiles,
+    evidence: evidence.map(redactSensitiveText),
+    alignment: assessment.alignment,
+    riskHints: assessment.riskHints,
+  };
+  const events = [
+    {
+      id: `observation-event-${compactTimestamp(now)}-goal-tick`,
+      type: "goal_tick",
+      missionId: goal.missionId,
+      goalId: goal.id,
+      agentId: tick.agentId,
+      summary: tick.summary,
+      createdAt: now,
+    },
+    ...assessment.riskHints.map((hint, index) => ({
+      id: `observation-event-${compactTimestamp(now)}-goal-risk-${index}`,
+      type: "risk_hint",
+      missionId: goal.missionId,
+      goalId: goal.id,
+      agentId: tick.agentId,
+      summary: hint,
+      createdAt: now,
+    })),
+  ];
+  const withActivity = options.recordActivity === false
+    ? state
+    : recordAgentActivity(state, {
+        missionId: goal.missionId,
+        agentId: tick.agentId,
+        type: "goal_tick",
+        summary: tick.summary,
+        target: changedFiles.join(","),
+        fileChanges: changedFiles,
+        evidence: { goalId: goal.id, riskHints: tick.riskHints, evidence: tick.evidence },
+        now,
+      });
+
+  return updateState(
+    {
+      ...withActivity,
+      goals: (withActivity.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              ticks: [tick, ...(item.ticks ?? [])],
+              evidence: [...tick.evidence, ...(item.evidence ?? [])],
+              riskHints: [...assessment.riskHints, ...(item.riskHints ?? [])],
+              lastTickAt: now,
+              latestAlignment: assessment.alignment,
+            }
+          : item,
+      ),
+      observationEvents: [...events, ...(withActivity.observationEvents ?? [])],
+    },
+    now,
+    {
+      type: "goal_tick_recorded",
+      at: now,
+      missionId: goal.missionId,
+      goalId: goal.id,
+      agentId: tick.agentId,
+      summary: tick.summary,
+    },
+  );
+}
+
+export function setGoalStatus(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const goal = findGoal(state, options.id ?? options.goalId ?? options.goal ?? options.missionId);
+  if (!goal) throw new Error(`Goal not found: ${options.id ?? options.goalId ?? options.goal ?? "missing"}`);
+  const status = options.status ?? "active";
+  return updateState(
+    {
+      ...state,
+      goals: (state.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              status,
+              [`${status}At`]: now,
+              pauseReason: status === "paused" ? options.reason ?? "" : item.pauseReason,
+            }
+          : item,
+      ),
+      observationEvents: [
+        {
+          id: `observation-event-${compactTimestamp(now)}-goal-${status}`,
+          type: `goal_${status}`,
+          missionId: goal.missionId,
+          goalId: goal.id,
+          summary: options.reason ?? status,
+          createdAt: now,
+        },
+        ...(state.observationEvents ?? []),
+      ],
+    },
+    now,
+    {
+      type: `goal_${status}`,
+      at: now,
+      missionId: goal.missionId,
+      goalId: goal.id,
+      summary: options.reason ?? status,
+    },
+  );
+}
+
+export function completeGoal(state, options = {}) {
+  const next = setGoalStatus(state, { ...options, status: "completed" });
+  const now = options.now ?? next.updatedAt ?? new Date().toISOString();
+  const goal = findGoal(next, options.id ?? options.goalId ?? options.goal ?? options.missionId);
+  const evidence = redactSensitiveText(options.evidence ?? "completed");
+  return updateState(
+    {
+      ...next,
+      goals: (next.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              completedAt: now,
+              completionEvidence: evidence,
+              evidence: [evidence, ...(item.evidence ?? [])],
+            }
+          : item,
+      ),
+      observationEvents: [
+        {
+          id: `observation-event-${compactTimestamp(now)}-goal-completed`,
+          type: "goal_completed",
+          missionId: goal.missionId,
+          goalId: goal.id,
+          summary: evidence,
+          createdAt: now,
+        },
+        ...(next.observationEvents ?? []),
+      ],
+    },
+    now,
+    {
+      type: "goal_completed",
+      at: now,
+      missionId: goal.missionId,
+      goalId: goal.id,
+      summary: evidence,
+    },
+  );
+}
+
+export function getGoalStatus(state, options = {}) {
+  const goal = findGoal(state, options.id ?? options.goalId ?? options.goal ?? options.missionId);
+  if (!goal) throw new Error(`Goal not found: ${options.id ?? options.goalId ?? options.goal ?? "missing"}`);
+  return {
+    goal,
+    mission: findMission(state, goal.missionId),
+    activities: (state.agentActivities ?? []).filter((activity) => activity.missionId === goal.missionId),
+    decisions: (state.decisions ?? []).filter((decision) => decision.missionId === goal.missionId),
+    observationEvents: (state.observationEvents ?? []).filter((event) => event.missionId === goal.missionId),
+  };
+}
+
+export function summarizeGoalDebrief(state, options = {}) {
+  const { goal, activities, decisions } = getGoalStatus(state, options);
+  return [
+    "Klemm goal debrief",
+    `Goal: ${goal.id}`,
+    `Status: ${goal.status}`,
+    `Objective: ${goal.objective}`,
+    `Success: ${goal.successCriteria || "not specified"}`,
+    `Mission: ${goal.missionId}`,
+    `Ticks: ${(goal.ticks ?? []).length}`,
+    `Decisions: ${decisions.length}`,
+    `Activities: ${activities.length}`,
+    "Evidence:",
+    ...((goal.evidence ?? []).length ? (goal.evidence ?? []).slice(0, 8).map((item) => `- ${redactSensitiveText(item)}`) : ["- none"]),
+    "Risk hints:",
+    ...((goal.riskHints ?? []).length ? (goal.riskHints ?? []).slice(0, 8).map((hint) => `- ${redactSensitiveText(hint)}`) : ["- none"]),
+  ].join("\n");
+}
+
+export function findGoal(state, idOrMission) {
+  const goals = state.goals ?? [];
+  if (!idOrMission) return goals.find((goal) => goal.status === "active") ?? goals[0] ?? null;
+  return goals.find((goal) => goal.id === idOrMission || goal.missionId === idOrMission) ?? null;
+}
+
+export function assessGoalTick(goal, { summary = "", agentOutput = "", changedFiles = [] } = {}) {
+  const riskHints = [];
+  const text = `${summary} ${agentOutput}`.toLowerCase();
+  if (/\bdeploy|production|publish|send|credential|secret|token|oauth|delete|push\b/.test(text)) {
+    riskHints.push("goal work mentions a risky or external action");
+  }
+  const watchPaths = goal.watchPaths ?? [];
+  if (watchPaths.length > 0) {
+    for (const file of changedFiles) {
+      const normalized = String(file);
+      const inside = watchPaths.some((path) => normalized === path || normalized.startsWith(`${path.replace(/\/$/, "")}/`) || normalized.includes(`/${path.replace(/^\.\//, "").replace(/\/$/, "")}/`));
+      if (!inside) riskHints.push(`changed file outside goal watch paths: ${normalized}`);
+    }
+  }
+  return {
+    alignment: riskHints.length ? "needs_review" : "on_track",
+    riskHints,
+  };
+}
+
 export function registerAgent(state, options = {}) {
   const now = options.now ?? new Date().toISOString();
   const id = options.id ?? `agent-${compactTimestamp(now)}`;

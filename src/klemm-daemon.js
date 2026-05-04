@@ -51,6 +51,30 @@ export function createKlemmHttpServer({ getState, saveState }) {
         return runTool(response, "start_mission", await readJson(request), { getState, saveState });
       }
 
+      if (request.method === "POST" && url.pathname === "/api/goals/start") {
+        return runTool(response, "goal_start", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/goals/attach") {
+        return runTool(response, "goal_attach", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/goals/tick") {
+        return runTool(response, "goal_tick", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/goals/complete") {
+        return runTool(response, "goal_complete", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/goals/status") {
+        return runTool(response, "goal_status", { id: url.searchParams.get("id") ?? url.searchParams.get("goal") ?? url.searchParams.get("mission") }, { getState, saveState });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/goals/debrief") {
+        return runTool(response, "goal_debrief", { id: url.searchParams.get("id") ?? url.searchParams.get("goal") ?? url.searchParams.get("mission") }, { getState, saveState });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/agents/register") {
         return runTool(response, "register_agent", await readJson(request), { getState, saveState });
       }

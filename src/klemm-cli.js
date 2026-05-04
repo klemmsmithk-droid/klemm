@@ -15,6 +15,7 @@ import {
   addStructuredPolicy,
   distillMemory,
   evaluateAgentAlignment,
+  getGoalStatus,
   getKlemmStatus,
   importContextSource,
   importMemorySource,
@@ -1878,8 +1879,10 @@ function activityMatchesAdapter(adapter, activity) {
 }
 
 function trustWhyFromCli(args) {
-  const decisionId = args[0];
+  const flags = parseFlags(args);
   const state = store.getState();
+  if (flags.goal) return trustWhyGoalFromCli(flags.goal);
+  const decisionId = args[0];
   const decision = (state.decisions ?? []).find((item) => item.id === decisionId);
   if (!decision) throw new Error(`Decision not found: ${decisionId}`);
   const mission = (state.missions ?? []).find((item) => item.id === decision.missionId);
@@ -1931,6 +1934,46 @@ function trustWhyFromCli(args) {
   console.log("How to correct Klemm");
   console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
   console.log("- Review the resulting memory candidate, then promote it to policy if it should become a standing rule.");
+}
+
+function trustWhyGoalFromCli(goalId) {
+  const state = store.getState();
+  const { goal, mission, activities, decisions, observationEvents } = getGoalStatus(state, { id: goalId });
+  const latestTick = goal.ticks?.[0];
+  const riskHints = [...new Set([...(latestTick?.riskHints ?? []), ...(goal.riskHints ?? [])])];
+  const latestActivity = activities[0];
+  const queued = decisions.filter((decision) => decision.status === "queued");
+  console.log("Why Klemm judged goal");
+  console.log(`Bottom line: ${latestTick?.alignment ?? goal.latestAlignment ?? "unknown"} for ${goal.id}`);
+  console.log(`Objective: ${goal.objective}`);
+  console.log(`Success: ${goal.successCriteria || "not specified"}`);
+  console.log(`Mission lease: ${mission?.id ?? goal.missionId} ${mission?.goal ?? ""}`);
+  console.log(`Attached agents: ${(goal.attachedAgents ?? []).length}`);
+  console.log(`Progress: ${(goal.ticks ?? []).length}/${goal.budgetTurns}`);
+  console.log("");
+  console.log("What Klemm saw");
+  console.log(`- Latest tick: ${latestTick?.summary ?? "none"}`);
+  console.log(`- Latest agent: ${latestTick?.agentId ?? latestActivity?.agentId ?? "none"}`);
+  console.log(`- Latest activity: ${latestActivity ? `${latestActivity.type} ${latestActivity.summary}` : "none"}`);
+  console.log("");
+  console.log("Risk and drift");
+  if (riskHints.length === 0) console.log("- none");
+  for (const hint of riskHints.slice(0, 8)) console.log(`- ${redactSensitiveText(hint)}`);
+  console.log("");
+  console.log("Evidence");
+  if ((goal.evidence ?? []).length === 0) console.log("- none");
+  for (const item of (goal.evidence ?? []).slice(0, 8)) console.log(`- ${redactSensitiveText(item)}`);
+  console.log("");
+  console.log("Queue");
+  if (queued.length === 0) console.log("- none");
+  for (const decision of queued.slice(0, 5)) console.log(`- ${decision.id} ${decision.actionType}: ${redactSensitiveText(decision.reason)}`);
+  console.log("");
+  console.log("Timeline evidence");
+  for (const event of observationEvents.slice(0, 8)) console.log(`- ${event.type}: ${redactSensitiveText(event.summary ?? "")}`);
+  console.log("");
+  console.log("How to correct Klemm");
+  console.log(`- klemm goal tick --id ${goal.id} --summary "..." --evidence "..."`);
+  console.log("- If this judgment is wrong, add a correction from a related queued decision or promote a reviewed preference into policy.");
 }
 
 function trustTimelineFromCli(args) {
@@ -4090,6 +4133,7 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
       ...((state.alignmentReports ?? []).slice(0, 8).map((report) => `- ${report.id} ${report.state}: ${report.reason}`)),
     ].join("\n");
   }
+  if (normalized === "goals") return [...header, renderGoalsTui(state)].join("\n");
   if (normalized === "policies") {
     return [
       ...header,
@@ -4110,6 +4154,28 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
     return [...header, renderSourceEvidence(memory, state)].join("\n");
   }
   return [...header, `Unknown view: ${view}`].join("\n");
+}
+
+function renderGoalsTui(state) {
+  const goals = state.goals ?? [];
+  const lines = ["Klemm Goals"];
+  if (goals.length === 0) {
+    lines.push("- none");
+    return lines.join("\n");
+  }
+  for (const goal of goals.slice(0, 10)) {
+    const activities = (state.agentActivities ?? []).filter((activity) => activity.missionId === goal.missionId);
+    const queued = (state.queue ?? []).filter((decision) => decision.missionId === goal.missionId && decision.status === "queued");
+    const latestTick = goal.ticks?.[0];
+    lines.push(`- ${goal.id} ${goal.status} alignment=${goal.latestAlignment ?? latestTick?.alignment ?? "none"} progress=${(goal.ticks ?? []).length}/${goal.budgetTurns} agents=${(goal.attachedAgents ?? []).length} queue=${queued.length}`);
+    lines.push(`  Objective: ${redactSensitiveText(goal.objective)}`);
+    lines.push(`  Mission: ${goal.missionId}`);
+    lines.push(`  Latest: ${latestTick ? redactSensitiveText(latestTick.summary) : "none"}`);
+    if ((goal.riskHints ?? []).length) lines.push(`  Risk: ${goal.riskHints.slice(0, 3).map(redactSensitiveText).join("; ")}`);
+    if (activities[0]) lines.push(`  Activity: ${activities[0].type} ${redactSensitiveText(activities[0].summary)}`);
+    lines.push(`  Next: klemm trust why --goal ${goal.id}`);
+  }
+  return lines.join("\n");
 }
 
 function renderMemoryWorkbench(state, { search, sourcePreview = false } = {}) {
@@ -5541,6 +5607,7 @@ Commands:
   klemm adapters list|probe|install|uninstall|doctor|health [--real] [--home path]
   klemm adapters health [--mission mission-id] [--require codex,claude,cursor,shell]
   klemm trust why <decision-id>
+  klemm trust why --goal goal-id
   klemm trust timeline --mission mission-id
   klemm corrections add --decision <id> --preference "..."
   klemm corrections review|approve|reject|promote <correction-id>
@@ -5565,7 +5632,7 @@ Commands:
   klemm onboard --stdin
   klemm onboard v2 --stdin
   klemm debrief [--mission mission-id]
-  klemm tui [--mission mission-id] [--view overview|memory|workbench|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
+  klemm tui [--mission mission-id] [--view overview|memory|workbench|goals|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
   klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--goal goal-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
   klemm supervise [--mission mission-id] [--capture] [--record-tree] [--timeout-ms 60000] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs [--details]

@@ -36,6 +36,12 @@ test("Klemm MCP-style tools expose the cross-agent authority surface", () => {
     "import_context_source",
     "promote_memory_policy",
     "search_memories",
+    "goal_start",
+    "goal_attach",
+    "goal_tick",
+    "goal_status",
+    "goal_complete",
+    "goal_debrief",
   ]);
 });
 

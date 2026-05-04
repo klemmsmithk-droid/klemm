@@ -4,7 +4,11 @@ import {
   distillMemory,
   buildCodexContext,
   addStructuredPolicy,
+  attachGoalAgent,
+  completeGoal,
   evaluateAgentAlignment,
+  findGoal,
+  getGoalStatus,
   getKlemmStatus,
   importContextSource,
   importMemorySource,
@@ -14,6 +18,7 @@ import {
   proposeAction,
   recordAgentActivity,
   recordAgentEvent,
+  recordGoalTick,
   recordOsObservation,
   recordQueuedDecision,
   recordSupervisedRun,
@@ -22,8 +27,10 @@ import {
   promoteMemoryToPolicy,
   searchMemories,
   registerAgent,
+  startGoal,
   startCodexHub,
   startMission,
+  summarizeGoalDebrief,
   summarizeDebrief,
 } from "./klemm.js";
 import { buildOsObservation } from "./klemm-os.js";
@@ -137,6 +144,30 @@ export const KLEMM_MCP_TOOLS = [
     name: "search_memories",
     description: "Search distilled Klemm memories by query terms.",
   },
+  {
+    name: "goal_start",
+    description: "Start a durable Klemm Goal for cross-agent /goal-style supervision.",
+  },
+  {
+    name: "goal_attach",
+    description: "Attach an agent to a durable Klemm Goal and its backing mission lease.",
+  },
+  {
+    name: "goal_tick",
+    description: "Record goal progress, evidence, changed files, and alignment/risk hints.",
+  },
+  {
+    name: "goal_status",
+    description: "Inspect a Klemm Goal, attached agents, activities, decisions, and observation events.",
+  },
+  {
+    name: "goal_complete",
+    description: "Mark a Klemm Goal complete with evidence.",
+  },
+  {
+    name: "goal_debrief",
+    description: "Render a goal-scoped debrief with evidence and risk hints.",
+  },
 ];
 
 export function executeKlemmTool(name, args = {}, { state } = {}) {
@@ -206,18 +237,44 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
         },
       };
     }
+    const goal = args.goalId ? findGoal(state, args.goalId) : null;
     const envelope = normalizeAgentAdapterEnvelope({
       ...args,
+      missionId: args.missionId ?? goal?.missionId,
       validation,
       protocolVersion: validation.protocol.negotiatedVersion,
     });
-    let nextState = recordAgentActivity(state, envelope.activity);
+    let nextState = goal
+      ? attachGoalAgent(state, {
+          id: goal.id,
+          agentId: envelope.agentId,
+          kind: args.kind ?? "adapter_agent",
+          command: envelope.command,
+          source: args.adapterClientId ?? "adapter_envelope",
+          now: args.now,
+        })
+      : state;
+    nextState = recordAgentActivity(nextState, envelope.activity);
     let decision = null;
     if (envelope.action) {
       nextState = proposeAction(nextState, envelope.action);
       decision = nextState.decisions[0];
     }
-    return { state: nextState, result: { accepted: true, protocol: validation.protocol, envelope, activity: nextState.agentActivities[0], decision } };
+    let goalTick = null;
+    if (goal) {
+      nextState = recordGoalTick(nextState, {
+        id: goal.id,
+        agentId: envelope.agentId,
+        summary: envelope.summary,
+        changedFiles: envelope.activity.fileChanges,
+        evidence: args.evidence ?? envelope.activity.evidence?.plan,
+        agentOutput: args.agentOutput ?? args.output,
+        recordActivity: false,
+        now: args.now,
+      });
+      goalTick = nextState.goals.find((item) => item.id === goal.id)?.ticks?.[0] ?? null;
+    }
+    return { state: nextState, result: { accepted: true, protocol: validation.protocol, envelope, activity: nextState.agentActivities[0], decision, goalTick } };
   }
 
   if (name === "evaluate_agent_alignment") {
@@ -331,6 +388,38 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
 
   if (name === "search_memories") {
     return { state, result: { memories: searchMemories(state, args) } };
+  }
+
+  if (name === "goal_start") {
+    const nextState = startGoal(state, args);
+    const goal = nextState.goals[0];
+    return { state: nextState, result: { goal, mission: nextState.missions.find((mission) => mission.id === goal.missionId) } };
+  }
+
+  if (name === "goal_attach") {
+    const nextState = attachGoalAgent(state, args);
+    const goal = findGoal(nextState, args.id ?? args.goalId ?? args.goal ?? args.missionId);
+    return { state: nextState, result: { goal, agent: nextState.agents.find((agent) => agent.id === (args.agentId ?? args.agent ?? args.actor)) } };
+  }
+
+  if (name === "goal_tick") {
+    const nextState = recordGoalTick(state, args);
+    const goal = findGoal(nextState, args.id ?? args.goalId ?? args.goal ?? args.missionId);
+    return { state: nextState, result: { goal, tick: goal?.ticks?.[0] } };
+  }
+
+  if (name === "goal_status") {
+    return { state, result: getGoalStatus(state, args) };
+  }
+
+  if (name === "goal_complete") {
+    const nextState = completeGoal(state, args);
+    const goal = findGoal(nextState, args.id ?? args.goalId ?? args.goal ?? args.missionId);
+    return { state: nextState, result: { goal } };
+  }
+
+  if (name === "goal_debrief") {
+    return { state, result: { debrief: summarizeGoalDebrief(state, args) } };
   }
 
   if (name === "ingest_memory_export") {

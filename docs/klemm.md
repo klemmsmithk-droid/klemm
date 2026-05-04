@@ -233,6 +233,27 @@ const klemm = createKlemmAdapterClient({
 await klemm.send(klemm.toolCall({ tool: "shell", command: "npm test", summary: "Run tests" }));
 ```
 
+### Goal Adapter Protocol
+
+Klemm also exposes `/goal`-style tools for non-Codex agents over MCP and HTTP. These make a goal the durable cross-agent intent record while adapters report progress naturally:
+
+- `goal_start`
+- `goal_attach`
+- `goal_tick`
+- `goal_status`
+- `goal_complete`
+- `goal_debrief`
+
+HTTP routes mirror the tools:
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/goals/start -H 'content-type: application/json' -d '{"id":"goal-importer","text":"Refactor importer tests","success":"npm test passes","watchPaths":["src","test"]}'
+curl -X POST http://127.0.0.1:8765/api/adapter/envelope -H 'content-type: application/json' -d '{"goalId":"goal-importer","agentId":"agent-claude","type":"tool_call","tool":"shell","command":"npm test -- importer","fileChanges":["test/importer.test.js"],"summary":"Ran focused tests"}'
+curl http://127.0.0.1:8765/api/goals/status?id=goal-importer
+```
+
+When an adapter envelope includes `goalId`, Klemm automatically attaches the agent to the goal's backing mission, records the adapter activity under that mission, records a goal tick, and carries risk hints into `klemm tui --view goals`, `klemm trust why --goal <id>`, and the goal debrief.
+
 ## Policy Engine
 
 Klemm applies deterministic mission rules first, then reviewed memory policies. Approved or pinned authority-boundary memories can require user review for matching future actions, and each decision records the matched memory policy IDs for auditability.
