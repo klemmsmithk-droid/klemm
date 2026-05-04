@@ -31,6 +31,7 @@ import {
   recordOsObservation,
   recordQueuedDecision,
   recordSupervisedRun,
+  redactSensitiveText,
   renderKlemmDashboard,
   registerAgent,
   reviewMemory,
@@ -119,22 +120,22 @@ async function main() {
     if (command === "codex" && args[1] === "install") return await installCodexIntegrationFromCli(args.slice(2));
     if (command === "setup") return await setupKlemmFromCli(args.slice(1));
     if (command === "install" && args[1] !== "mcp") return await installKlemmFromCli(args.slice(1));
-    if (command === "mission" && args[1] === "start") return startMissionFromCli(args.slice(2));
+    if (command === "mission" && args[1] === "start") return await startMissionFromCli(args.slice(2));
     if (command === "mission" && args[1] === "list") return listMissionsFromCli();
     if (command === "mission" && args[1] === "current") return printCurrentMissionFromCli();
     if (command === "mission" && args[1] === "finish") return finishMissionFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
     if (command === "agents") return printAgents();
-    if (command === "propose") return proposeFromCli(args.slice(1));
+    if (command === "propose") return await proposeFromCli(args.slice(1));
     if (command === "queue" && args[1] === "inspect") return printQueueDecisionFromCli(args.slice(2));
-    if (command === "queue" && args[1] === "approve") return recordQueueOutcome(args.slice(2), "approved");
-    if (command === "queue" && args[1] === "deny") return recordQueueOutcome(args.slice(2), "denied");
-    if (command === "queue" && args[1] === "rewrite") return recordQueueOutcome(args.slice(2), "rewritten");
+    if (command === "queue" && args[1] === "approve") return await recordQueueOutcome(args.slice(2), "approved");
+    if (command === "queue" && args[1] === "deny") return await recordQueueOutcome(args.slice(2), "denied");
+    if (command === "queue" && args[1] === "rewrite") return await recordQueueOutcome(args.slice(2), "rewritten");
     if (command === "queue") return printQueue();
-    if (command === "approve") return recordQueueOutcome(args.slice(1), "approved");
-    if (command === "deny") return recordQueueOutcome(args.slice(1), "denied");
-    if (command === "rewrite") return recordQueueOutcome(args.slice(1), "rewritten");
+    if (command === "approve") return await recordQueueOutcome(args.slice(1), "approved");
+    if (command === "deny") return await recordQueueOutcome(args.slice(1), "denied");
+    if (command === "rewrite") return await recordQueueOutcome(args.slice(1), "rewritten");
     if (command === "memory" && args[1] === "ingest") return await ingestMemoryFromCli(args.slice(2));
     if (command === "memory" && args[1] === "ingest-export") return await ingestMemoryExportFromCli(args.slice(2));
     if (command === "memory" && args[1] === "import-source") return await importMemorySourceFromCli(args.slice(2));
@@ -152,7 +153,9 @@ async function main() {
     if (command === "sync" && args[1] === "status") return printSyncStatus(args.slice(2));
     if (command === "onboard" && args[1] === "v2") return await onboardV2FromCli(args.slice(2));
     if (command === "onboard") return await onboardFromCli(args.slice(1));
-    if (command === "debrief") return printDebrief(args.slice(1));
+    if (command === "debrief") return await printDebrief(args.slice(1));
+    if (command === "dogfood" && args[1] === "status") return printDogfoodStatus(args.slice(2));
+    if (command === "dogfood" && args[1] === "debrief") return await printDebrief(args.slice(2));
     if (command === "tui") return await printTui(args.slice(1));
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
     if (command === "supervise") return await superviseFromCli(args.slice(1));
@@ -251,6 +254,12 @@ async function wrapCodexSessionFromCli(args) {
   );
   const mission = missionState.missions[0];
   console.log(`Codex wrapper session started: ${mission.id}`);
+  console.log("Klemm is watching");
+  console.log(`Data dir: ${KLEMM_DATA_DIR}`);
+  console.log("Watching: commands, tool output, diffs, queue, alignment");
+  console.log("Stop: Ctrl-C");
+  console.log(`Review: env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm dogfood status --mission ${mission.id}`);
+  console.log(`Finish: env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm mission finish ${mission.id} "work complete"`);
 
   const plan = executeAdapterEnvelopeTool({
     protocolVersion,
@@ -318,6 +327,10 @@ async function wrapCodexSessionFromCli(args) {
   console.log("Review this session:");
   console.log(`  env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm debrief --mission ${mission.id}`);
   console.log(`  env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm queue`);
+  if (flags.finish) {
+    const finished = finishMissionLocal(mission.id, "Wrapped Codex session completed.");
+    console.log(`Mission finished: ${finished.id}`);
+  }
 }
 
 async function installCodexIntegrationFromCli(args) {
@@ -535,6 +548,7 @@ async function doctorFromCli(args) {
 
   const migrated = store.update((state) => migrateKlemmState(state));
   checks.push({ name: "Store", status: "ok", detail: `Schema version: ${migrated.schemaVersion ?? migrated.version ?? 1}` });
+  checks.push(await permissionCheck("Permissions", dataDir, { maxMode: 0o755 }));
 
   const pid = await readPidFile(pidFile);
   if (!pid) {
@@ -625,6 +639,20 @@ async function installDaemonFromCli(args) {
   console.log(`Daemon installed: ${output}`);
   console.log(`Data dir: ${dataDir}`);
   console.log(`Logs: ${logsDir}`);
+}
+
+async function permissionCheck(name, path, { maxMode = 0o755 } = {}) {
+  try {
+    const info = await stat(path);
+    const mode = info.mode & 0o777;
+    return {
+      name,
+      status: mode <= maxMode ? "ok" : "warning",
+      detail: `${path} mode=${mode.toString(8)}`,
+    };
+  } catch (error) {
+    return { name, status: "missing", detail: `${path}: ${error.message}` };
+  }
 }
 
 function migrateDaemonStoreFromCli() {
@@ -813,22 +841,33 @@ async function printStatus() {
   console.log(`OS observations: ${status.osObservationCount}`);
 }
 
-function startMissionFromCli(args) {
+async function startMissionFromCli(args) {
   const flags = parseFlags(args);
+  const payload = {
+    id: flags.id,
+    hub: flags.hub,
+    goal: flags.goal,
+    allowedActions: flags.allow,
+    blockedActions: flags.block,
+    rewriteAllowed: Boolean(flags.rewrite ?? true),
+    durationMinutes: flags.duration ? Number(flags.duration) : undefined,
+    escalationChannel: flags.escalation,
+  };
+  const daemon = await callDaemonApi("/api/mission/start", { method: "POST", body: payload });
+  if (daemon.ok) {
+    console.log("Transport: daemon");
+    return printMissionStarted(daemon.payload.mission);
+  }
+  if (daemon.attempted) console.log("Transport: local fallback");
   const next = store.update((state) =>
-    startMission(state, {
-      id: flags.id,
-      hub: flags.hub,
-      goal: flags.goal,
-      allowedActions: flags.allow,
-      blockedActions: flags.block,
-      rewriteAllowed: Boolean(flags.rewrite ?? true),
-      durationMinutes: flags.duration ? Number(flags.duration) : undefined,
-      escalationChannel: flags.escalation,
-    }),
+    startMission(state, payload),
   );
   const mission = next.missions[0];
 
+  printMissionStarted(mission);
+}
+
+function printMissionStarted(mission) {
   console.log(`Mission started: ${mission.id}`);
   console.log(`Hub: ${mission.hub}`);
   console.log(`Goal: ${mission.goal}`);
@@ -866,6 +905,13 @@ function finishMissionFromCli(args) {
   const [missionId, ...noteParts] = args;
   if (!missionId) throw new Error("Usage: klemm mission finish <mission-id> [note]");
   const note = noteParts.join(" ");
+  const finished = finishMissionLocal(missionId, note);
+  console.log(`Mission finished: ${finished.id}`);
+  console.log(`Goal: ${finished.goal}`);
+  console.log(`Note: ${note || "none"}`);
+}
+
+function finishMissionLocal(missionId, note = "") {
   const now = new Date().toISOString();
   let finished;
   store.update((state) => {
@@ -902,9 +948,7 @@ function finishMissionFromCli(args) {
       ],
     };
   });
-  console.log(`Mission finished: ${finished.id}`);
-  console.log(`Goal: ${finished.goal}`);
-  console.log(`Note: ${note || "none"}`);
+  return finished;
 }
 
 function registerAgentFromCli(args) {
@@ -1076,25 +1120,32 @@ function recordEventFromCli(args, { codexLabel = false } = {}) {
   if (decision) printDecision(decision);
 }
 
-function proposeFromCli(args) {
+async function proposeFromCli(args) {
   const flags = parseFlags(args);
+  const payload = {
+    id: flags.id,
+    missionId: flags.mission,
+    actor: flags.actor,
+    actionType: flags.type,
+    target: flags.target,
+    externality: flags.external,
+    reversibility: flags.reversibility,
+    privacyExposure: flags.privacy,
+    moneyImpact: flags.money,
+    legalImpact: flags.legal,
+    reputationImpact: flags.reputation,
+    credentialImpact: flags.credential,
+    missionRelevance: flags.relevance ?? "related",
+    suggestedRewrite: flags.suggestedRewrite ?? flags.rewriteTo,
+  };
+  const daemon = await callDaemonApi("/api/authority/request", { method: "POST", body: payload });
+  if (daemon.ok) {
+    console.log("Transport: daemon");
+    return printDecision(daemon.payload.decision);
+  }
+  if (daemon.attempted) console.log("Transport: local fallback");
   const next = store.update((state) =>
-    proposeAction(state, {
-      id: flags.id,
-      missionId: flags.mission,
-      actor: flags.actor,
-      actionType: flags.type,
-      target: flags.target,
-      externality: flags.external,
-      reversibility: flags.reversibility,
-      privacyExposure: flags.privacy,
-      moneyImpact: flags.money,
-      legalImpact: flags.legal,
-      reputationImpact: flags.reputation,
-      credentialImpact: flags.credential,
-      missionRelevance: flags.relevance ?? "related",
-      suggestedRewrite: flags.suggestedRewrite ?? flags.rewriteTo,
-    }),
+    proposeAction(state, payload),
   );
   const decision = next.decisions[0];
 
@@ -1123,21 +1174,32 @@ function printQueueDecisionFromCli(args) {
   console.log(renderDecisionDetail(decision, state));
 }
 
-function recordQueueOutcome(args, outcome) {
+async function recordQueueOutcome(args, outcome) {
   const flags = parseFlags(args);
   const positional = args.filter((item, index) => item !== "--to" && args[index - 1] !== "--to");
   const [decisionId, ...noteParts] = positional;
   if (!decisionId) throw new Error(`Usage: klemm ${outcome === "denied" ? "deny" : outcome} <decision-id> [note]`);
+  const payload = {
+    decisionId,
+    outcome,
+    note: noteParts.join(" "),
+    rewrite: flags.to,
+  };
+  const daemon = await callDaemonApi("/api/queue/outcome", { method: "POST", body: payload });
+  if (daemon.ok) {
+    console.log("Transport: daemon");
+    return printQueueOutcome(daemon.payload.queueItem);
+  }
+  if (daemon.attempted) console.log("Transport: local fallback");
   const next = store.update((state) =>
-    recordQueuedDecision(state, {
-      decisionId,
-      outcome,
-      note: noteParts.join(" "),
-      rewrite: flags.to,
-    }),
+    recordQueuedDecision(state, payload),
   );
   const queued = next.queue.find((item) => item.id === decisionId);
 
+  printQueueOutcome(queued);
+}
+
+function printQueueOutcome(queued) {
   console.log(`Decision recorded: ${queued.status}`);
   console.log(`Decision ID: ${queued.id}`);
   if (queued.rewrite) console.log(`Rewrite: ${queued.rewrite}`);
@@ -1662,9 +1724,23 @@ function printSyncStatus(args) {
   }
 }
 
-function printDebrief(args) {
+async function printDebrief(args) {
   const flags = parseFlags(args);
+  const path = `/api/debrief${flags.mission ? `?mission=${encodeURIComponent(flags.mission)}` : ""}`;
+  const daemon = await callDaemonApi(path, { method: "GET" });
+  if (daemon.ok) {
+    console.log("Transport: daemon");
+    console.log(daemon.payload.debrief);
+    return;
+  }
+  if (daemon.attempted) console.log("Transport: local fallback");
   console.log(summarizeDebrief(store.getState(), { missionId: flags.mission }));
+}
+
+function printDogfoodStatus(args) {
+  const flags = parseFlags(args);
+  console.log("Klemm dogfood status");
+  console.log(renderKlemmDashboard(store.getState(), { missionId: flags.mission }));
 }
 
 async function printTui(args) {
@@ -1694,7 +1770,7 @@ async function printTui(args) {
       continue;
     }
     if (command === "approve" || command === "deny" || command === "rewrite") {
-      recordQueueOutcome([subcommand, id, ...noteParts].filter(Boolean), command === "deny" ? "denied" : command === "approve" ? "approved" : "rewritten");
+      await recordQueueOutcome([subcommand, id, ...noteParts].filter(Boolean), command === "deny" ? "denied" : command === "approve" ? "approved" : "rewritten");
       continue;
     }
     if (command === "memory" && ["approve", "reject", "pin"].includes(subcommand)) {
@@ -1758,8 +1834,8 @@ function renderDecisionDetail(decision, state = store.getState()) {
     "Decision Detail",
     `${decision.id} ${decision.decision} ${decision.riskLevel} score=${decision.riskScore ?? "n/a"}`,
     `Actor: ${decision.actor}`,
-    `Action: ${decision.actionType} ${decision.target}`,
-    `Reason: ${decision.reason}`,
+    `Action: ${decision.actionType} ${redactSensitiveText(decision.target)}`,
+    `Reason: ${redactSensitiveText(decision.reason)}`,
     `Suggested rewrite: ${suggestedRewrite || "none"}`,
     "Risk factors:",
     ...((decision.riskFactors ?? []).length
@@ -1767,14 +1843,18 @@ function renderDecisionDetail(decision, state = store.getState()) {
       : ["- none"]),
     "Matched policies:",
     ...((decision.matchedPolicies ?? []).length
-      ? decision.matchedPolicies.map((policy) => `- ${policy.id}: ${policy.name ?? policy.text ?? policy.source ?? ""}`)
+      ? decision.matchedPolicies.map((policy) => `- ${policy.id}: ${redactSensitiveText(policy.name ?? policy.text ?? policy.source ?? "")}`)
       : ["- none"]),
     "Source memories:",
     ...(sourceMemories.length
-      ? sourceMemories.map((memory) => `- ${memory.id} ${memory.status}: ${memory.text}`)
+      ? sourceMemories.map((memory) => `- ${memory.id} ${memory.status}: ${redactSensitiveText(memory.text)}`)
+      : ["- none"]),
+    "Source evidence:",
+    ...(sourceMemories.length
+      ? sourceMemories.map((memory) => `- ${memory.id} source=${memory.source} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"} provider=${memory.evidence?.provider ?? memory.source}`)
       : ["- none"]),
     "Explanation:",
-    decision.explanation?.summary ?? decision.reason ?? "No explanation recorded.",
+    redactSensitiveText(decision.explanation?.summary ?? decision.reason ?? "No explanation recorded."),
   ].join("\n");
 }
 
@@ -2716,6 +2796,27 @@ async function probeDaemonHealth(url = process.env.KLEMM_DAEMON_URL) {
   }
 }
 
+async function callDaemonApi(path, { method = "GET", body } = {}) {
+  const baseUrl = process.env.KLEMM_DAEMON_URL;
+  if (!baseUrl) return { attempted: false, ok: false };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 300);
+  try {
+    const response = await fetch(`${String(baseUrl).replace(/\/$/, "")}${path}`, {
+      method,
+      headers: body ? { "content-type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return { attempted: true, ok: false, status: response.status };
+    return { attempted: true, ok: true, payload: await response.json() };
+  } catch (error) {
+    clearTimeout(timeout);
+    return { attempted: true, ok: false, error };
+  }
+}
+
 function buildCodexSkillTemplate() {
   return [
     "---",
@@ -2918,6 +3019,8 @@ Commands:
   klemm queue approve|deny <decision-id> [note]
   klemm queue rewrite <decision-id> --to "replacement command"
   klemm approve|deny|rewrite <decision-id> [note]
+  klemm dogfood status --mission mission-id
+  klemm dogfood debrief --mission mission-id
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json
   klemm memory import-source --source chatgpt --file export.json

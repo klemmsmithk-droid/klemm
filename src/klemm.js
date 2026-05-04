@@ -640,8 +640,9 @@ export function normalizeAgentAdapterEnvelope(input = {}) {
   const missionId = input.missionId;
   const agentId = input.agentId ?? input.actor ?? "unknown_agent";
   const toolName = input.toolCall?.name ?? input.tool ?? "";
-  const command = input.toolCall?.arguments?.command ?? input.command ?? "";
-  const target = type === "tool_call" ? toolName : input.target ?? command;
+  const command = redactSensitiveText(input.toolCall?.arguments?.command ?? input.command ?? "");
+  const target = redactSensitiveText(type === "tool_call" ? toolName : input.target ?? command);
+  const summary = redactSensitiveText(input.summary ?? `${type} reported by ${agentId}`);
 
   return {
     protocolVersion: Number(input.protocolVersion ?? 1),
@@ -650,19 +651,19 @@ export function normalizeAgentAdapterEnvelope(input = {}) {
     type,
     missionId,
     agentId,
-    summary: input.summary ?? `${type} reported by ${agentId}`,
+    summary,
     activity: {
       missionId,
       agentId,
       type: type === "diff" ? "file_change" : type,
-      summary: input.summary ?? `${type} reported by ${agentId}`,
+      summary,
       target,
       command,
       fileChanges: input.diff?.files ?? input.fileChanges ?? [],
       evidence: {
-        plan: input.plan,
-        toolCall: input.toolCall,
-        uncertainty: input.uncertainty,
+        plan: redactSensitiveText(input.plan),
+        toolCall: redactToolCall(input.toolCall),
+        uncertainty: redactSensitiveText(input.uncertainty),
       },
     },
     validation: input.validation ?? { accepted: true },
@@ -967,12 +968,12 @@ export function recordAgentActivity(state, options = {}) {
     missionId: options.missionId ?? mission?.id,
     agentId: options.agentId ?? options.actor ?? "unknown_agent",
     type: normalizeActivityType(options.type),
-    summary: options.summary ?? "Agent activity recorded.",
-    target: options.target ?? "",
-    command: options.command ?? "",
+    summary: redactSensitiveText(options.summary ?? "Agent activity recorded."),
+    target: redactSensitiveText(options.target ?? ""),
+    command: redactSensitiveText(options.command ?? ""),
     exitCode: options.exitCode,
     fileChanges: options.fileChanges ?? [],
-    evidence: options.evidence ?? {},
+    evidence: redactEvidence(options.evidence ?? {}),
     createdAt: now,
   };
 
@@ -1099,7 +1100,7 @@ export function recordSupervisedRun(state, options = {}) {
   const run = {
     id,
     missionId: options.missionId,
-    command: options.command ?? "",
+    command: redactSensitiveText(options.command ?? ""),
     cwd: options.cwd ?? "",
     pid: options.pid,
     processTree: options.processTree ?? [],
@@ -1107,8 +1108,8 @@ export function recordSupervisedRun(state, options = {}) {
     timedOut: Boolean(options.timedOut),
     exitCode: options.exitCode ?? 0,
     durationMs: options.durationMs ?? 0,
-    stdout: clipTranscript(options.stdout ?? ""),
-    stderr: clipTranscript(options.stderr ?? ""),
+    stdout: clipTranscript(redactSensitiveText(options.stdout ?? "")),
+    stderr: clipTranscript(redactSensitiveText(options.stderr ?? "")),
     fileChanges: options.fileChanges ?? [],
     liveInterventions: options.liveInterventions ?? [],
     startedAt: options.startedAt ?? now,
@@ -1126,7 +1127,7 @@ export function recordSupervisedRun(state, options = {}) {
       at: now,
       missionId: run.missionId,
       supervisedRunId: run.id,
-      summary: `${run.command} exited ${run.exitCode}.`,
+      summary: `${redactSensitiveText(run.command)} exited ${run.exitCode}.`,
     },
   );
 }
@@ -1172,6 +1173,7 @@ export function summarizeDebrief(state, { missionId } = {}) {
   const osObservations = mission ? (state.osObservations ?? []).filter((observation) => observation.missionId === mission.id) : state.osObservations ?? [];
   const alignmentReports = mission ? (state.alignmentReports ?? []).filter((report) => report.missionId === mission.id) : state.alignmentReports ?? [];
   const agentInterventions = mission ? (state.agentInterventions ?? []).filter((intervention) => intervention.missionId === mission.id) : state.agentInterventions ?? [];
+  const agentActivities = mission ? (state.agentActivities ?? []).filter((activity) => activity.missionId === mission.id) : state.agentActivities ?? [];
   const lines = [
     "Klemm debrief",
     `Mission: ${mission?.id ?? "all"}`,
@@ -1187,15 +1189,23 @@ export function summarizeDebrief(state, { missionId } = {}) {
     `Memory candidates: ${memoryCandidates}`,
     `Supervised runs: ${supervisedRuns.length}`,
     `OS observations: ${osObservations.length}`,
-    `Agent activities: ${mission ? (state.agentActivities ?? []).filter((activity) => activity.missionId === mission.id).length : (state.agentActivities ?? []).length}`,
+    `Agent activities: ${agentActivities.length}`,
     `Latest alignment: ${alignmentReports[0]?.state ?? "none"}`,
     `Active interventions: ${agentInterventions.filter((intervention) => intervention.status === "active").length}`,
     "Recent events:",
-    ...events.slice(0, 5).map((event) => `- ${event.id} ${event.type}: ${event.summary}`),
+    ...events.slice(0, 5).map((event) => `- ${event.id} ${event.type}: ${redactSensitiveText(event.summary)}`),
+    "Recent activity:",
+    ...(agentActivities.length === 0
+      ? ["- none"]
+      : agentActivities.slice(0, 5).map((activity) => `- ${activity.id} ${activity.type}: ${redactSensitiveText(activity.summary)} ${redactSensitiveText(activity.target ?? "")}`)),
+    "Recent supervised runs:",
+    ...(supervisedRuns.length === 0
+      ? ["- none"]
+      : supervisedRuns.slice(0, 3).map((run) => `- ${run.id} exit=${run.exitCode} stdout=${redactSensitiveText(oneLineText(run.stdout))} stderr=${redactSensitiveText(oneLineText(run.stderr))}`)),
     "Recent interventions:",
     ...decisions
       .slice(0, 8)
-      .map((decision) => `- ${decision.id} ${decision.decision}/${decision.status}: ${decision.actor} ${decision.actionType} ${decision.target}`),
+      .map((decision) => `- ${decision.id} ${decision.decision}/${decision.status}: ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)}`),
   ];
 
   return lines.join("\n");
@@ -1228,9 +1238,22 @@ export function renderKlemmDashboard(state, { missionId, now = new Date().toISOS
     "Recent interventions",
     ...(decisions.length === 0
       ? ["- none"]
-      : decisions.slice(0, 5).map((decision) => `- ${decision.id} ${decision.decision}: ${decision.actionType} ${decision.target}`)),
+      : decisions.slice(0, 5).map((decision) => `- ${decision.id} ${decision.decision}: ${decision.actionType} ${redactSensitiveText(decision.target)}`)),
     "Recent events",
-    ...(events.length === 0 ? ["- none"] : events.slice(0, 5).map((event) => `- ${event.type}: ${event.summary}`)),
+    ...(events.length === 0 ? ["- none"] : events.slice(0, 5).map((event) => `- ${event.type}: ${redactSensitiveText(event.summary)}`)),
+    "Next actions:",
+    ...(mission
+      ? [
+          `- klemm debrief --mission ${mission.id}`,
+          unresolved[0]
+            ? `- klemm queue inspect ${unresolved[0].id}`
+            : null,
+          unresolved[0]
+            ? `- klemm queue approve|deny|rewrite ${unresolved[0].id}`
+            : null,
+          `- klemm mission finish ${mission.id} "work complete"`,
+        ].filter(Boolean)
+      : ["- klemm mission start --goal \"...\""]),
   ].join("\n");
 }
 
@@ -2183,6 +2206,30 @@ function normalizeMemoryText(text) {
 function clipTranscript(text) {
   const value = String(text ?? "");
   return value.length > 4000 ? `${value.slice(0, 4000)}\n[truncated]` : value;
+}
+
+export function redactSensitiveText(value) {
+  if (value === undefined || value === null) return value;
+  return String(value)
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]")
+    .replace(/\b(api[_-]?key|token|secret|credential|password)\s*[:=]\s*['"]?[^'"`\s]+/gi, "$1=[REDACTED]")
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/-]+=*/gi, "$1 [REDACTED]");
+}
+
+function redactToolCall(toolCall) {
+  if (!toolCall) return toolCall;
+  return {
+    ...toolCall,
+    arguments: Object.fromEntries(
+      Object.entries(toolCall.arguments ?? {}).map(([key, value]) => [key, redactSensitiveText(value)]),
+    ),
+  };
+}
+
+function redactEvidence(evidence = {}) {
+  return Object.fromEntries(
+    Object.entries(evidence).map(([key, value]) => [key, redactSensitiveText(value)]),
+  );
 }
 
 function oneLineText(value, maxLength = 160) {

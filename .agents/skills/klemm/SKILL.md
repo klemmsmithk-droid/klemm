@@ -138,6 +138,8 @@ klemm queue rewrite <decision-id> --to "<replacement command>"
 klemm mission current
 klemm mission list
 klemm mission finish <mission-id> [note]
+klemm dogfood status --mission <mission-id>
+klemm dogfood debrief --mission <mission-id>
 klemm tui --mission <mission-id>
 klemm tui --mission <mission-id> --view trust --decision <decision-id>
 ```
