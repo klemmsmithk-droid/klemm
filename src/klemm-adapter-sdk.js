@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-const SUPPORTED_EVENTS = new Set(["plan", "tool_call", "diff", "uncertainty", "debrief", "activity"]);
+const SUPPORTED_EVENTS = new Set(["session_start", "plan", "tool_call", "diff", "uncertainty", "debrief", "session_finish", "activity"]);
 
 export function createKlemmAdapterClient(options = {}) {
   const base = {
@@ -21,6 +21,9 @@ export function createKlemmAdapterClient(options = {}) {
     },
     plan(payload = {}) {
       return envelope("plan", payload);
+    },
+    sessionStart(payload = {}) {
+      return envelope("session_start", payload);
     },
     toolCall(payload = {}) {
       return envelope("tool_call", {
@@ -46,6 +49,9 @@ export function createKlemmAdapterClient(options = {}) {
     debrief(payload = {}) {
       return envelope("debrief", payload);
     },
+    sessionFinish(payload = {}) {
+      return envelope("session_finish", payload);
+    },
     conformanceSamples() {
       return [
         envelope("plan", { summary: "Plan the delegated work.", plan: "Inspect, implement, verify." }),
@@ -63,15 +69,18 @@ export function createKlemmHttpTransport(options = {}) {
   const retries = Number(options.retries ?? 0);
   const negotiateProtocol = options.negotiateProtocol ?? false;
   const fetchImpl = options.fetch ?? globalThis.fetch;
+  const daemonToken = options.daemonToken ?? process.env.KLEMM_DAEMON_TOKEN;
   if (!fetchImpl) throw new Error("fetch is required for Klemm HTTP transport");
 
   return {
     async send(envelope) {
       let current = { ...envelope };
       for (let attempt = 0; attempt <= retries; attempt += 1) {
+        const headers = { "content-type": "application/json" };
+        if (daemonToken) headers.authorization = `Bearer ${daemonToken}`;
         const response = await fetchImpl(`${baseUrl}/api/adapter/envelope`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers,
           body: JSON.stringify(current),
         });
         let payload = {};

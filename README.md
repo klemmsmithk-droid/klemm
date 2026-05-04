@@ -296,6 +296,25 @@ The first OS layer uses public macOS-safe capabilities:
 
 Unmanaged external processes are observe-and-alert only. Pause, kill, rewrite, and hard blocking remain available for agents launched through `klemm run`, `klemm supervise`, or a compatible adapter.
 
+## True-Vision Breadth Rails
+
+The breadth rails make the larger Klemm vision visible without pretending privileged OS blocking exists yet:
+
+```bash
+npm run klemm -- helper install
+npm run klemm -- helper snapshot --mission mission-codex --frontmost-app Terminal
+npm run klemm -- observe attach --mission mission-codex --process-file ps-fixture.txt
+npm run klemm -- observe recommend
+npm run klemm -- adapters install --all
+npm run klemm -- adapters probe claude
+npm run klemm -- trust why <decision-id>
+npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
+npm run klemm -- sync export --encrypted --output bundle.klemm
+npm run klemm -- security adversarial-test
+```
+
+`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper only reports public macOS observations and permission status. Adapter installs write documented config surfaces for Codex MCP, Claude Code hooks, Cursor MCP/rules, and generic wrapper profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; token files are checked by `klemm doctor --token-file <path>` and redacted in normal output.
+
 ## Codex Hub
 
 `klemm codex hub` starts the opinionated dogfood flow: Codex becomes the temporary hub, Klemm registers `agent-codex`, and the mission lease defaults to allowing local code/docs/tests while queuing pushes, external sends, credential changes, OAuth scope changes, deletion, deployments, and financial/legal/reputational actions.
@@ -356,7 +375,7 @@ This renders a LaunchAgent plist for a non-privileged Klemm daemon. Installing/l
 
 ## Terminal Dashboard
 
-`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, unresolved queue, memory candidates, recent interventions, and recent events. Focused views are available with `--view overview|memory|queue|agents|policies|model|logs|trust`. Use `--view trust --decision <decision-id>` or `klemm queue inspect <decision-id>` to drill into risk factors, suggested rewrites, source memories, matched policies, and the decision explanation.
+`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, unresolved queue, memory candidates, recent interventions, and recent events. Focused views are available with `--view overview|memory|queue|agents|policies|model|logs|trust|evidence`. Use `--view trust --decision <decision-id>`, `--view evidence --memory <memory-id>`, `klemm trust why <decision-id>`, or `klemm queue inspect <decision-id>` to drill into risk factors, suggested rewrites, source memories, matched policies, source evidence, correction history, and the decision explanation.
 
 `klemm tui --interactive` accepts stdin commands:
 

@@ -104,6 +104,7 @@ export function createKlemmHttpServer({ getState, saveState }) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/adapter/envelope") {
+        if (!requireDaemonToken(request, response)) return;
         return runTool(response, "record_adapter_envelope", await readJson(request), { getState, saveState });
       }
 
@@ -141,6 +142,19 @@ async function runTool(response, toolName, args, { getState, saveState }) {
   const output = executeKlemmTool(toolName, args, { state: getState() });
   saveState(output.state);
   sendJson(response, 200, output.result);
+}
+
+function requireDaemonToken(request, response) {
+  const expected = process.env.KLEMM_DAEMON_TOKEN;
+  if (!expected) return true;
+  const authorization = request.headers.authorization ?? "";
+  const bearer = authorization.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : "";
+  const headerToken = Array.isArray(request.headers["x-klemm-daemon-token"])
+    ? request.headers["x-klemm-daemon-token"][0]
+    : request.headers["x-klemm-daemon-token"];
+  if (bearer === expected || headerToken === expected) return true;
+  sendJson(response, 401, { error: "Klemm daemon token required" });
+  return false;
 }
 
 async function readJson(request) {

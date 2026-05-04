@@ -4,4 +4,5 @@ data/
 *.sqlite-wal
 artifact.txt
 node_modules/
+.build/
 .DS_Store

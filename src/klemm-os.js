@@ -10,6 +10,9 @@ const AGENT_PROCESS_PATTERNS = [
   /\bclaude\b/i,
   /\bcursor\b/i,
   /\bchatgpt\b/i,
+  /\bbrowser-agent\b/i,
+  /\bmcp-agent\b/i,
+  /\bshell-agent\b/i,
   /\bagent\b/i,
   /\bautonomous\b/i,
 ];

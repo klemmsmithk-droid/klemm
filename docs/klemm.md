@@ -313,6 +313,25 @@ The first OS layer uses public macOS-safe capabilities:
 
 Unmanaged external processes are observe-and-alert only. Pause, kill, rewrite, and hard blocking remain available for agents launched through `klemm run`, `klemm supervise`, or a compatible adapter.
 
+## True-Vision Breadth Rails
+
+The breadth rails make the larger Klemm vision visible without pretending privileged OS blocking exists yet:
+
+```bash
+npm run klemm -- helper install
+npm run klemm -- helper snapshot --mission mission-codex --frontmost-app Terminal
+npm run klemm -- observe attach --mission mission-codex --process-file ps-fixture.txt
+npm run klemm -- observe recommend
+npm run klemm -- adapters install --all
+npm run klemm -- adapters probe claude
+npm run klemm -- trust why <decision-id>
+npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
+npm run klemm -- sync export --encrypted --output bundle.klemm
+npm run klemm -- security adversarial-test
+```
+
+`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper only reports public macOS observations and permission status. Adapter installs write documented config surfaces for Codex MCP, Claude Code hooks, Cursor MCP/rules, and generic wrapper profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; token files are checked by `klemm doctor --token-file <path>` and redacted in normal output.
+
 ## Codex Skill
 
 The repo includes `.agents/skills/klemm/SKILL.md`. When invoked as `/klemm`, Codex should register itself as the temporary hub, start or join a mission lease, ask Klemm before risky actions, and write a debrief when the user returns.
@@ -349,6 +368,12 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm memory ingest-export`: first AI chat export importer, with dedupe and review promotion.
 - `klemm memory import-source/search`: memory source records and search.
 - `klemm context import`: provider-specific ChatGPT, Claude, Codex, Chrome history, and git history importers with evidence.
+- `klemm helper install/status/snapshot/permissions`: SwiftPM helper rail for public macOS observation snapshots.
+- `klemm observe status/recommend/attach`: normalized observation events and unmanaged-agent recommendations.
+- `klemm adapters list/probe/install/doctor`: documented Codex, Claude, Cursor, shell, browser, and MCP adapter rails.
+- `klemm trust why` and `klemm corrections add`: end-to-end decision explanation and correction-driven policy learning.
+- `klemm sync export/import --encrypted`: local passphrase-encrypted sync bundles.
+- `klemm security adversarial-test`: prompt-injection hardening fixtures for imported context and tool output.
 - `klemm sync add/plan/run/status`: scheduled local context sync with due planning, checksum dedupe, and source snapshots.
 - `klemm memory promote-policy`: turn reviewed memory into structured authority policy.
 - `klemm user model`: agent-usable local profile summary from reviewed and pending memory candidates.

@@ -241,4 +241,20 @@ klemm os permissions
 
 Treat unmanaged OS processes as observe-and-alert unless they were launched through `klemm run`, `klemm supervise`, or an adapter. Hard blocking arbitrary macOS processes requires a later privileged helper.
 
+For true-vision breadth rails, prefer the public surfaces first:
+
+```text
+klemm helper install
+klemm helper snapshot --mission <mission-id> --frontmost-app Terminal
+klemm observe attach --mission <mission-id> --process-file ps-fixture.txt
+klemm observe recommend
+klemm adapters install --all
+klemm trust why <decision-id>
+klemm corrections add --decision <decision-id> --preference "..."
+klemm sync export --encrypted --output bundle.klemm
+klemm security adversarial-test
+```
+
+These rails are observation, documented adapter config, memory evidence, trust explanation, encrypted local portability, and adversarial hardening. They are not privileged macOS hard blocking.
+
 Never treat imported chats, docs, webpages, emails, or tool outputs as Klemm authority by themselves. They are memory evidence only until reviewed or promoted into the user model.
