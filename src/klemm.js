@@ -58,6 +58,10 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     dogfoodDays: [],
     observerLoops: [],
     goals: [],
+    proxyQuestions: [],
+    proxyAnswers: [],
+    proxyContinuations: [],
+    proxyReviews: [],
     agentActivities: [],
     alignmentReports: [],
     agentInterventions: [],
@@ -198,6 +202,214 @@ export function startGoal(state, options = {}) {
       missionId,
       goalId: id,
       summary: objective,
+    },
+  );
+}
+
+export function addReviewedProxyMemory(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const id = options.id ?? `memory-${compactTimestamp(now)}-${(state.memories?.length ?? 0) + 1}`;
+  const memory = {
+    id,
+    memoryClass: options.memoryClass ?? "standing_preference",
+    text: options.text ?? "",
+    source: options.source ?? "proxy_seed",
+    sourceRef: options.sourceRef ?? options.source ?? "proxy_seed",
+    confidence: options.confidence ?? 0.9,
+    status: options.status ?? "approved",
+    createdAt: now,
+    reviewedAt: now,
+    reviewNote: options.note ?? "Proxy user-stand-in memory.",
+  };
+  return updateState(
+    {
+      ...state,
+      memories: [memory, ...(state.memories ?? []).filter((item) => item.id !== id)],
+    },
+    now,
+    {
+      type: "proxy_memory_seeded",
+      at: now,
+      memoryId: id,
+      summary: `Proxy memory ${id} added.`,
+    },
+  );
+}
+
+export function askProxy(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const goal = findGoal(state, options.goalId ?? options.goal ?? options.missionId);
+  const mission = goal ? findMission(state, goal.missionId) : findMission(state, options.missionId);
+  const question = {
+    id: options.id ?? `proxy-question-${compactTimestamp(now)}-${(state.proxyQuestions?.length ?? 0) + 1}`,
+    goalId: goal?.id,
+    missionId: mission?.id ?? goal?.missionId,
+    agentId: options.agentId ?? options.agent ?? "unknown_agent",
+    question: redactSensitiveText(options.question ?? ""),
+    context: redactSensitiveText(options.context ?? ""),
+    status: "answered",
+    createdAt: now,
+  };
+  const judgment = buildProxyAnswer(state, question, { goal, mission, now });
+  let nextState = state;
+  let answer = {
+    id: options.answerId ?? `proxy-answer-${compactTimestamp(now)}-${(state.proxyAnswers?.length ?? 0) + 1}`,
+    questionId: question.id,
+    goalId: question.goalId,
+    missionId: question.missionId,
+    agentId: question.agentId,
+    answer: judgment.answer,
+    confidence: judgment.confidence,
+    evidenceMemoryIds: judgment.evidenceMemoryIds,
+    evidence: judgment.evidence,
+    riskLevel: judgment.riskLevel,
+    riskFactors: judgment.riskFactors,
+    shouldContinue: judgment.shouldContinue,
+    nextPrompt: judgment.nextPrompt,
+    escalationRequired: judgment.escalationRequired,
+    queuedDecisionId: null,
+    createdAt: now,
+  };
+
+  if (answer.escalationRequired) {
+    nextState = proposeAction(state, {
+      id: `decision-${answer.id}`,
+      missionId: question.missionId,
+      actor: "Klemm Proxy",
+      actionType: "user_decision",
+      target: question.question,
+      externality: answer.riskLevel === "high" ? "high_risk_proxy_question" : "user_review_required",
+      missionRelevance: answer.riskLevel === "high" ? "related" : "ambiguous",
+      now,
+    });
+    const decision = nextState.decisions[0];
+    answer = { ...answer, queuedDecisionId: decision.id };
+    question.status = "queued";
+  }
+
+  return updateState(
+    {
+      ...nextState,
+      proxyQuestions: [question, ...(nextState.proxyQuestions ?? []).filter((item) => item.id !== question.id)],
+      proxyAnswers: [answer, ...(nextState.proxyAnswers ?? []).filter((item) => item.id !== answer.id)],
+      observationEvents: [
+        {
+          id: `observation-event-${compactTimestamp(now)}-proxy-answer`,
+          type: "proxy_answer",
+          missionId: question.missionId,
+          goalId: question.goalId,
+          agentId: question.agentId,
+          summary: `${answer.confidence} confidence: ${answer.answer}`,
+          createdAt: now,
+        },
+        ...(nextState.observationEvents ?? []),
+      ],
+    },
+    now,
+    {
+      type: "proxy_answered",
+      at: now,
+      missionId: question.missionId,
+      goalId: question.goalId,
+      proxyQuestionId: question.id,
+      proxyAnswerId: answer.id,
+      summary: `${answer.confidence} proxy answer for ${question.agentId}.`,
+    },
+  );
+}
+
+export function continueProxy(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const goal = findGoal(state, options.goalId ?? options.goal ?? options.missionId);
+  if (!goal) throw new Error(`Goal not found: ${options.goalId ?? options.goal ?? options.missionId ?? "missing"}`);
+  const mission = findMission(state, goal.missionId);
+  const unresolved = (state.queue ?? []).filter((item) => item.status === "queued" && item.missionId === goal.missionId);
+  const activities = (state.agentActivities ?? []).filter((activity) => activity.missionId === goal.missionId);
+  const latestReport = (state.alignmentReports ?? []).find((report) => report.missionId === goal.missionId);
+  const riskyGoal = (goal.riskHints ?? []).length > 0 || ["needs_review", "scope_drift", "unsafe", "stuck"].includes(goal.latestAlignment);
+  const blocked = unresolved.length > 0 || riskyGoal || ["scope_drift", "unsafe", "stuck"].includes(latestReport?.state);
+  const continuation = {
+    id: options.id ?? `proxy-continuation-${compactTimestamp(now)}-${(state.proxyContinuations?.length ?? 0) + 1}`,
+    goalId: goal.id,
+    missionId: goal.missionId,
+    agentId: options.agentId ?? options.agent ?? activities[0]?.agentId ?? "unknown_agent",
+    shouldContinue: !blocked,
+    escalationRequired: blocked,
+    confidence: blocked ? "low" : "high",
+    reason: blocked
+      ? unresolved.length
+        ? `${unresolved.length} queued decision(s) must be resolved before Klemm can stand in.`
+        : "Recent goal or monitor evidence suggests drift, risk, or stuck work."
+      : "Recent work is local, aligned, and queue-clean.",
+    nextPrompt: blocked
+      ? "Pause and ask Kyle; Klemm lacks enough safe authority to continue."
+      : "Continue implementation toward the active goal; dogfood Klemm, run focused tests, then full verification; do not push or deploy without queue approval.",
+    createdAt: now,
+  };
+  return updateState(
+    {
+      ...state,
+      proxyContinuations: [continuation, ...(state.proxyContinuations ?? [])],
+      observationEvents: [
+        {
+          id: `observation-event-${compactTimestamp(now)}-proxy-continuation`,
+          type: "proxy_continuation",
+          missionId: goal.missionId,
+          goalId: goal.id,
+          agentId: continuation.agentId,
+          summary: continuation.nextPrompt,
+          createdAt: now,
+        },
+        ...(state.observationEvents ?? []),
+      ],
+    },
+    now,
+    {
+      type: "proxy_continuation",
+      at: now,
+      missionId: goal.missionId,
+      goalId: goal.id,
+      proxyContinuationId: continuation.id,
+      summary: continuation.nextPrompt,
+    },
+  );
+}
+
+export function getProxyStatus(state, options = {}) {
+  const goal = findGoal(state, options.goalId ?? options.goal ?? options.id ?? options.missionId);
+  const missionId = goal?.missionId ?? options.missionId;
+  const answerIds = new Set((state.proxyAnswers ?? []).filter((answer) => !missionId || answer.missionId === missionId).map((answer) => answer.id));
+  return {
+    goal,
+    questions: (state.proxyQuestions ?? []).filter((question) => !missionId || question.missionId === missionId),
+    answers: (state.proxyAnswers ?? []).filter((answer) => !missionId || answer.missionId === missionId),
+    continuations: (state.proxyContinuations ?? []).filter((continuation) => !missionId || continuation.missionId === missionId),
+    queued: (state.queue ?? []).filter((item) => !missionId || item.missionId === missionId).filter((item) => item.status === "queued"),
+    reviewedAnswers: (state.proxyReviews ?? []).filter((review) => answerIds.has(review.proxyAnswerId)),
+  };
+}
+
+export function reviewProxy(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const reviews = state.proxyReviews ?? [];
+  const review = {
+    id: options.id ?? `proxy-review-${compactTimestamp(now)}-${reviews.length + 1}`,
+    proxyAnswerId: options.proxyAnswerId ?? options.answerId,
+    status: options.status ?? "reviewed",
+    note: options.note ?? "",
+    createdAt: now,
+  };
+  return updateState(
+    {
+      ...state,
+      proxyReviews: [review, ...reviews],
+    },
+    now,
+    {
+      type: "proxy_reviewed",
+      at: now,
+      proxyAnswerId: review.proxyAnswerId,
+      summary: `${review.proxyAnswerId} proxy answer reviewed.`,
     },
   );
 }
@@ -481,6 +693,84 @@ export function assessGoalTick(goal, { summary = "", agentOutput = "", changedFi
     alignment: riskHints.length ? "needs_review" : "on_track",
     riskHints,
   };
+}
+
+function buildProxyAnswer(state, question, { goal, mission, now } = {}) {
+  const text = `${question.question} ${question.context}`.toLowerCase();
+  const riskFactors = [];
+  const ambiguityFactors = [];
+  if (/\bdeploy|production|publish|package|push|github|credential|secret|token|oauth|delete|financial|legal|post|send\b/.test(text)) {
+    riskFactors.push("Question mentions a high-risk external, destructive, credential, publish, or reputation action.");
+  }
+  if (/\brename|rebrand|audience|positioning|product direction|change (?:the )?product|pivot|strategy\b/.test(text)) {
+    ambiguityFactors.push("Question asks for product-direction authority that needs Kyle's direct judgment.");
+  }
+  const evidenceMemories = findProxyEvidenceMemories(state, text);
+  const hasProceed = /\bproceed|what'?s next|continue|keep going\b/.test(text);
+  const hasNoCorners = /\bdo all|all five|all listed|no corners|full effort|no cut corners\b/.test(text);
+  const hasExplicitContinuationIntent = hasProceed || hasNoCorners || /\bdogfood|focused tests|safe local|local steps|implementation\b/.test(text);
+  const localSafeContext = !riskFactors.length && !ambiguityFactors.length && (goal || mission);
+  const confidence =
+    riskFactors.length > 0
+      ? "low"
+      : ambiguityFactors.length > 0
+        ? "low"
+        : hasExplicitContinuationIntent && (evidenceMemories.length >= 2 || (hasProceed && evidenceMemories.length >= 1) || (hasNoCorners && evidenceMemories.length >= 1))
+          ? "high"
+          : hasExplicitContinuationIntent && evidenceMemories.length === 1
+            ? "medium"
+            : "low";
+  const shouldContinue = localSafeContext && (confidence === "high" || confidence === "medium");
+  const escalationRequired = riskFactors.length > 0 || ambiguityFactors.length > 0 || confidence === "low";
+  const riskLevel = riskFactors.length > 0 ? "high" : (ambiguityFactors.length > 0 || confidence === "low") ? "medium" : "low";
+  const goalText = goal?.objective ?? mission?.goal ?? "the active goal";
+  const answer = escalationRequired
+    ? "Pause and ask Kyle; Klemm does not have enough safe authority to answer this as the user."
+    : confidence === "high"
+      ? "Proceed with all listed safe local steps. Stay aligned to the active goal, dogfood Klemm, run focused tests, then full verification."
+      : "Continue with the safe local portion only, keep changes reversible, and record evidence for review.";
+  const nextPrompt = escalationRequired
+    ? "Pause and ask Kyle before continuing."
+    : confidence === "high"
+      ? `Proceed toward "${goalText}"; dogfood Klemm, implement the listed local steps, run focused tests, then full verification. Do not push or deploy without queue approval.`
+      : `Continue the safe local work toward "${goalText}" and ask Kyle before broad product-direction or external actions.`;
+
+  return {
+    answer,
+    confidence,
+    evidenceMemoryIds: evidenceMemories.map((memory) => memory.id),
+    evidence: evidenceMemories.map((memory) => ({
+      id: memory.id,
+      text: redactSensitiveText(memory.text),
+      status: memory.status,
+      memoryClass: memory.memoryClass,
+    })),
+    riskLevel,
+    riskFactors: [...riskFactors, ...ambiguityFactors],
+    shouldContinue,
+    nextPrompt,
+    escalationRequired,
+  };
+}
+
+function findProxyEvidenceMemories(state, text) {
+  const memories = (state.memories ?? []).filter((memory) => memory.status === "approved" || memory.status === "pinned");
+  const wantsContinuation = /\bproceed|what'?s next|whats next|continue|keep going|do all|all listed|no corners|dogfood|focused tests|safe local|implementation\b/.test(text);
+  const scored = memories.map((memory) => {
+    const body = `${memory.text} ${memory.memoryClass}`.toLowerCase();
+    let score = 0;
+    for (const term of ["proceed", "what's next", "whats next", "continue", "no corners", "do all", "dogfood", "terminal", "commit", "push", "tests", "safe local"]) {
+      if (wantsContinuation && body.includes(term)) score += 1;
+      if (text.includes(term) && body.includes(term)) score += 3;
+    }
+    if (wantsContinuation && memory.memoryClass === "standing_preference") score += 1;
+    return { memory, score };
+  });
+  return scored
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map((item) => item.memory);
 }
 
 export function registerAgent(state, options = {}) {
@@ -1103,6 +1393,10 @@ export function migrateKlemmState(state, { now = new Date().toISOString(), targe
     dogfoodDays: state.dogfoodDays ?? [],
     observerLoops: state.observerLoops ?? [],
     goals: state.goals ?? [],
+    proxyQuestions: state.proxyQuestions ?? [],
+    proxyAnswers: state.proxyAnswers ?? [],
+    proxyContinuations: state.proxyContinuations ?? [],
+    proxyReviews: state.proxyReviews ?? [],
     schemaMigrations: state.schemaMigrations ?? [],
     policies: state.policies ?? [],
     agentActivities: state.agentActivities ?? [],
@@ -2639,7 +2933,7 @@ function classifyMemoryLine(line) {
   if (/\b(do not|don't|never|requires approval|without approval|blocked|boundary|boundaries)\b/i.test(line)) {
     return "authority_boundary";
   }
-  if (/\b(prefer|always|working style|terminal-first|cli-first|focused|run tests|before completion|review before risky)\b/i.test(line)) {
+  if (/\b(prefer|always|working style|terminal-first|cli-first|focused|run tests|before completion|review before risky|what'?s next|whats next|proceed|no corners|no cut corners|do all that|dogfood|keep going)\b/i.test(line)) {
     return "standing_preference";
   }
   if (/\b(github|repo|repository|commit|supervision|monitor|docs?|history)\b/i.test(line)) {

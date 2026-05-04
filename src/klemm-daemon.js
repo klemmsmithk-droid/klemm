@@ -75,6 +75,21 @@ export function createKlemmHttpServer({ getState, saveState }) {
         return runTool(response, "goal_debrief", { id: url.searchParams.get("id") ?? url.searchParams.get("goal") ?? url.searchParams.get("mission") }, { getState, saveState });
       }
 
+      if (request.method === "POST" && url.pathname === "/api/proxy/ask") {
+        return runTool(response, "proxy_ask", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/proxy/continue") {
+        return runTool(response, "proxy_continue", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/proxy/status") {
+        return runTool(response, "proxy_status", {
+          goalId: url.searchParams.get("goal") ?? url.searchParams.get("goalId"),
+          missionId: url.searchParams.get("mission") ?? url.searchParams.get("missionId"),
+        }, { getState, saveState });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/agents/register") {
         return runTool(response, "register_agent", await readJson(request), { getState, saveState });
       }

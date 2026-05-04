@@ -7,16 +7,20 @@ import { chmod, copyFile, mkdir, readdir, readFile, rm, stat, unlink, writeFile 
 import { join, relative } from "node:path";
 
 import {
+  addReviewedProxyMemory,
+  askProxy,
   addContextSyncSource,
   addAdapterClient,
   buildContextSyncPlan,
   buildUserModelSummary,
   buildCodexContext,
   addStructuredPolicy,
+  continueProxy,
   distillMemory,
   evaluateAgentAlignment,
   getGoalStatus,
   getKlemmStatus,
+  getProxyStatus,
   importContextSource,
   importMemorySource,
   ingestMemoryExport,
@@ -135,6 +139,10 @@ async function main() {
     if (command === "goal" && args[1] === "clear") return setGoalStatusFromCli(args.slice(2), "cleared");
     if (command === "goal" && args[1] === "debrief") return debriefGoalFromCli(args.slice(2));
     if (command === "goal" && (args[1] === "list" || !args[1])) return listGoalsFromCli(args.slice(2));
+    if (command === "proxy" && args[1] === "ask") return proxyAskFromCli(args.slice(2));
+    if (command === "proxy" && args[1] === "continue") return proxyContinueFromCli(args.slice(2));
+    if (command === "proxy" && args[1] === "status") return proxyStatusFromCli(args.slice(2));
+    if (command === "proxy" && args[1] === "review") return proxyReviewFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
     if (command === "agents") return printAgents();
@@ -150,6 +158,7 @@ async function main() {
     if (command === "memory" && args[1] === "ingest") return await ingestMemoryFromCli(args.slice(2));
     if (command === "memory" && args[1] === "ingest-export") return await ingestMemoryExportFromCli(args.slice(2));
     if (command === "memory" && args[1] === "import-source") return await importMemorySourceFromCli(args.slice(2));
+    if (command === "memory" && args[1] === "seed-proxy") return seedProxyMemoryFromCli(args.slice(2));
     if (command === "context" && args[1] === "import") return await importContextSourceFromCli(args.slice(2));
     if (command === "memory" && args[1] === "search") return searchMemoryFromCli(args.slice(2));
     if (command === "memory" && args[1] === "sources") return printMemorySourcesFromCli(args.slice(2));
@@ -981,6 +990,12 @@ function buildTrueFinalProductScore(state) {
       weight: 8,
       pass: (state.decisions ?? []).some((decision) => (decision.matchedPolicies ?? []).length > 0 || decision.decision === "queue"),
       detail: `decisions=${(state.decisions ?? []).length}`,
+    },
+    {
+      id: "proxy_user_standin",
+      weight: 12,
+      pass: (state.proxyAnswers ?? []).some((answer) => answer.confidence === "high" && answer.shouldContinue) && (state.proxyContinuations ?? []).some((continuation) => continuation.shouldContinue),
+      detail: `proxy_answers=${(state.proxyAnswers ?? []).length} continuations=${(state.proxyContinuations ?? []).length}`,
     },
     {
       id: "security_lifecycle",
@@ -1881,6 +1896,7 @@ function activityMatchesAdapter(adapter, activity) {
 function trustWhyFromCli(args) {
   const flags = parseFlags(args);
   const state = store.getState();
+  if (flags.proxy) return trustWhyProxyFromCli(flags.proxy);
   if (flags.goal) return trustWhyGoalFromCli(flags.goal);
   const decisionId = args[0];
   const decision = (state.decisions ?? []).find((item) => item.id === decisionId);
@@ -1934,6 +1950,39 @@ function trustWhyFromCli(args) {
   console.log("How to correct Klemm");
   console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
   console.log("- Review the resulting memory candidate, then promote it to policy if it should become a standing rule.");
+}
+
+function trustWhyProxyFromCli(answerId) {
+  const state = store.getState();
+  const answer = (state.proxyAnswers ?? []).find((item) => item.id === answerId);
+  if (!answer) throw new Error(`Proxy answer not found: ${answerId}`);
+  const question = (state.proxyQuestions ?? []).find((item) => item.id === answer.questionId);
+  const goal = findGoal(state, answer.goalId ?? answer.missionId);
+  const mission = (state.missions ?? []).find((item) => item.id === answer.missionId);
+  const memories = (state.memories ?? []).filter((memory) => (answer.evidenceMemoryIds ?? []).includes(memory.id));
+  console.log("Why Klemm answered for Kyle");
+  console.log(`Bottom line: ${answer.confidence} confidence, ${answer.escalationRequired ? "escalated" : "answered locally"}`);
+  console.log(`Question: ${redactSensitiveText(question?.question ?? "unknown")}`);
+  console.log(`Answer: ${redactSensitiveText(answer.answer)}`);
+  console.log(`Next prompt: ${redactSensitiveText(answer.nextPrompt)}`);
+  console.log("");
+  console.log("What Klemm saw");
+  console.log(`- Goal: ${goal?.id ?? "none"} ${goal?.objective ?? ""}`);
+  console.log(`- Mission lease: ${mission?.id ?? "none"} ${mission?.goal ?? ""}`);
+  console.log(`- Risk: ${answer.riskLevel}`);
+  console.log(`- Should continue: ${answer.shouldContinue ? "yes" : "no"}`);
+  console.log("");
+  console.log("Evidence memories:");
+  if (memories.length === 0) console.log("- none");
+  for (const memory of memories) console.log(`- ${memory.id} ${memory.status}: ${redactSensitiveText(memory.text)}`);
+  console.log("");
+  console.log("Risk factors:");
+  if ((answer.riskFactors ?? []).length === 0) console.log("- none");
+  for (const factor of answer.riskFactors ?? []) console.log(`- ${redactSensitiveText(factor)}`);
+  console.log("");
+  console.log("Correction path:");
+  console.log(`- klemm proxy review --answer ${answer.id} --status reviewed --note "..."`);
+  console.log("- Promote a reviewed correction or memory if this should become a standing rule.");
 }
 
 function trustWhyGoalFromCli(goalId) {
@@ -2938,6 +2987,91 @@ function debriefGoalFromCli(args) {
   console.log("Risk hints:");
   if ((goal.riskHints ?? []).length === 0) console.log("- none");
   for (const hint of (goal.riskHints ?? []).slice(0, 8)) console.log(`- ${redactSensitiveText(hint)}`);
+}
+
+function proxyAskFromCli(args) {
+  const flags = parseFlags(args);
+  if (!flags.question) throw new Error('Usage: klemm proxy ask --goal <goal-id> --agent <agent-id> --question "..."');
+  const next = store.update((state) => askProxy(state, {
+    goalId: flags.goal ?? flags.goalId,
+    missionId: flags.mission ?? flags.missionId,
+    agentId: flags.agent ?? flags.agentId,
+    question: flags.question,
+    context: flags.context ?? "",
+  }));
+  const answer = next.proxyAnswers[0];
+  console.log("Klemm proxy answer");
+  console.log(`Answer ID: ${answer.id}`);
+  console.log(`Question ID: ${answer.questionId}`);
+  console.log(`Goal: ${answer.goalId ?? "none"}`);
+  console.log(`Confidence: ${answer.confidence}`);
+  console.log(`Risk: ${answer.riskLevel}`);
+  console.log(`Escalation required: ${answer.escalationRequired ? "yes" : "no"}`);
+  console.log(`Should continue: ${answer.shouldContinue ? "yes" : "no"}`);
+  console.log(`Answer: ${redactSensitiveText(answer.answer)}`);
+  console.log(`Next prompt: ${redactSensitiveText(answer.nextPrompt)}`);
+  if (answer.queuedDecisionId) console.log(`Queued decision: ${answer.queuedDecisionId}`);
+}
+
+function proxyContinueFromCli(args) {
+  const flags = parseFlags(args);
+  const next = store.update((state) => continueProxy(state, {
+    goalId: flags.goal ?? flags.goalId,
+    missionId: flags.mission ?? flags.missionId,
+    agentId: flags.agent ?? flags.agentId,
+  }));
+  const continuation = next.proxyContinuations[0];
+  console.log("Klemm proxy continuation");
+  console.log(`Continuation ID: ${continuation.id}`);
+  console.log(`Goal: ${continuation.goalId}`);
+  console.log(`Confidence: ${continuation.confidence}`);
+  console.log(`Escalation required: ${continuation.escalationRequired ? "yes" : "no"}`);
+  console.log(`Should continue: ${continuation.shouldContinue ? "yes" : "no"}`);
+  console.log(`Reason: ${redactSensitiveText(continuation.reason)}`);
+  console.log(`Next prompt: ${redactSensitiveText(continuation.nextPrompt)}`);
+}
+
+function proxyStatusFromCli(args) {
+  const flags = parseFlags(args);
+  const status = getProxyStatus(store.getState(), {
+    goalId: flags.goal ?? flags.goalId,
+    missionId: flags.mission ?? flags.missionId,
+  });
+  console.log("Klemm proxy status");
+  console.log(`Goal: ${status.goal?.id ?? "all"}`);
+  console.log(`Questions: ${status.questions.length}`);
+  console.log(`Answers: ${status.answers.length}`);
+  console.log(`Continuations: ${status.continuations.length}`);
+  console.log(`Queued escalations: ${status.queued.length}`);
+  for (const answer of status.answers.slice(0, 8)) {
+    console.log(`- ${answer.id} ${answer.confidence} continue=${answer.shouldContinue ? "yes" : "no"}: ${redactSensitiveText(answer.answer)}`);
+  }
+}
+
+function proxyReviewFromCli(args) {
+  const flags = parseFlags(args);
+  const next = executeKlemmTool("proxy_review", {
+    proxyAnswerId: flags.answer ?? flags.proxy ?? args[0],
+    status: flags.status ?? "reviewed",
+    note: flags.note ?? args.slice(1).join(" "),
+  }, { state: store.getState() });
+  store.saveState(next.state);
+  console.log(`Proxy reviewed: ${next.result.review.proxyAnswerId}`);
+  console.log(`Status: ${next.result.review.status}`);
+}
+
+function seedProxyMemoryFromCli(args) {
+  const flags = parseFlags(args);
+  if (!flags.text) throw new Error('Usage: klemm memory seed-proxy --id <memory-id> --text "..."');
+  const next = store.update((state) => addReviewedProxyMemory(state, {
+    id: flags.id,
+    text: flags.text,
+    memoryClass: flags.class ?? "standing_preference",
+    source: flags.source ?? "proxy_seed",
+  }));
+  const memory = next.memories[0];
+  console.log(`Proxy memory seeded: ${memory.id}`);
+  console.log(`Status: ${memory.status}`);
 }
 
 function registerAgentFromCli(args) {
@@ -4134,6 +4268,7 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
     ].join("\n");
   }
   if (normalized === "goals") return [...header, renderGoalsTui(state)].join("\n");
+  if (normalized === "proxy") return [...header, renderProxyTui(state, { missionId })].join("\n");
   if (normalized === "policies") {
     return [
       ...header,
@@ -4174,6 +4309,29 @@ function renderGoalsTui(state) {
     if ((goal.riskHints ?? []).length) lines.push(`  Risk: ${goal.riskHints.slice(0, 3).map(redactSensitiveText).join("; ")}`);
     if (activities[0]) lines.push(`  Activity: ${activities[0].type} ${redactSensitiveText(activities[0].summary)}`);
     lines.push(`  Next: klemm trust why --goal ${goal.id}`);
+  }
+  return lines.join("\n");
+}
+
+function renderProxyTui(state, { missionId } = {}) {
+  const status = getProxyStatus(state, { missionId });
+  const lines = ["Klemm Proxy"];
+  lines.push(`Goal: ${status.goal?.id ?? "all"}`);
+  lines.push(`Questions: ${status.questions.length}`);
+  lines.push(`Answers: ${status.answers.length}`);
+  lines.push(`Continuations: ${status.continuations.length}`);
+  lines.push(`Queued escalations: ${status.queued.length}`);
+  lines.push("Answers:");
+  if (status.answers.length === 0) lines.push("- none");
+  for (const answer of status.answers.slice(0, 8)) {
+    lines.push(`- ${answer.id} ${answer.confidence} risk=${answer.riskLevel} continue=${answer.shouldContinue ? "yes" : "no"} escalate=${answer.escalationRequired ? "yes" : "no"}`);
+    lines.push(`  ${redactSensitiveText(answer.answer)}`);
+    lines.push(`  Next: ${redactSensitiveText(answer.nextPrompt)}`);
+  }
+  lines.push("Continuations:");
+  if (status.continuations.length === 0) lines.push("- none");
+  for (const continuation of status.continuations.slice(0, 5)) {
+    lines.push(`- ${continuation.id} ${continuation.confidence} continue=${continuation.shouldContinue ? "yes" : "no"}: ${redactSensitiveText(continuation.nextPrompt)}`);
   }
   return lines.join("\n");
 }
@@ -5583,6 +5741,10 @@ Commands:
   klemm goal attach --id goal-id --agent agent-id [--kind claude_agent] [--command "claude"]
   klemm goal tick --id goal-id --summary "progress" [--agent agent-id] [--changed-file path] [--evidence "tests passed"]
   klemm goal status|pause|resume|complete|clear|debrief --id goal-id
+  klemm proxy ask --goal goal-id --agent agent-id --question "..." [--context "..."]
+  klemm proxy continue --goal goal-id --agent agent-id
+  klemm proxy status --goal goal-id
+  klemm proxy review --answer proxy-answer-id [--status reviewed] [--note "..."]
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
   klemm event record --mission mission-id --agent agent-codex --type command_planned --summary "..."
   klemm agents
@@ -5608,6 +5770,7 @@ Commands:
   klemm adapters health [--mission mission-id] [--require codex,claude,cursor,shell]
   klemm trust why <decision-id>
   klemm trust why --goal goal-id
+  klemm trust why --proxy proxy-answer-id
   klemm trust timeline --mission mission-id
   klemm corrections add --decision <id> --preference "..."
   klemm corrections review|approve|reject|promote <correction-id>
@@ -5632,7 +5795,7 @@ Commands:
   klemm onboard --stdin
   klemm onboard v2 --stdin
   klemm debrief [--mission mission-id]
-  klemm tui [--mission mission-id] [--view overview|memory|workbench|goals|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
+  klemm tui [--mission mission-id] [--view overview|memory|workbench|goals|proxy|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
   klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--goal goal-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
   klemm supervise [--mission mission-id] [--capture] [--record-tree] [--timeout-ms 60000] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs [--details]

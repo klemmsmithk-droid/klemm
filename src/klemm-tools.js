@@ -1,6 +1,9 @@
 import {
+  addReviewedProxyMemory,
+  askProxy,
   buildUserModelSummary,
   addAdapterClient,
+  continueProxy,
   distillMemory,
   buildCodexContext,
   addStructuredPolicy,
@@ -10,6 +13,7 @@ import {
   findGoal,
   getGoalStatus,
   getKlemmStatus,
+  getProxyStatus,
   importContextSource,
   importMemorySource,
   ingestMemoryExport,
@@ -22,6 +26,7 @@ import {
   recordOsObservation,
   recordQueuedDecision,
   recordSupervisedRun,
+  reviewProxy,
   renderKlemmDashboard,
   reviewMemory,
   promoteMemoryToPolicy,
@@ -167,6 +172,22 @@ export const KLEMM_MCP_TOOLS = [
   {
     name: "goal_debrief",
     description: "Render a goal-scoped debrief with evidence and risk hints.",
+  },
+  {
+    name: "proxy_ask",
+    description: "Ask Klemm to answer an agent clarification question as the user's proxy when safe.",
+  },
+  {
+    name: "proxy_continue",
+    description: "Ask Klemm for the next user-like continuation prompt for an aligned goal.",
+  },
+  {
+    name: "proxy_status",
+    description: "Inspect proxy questions, answers, continuations, and queued escalations.",
+  },
+  {
+    name: "proxy_review",
+    description: "Record review feedback for a Klemm proxy answer.",
   },
 ];
 
@@ -420,6 +441,30 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
 
   if (name === "goal_debrief") {
     return { state, result: { debrief: summarizeGoalDebrief(state, args) } };
+  }
+
+  if (name === "proxy_ask") {
+    const nextState = askProxy(state, args);
+    return { state: nextState, result: { question: nextState.proxyQuestions[0], answer: nextState.proxyAnswers[0] } };
+  }
+
+  if (name === "proxy_continue") {
+    const nextState = continueProxy(state, args);
+    return { state: nextState, result: { continuation: nextState.proxyContinuations[0] } };
+  }
+
+  if (name === "proxy_status") {
+    return { state, result: getProxyStatus(state, args) };
+  }
+
+  if (name === "proxy_review") {
+    const nextState = reviewProxy(state, args);
+    return { state: nextState, result: { review: nextState.proxyReviews[0] } };
+  }
+
+  if (name === "proxy_memory_seed") {
+    const nextState = addReviewedProxyMemory(state, args);
+    return { state: nextState, result: { memory: nextState.memories[0] } };
   }
 
   if (name === "ingest_memory_export") {

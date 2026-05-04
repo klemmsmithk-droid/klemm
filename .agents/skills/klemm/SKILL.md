@@ -41,6 +41,26 @@ klemm codex hub --id <mission-id> --goal "<goal>"
 
 Use `klemm install` for first install: it writes the daemon plist, migrates the store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profiles, applies a policy pack, runs doctor with daemon health skipped by default, and prints the next commands. Use `--check-health` only when the daemon is already running. Use `klemm onboard v2 --stdin` for first-run mode/source/watch-path/agent-wrapper capture and first memory approvals.
 
+## Proxy / User Stand-In
+
+Klemm can answer for Kyle only when the question is low-risk, goal-aligned, and backed by reviewed memories, corrections, the active goal, or recent agent activity. In plan mode, at stopping points, and whenever Codex would otherwise ask for "what next?", ask Klemm before asking the user:
+
+```text
+klemm proxy ask --goal <goal-id> --agent agent-codex --question "<question>" --context "<plan, options, and recent work>"
+klemm proxy continue --goal <goal-id> --agent agent-codex
+klemm proxy status --goal <goal-id>
+klemm trust why --proxy <proxy-answer-id>
+```
+
+Use proxy mode before interrupting the user when:
+
+- Codex is in plan mode and needs clarification that reviewed user intent can answer.
+- Codex reaches "what's next?", "proceed?", or a safe continuation point.
+- Codex has a reversible local implementation, testing, or documentation step available.
+- Codex is unsure whether to keep working, run tests, write a debrief, commit, or push.
+
+Accept high-confidence proxy answers as Kyle's temporary stand-in for safe local work. Follow medium-confidence answers only within their stated constraints and record the uncertainty. Surface low-confidence or high-risk proxy answers to the real user instead of proceeding. Never let proxy mode approve destructive, external, credential, financial, legal, reputational, OAuth, deploy, publish, or broad product-direction actions.
+
 ## Authority Checks
 
 Before risky actions, call `request_authority` or `klemm propose`.
