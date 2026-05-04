@@ -34,6 +34,7 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     memories: [],
     memorySources: [],
     memoryQuarantine: [],
+    contextConnectors: [],
     contextSyncSources: [],
     contextSyncRuns: [],
     setupRuns: [],
@@ -2118,6 +2119,7 @@ function extractContextRecords(provider, { payload = "", filePath, sourceRef } =
   if (provider === "chatgpt") return extractChatGptRecords(text, sourceRef);
   if (provider === "claude") return extractClaudeRecords(text, sourceRef);
   if (provider === "codex") return extractCodexRecords(text, sourceRef);
+  if (provider === "gemini") return extractGeminiRecords(text, sourceRef);
   if (provider === "chrome_history") return extractChromeHistoryRecords(text, sourceRef);
   if (provider === "git_history") return extractGitHistoryRecords(text, sourceRef);
   return extractMemoryExportMessages(text).map((message, index) => ({
@@ -2249,6 +2251,43 @@ function extractCodexRecords(text, sourceRef) {
   }
   if (records.length > 0) return records;
   return extractPlainTextRecords("codex", text, sourceRef);
+}
+
+function extractGeminiRecords(text, sourceRef) {
+  const parsed = parseJsonOrNull(text);
+  if (!parsed) return extractPlainTextRecords("gemini", text, sourceRef);
+  const conversations = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [parsed];
+  const records = [];
+  for (const conversation of conversations) {
+    const messages = conversation.messages ?? conversation.turns ?? conversation.entries ?? [];
+    for (const [index, message] of messages.entries()) {
+      const content = extractMessageText(message.text ?? message.content ?? message.parts);
+      if (!content) continue;
+      records.push({
+        id: `${conversation.id ?? conversation.uuid ?? sourceRef}:${index}`,
+        provider: "gemini",
+        sourceRef,
+        role: message.role ?? message.author ?? "unknown",
+        content,
+        createdAt: message.created_at ?? message.createdAt ?? message.timestamp,
+        evidence: {
+          provider: "gemini",
+          sourceRef,
+          conversationId: conversation.id ?? conversation.uuid,
+          conversationTitle: conversation.title ?? conversation.name,
+          messageId: `${conversation.id ?? conversation.uuid ?? sourceRef}:${index}`,
+        },
+      });
+    }
+  }
+  return records.length > 0 ? records : extractMemoryExportMessages(text).map((message, index) => ({
+    id: `${sourceRef}:${index}`,
+    provider: "gemini",
+    sourceRef,
+    role: message.role,
+    content: message.content,
+    evidence: { provider: "gemini", sourceRef, messageId: `${index}` },
+  }));
 }
 
 function extractChromeHistoryRecords(text, sourceRef) {
@@ -2968,7 +3007,7 @@ function classifyMemoryLine(line) {
   if (/\b(prefer|always|working style|terminal-first|cli-first|focused|run tests|before completion|review before risky|what'?s next|whats next|proceed|no corners|no cut corners|do all that|dogfood|keep going)\b/i.test(line)) {
     return "standing_preference";
   }
-  if (/\b(github|repo|repository|commit|supervision|monitor|docs?|history)\b/i.test(line)) {
+  if (/\b(github|repo|repository|commit|supervision|monitor|docs?|history|police all agents|agent infrastructure|source evidence|authority layers?)\b/i.test(line)) {
     return "project_context";
   }
   if (/\b(love|hate|interest|building|project|ambitious|agentic|infrastructure)\b/i.test(line)) {
