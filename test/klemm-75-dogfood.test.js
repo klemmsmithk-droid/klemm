@@ -122,6 +122,87 @@ test("wrapped Codex sessions orient the user and can finish the mission automati
   assert.match(current.stdout, /No active mission/);
 });
 
+test("wrapped Codex sessions inject a session contract and record lifecycle evidence", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-wrap-contract-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  const wrapped = await runKlemm([
+    "codex",
+    "wrap",
+    "--id",
+    "mission-wrap-contract",
+    "--goal",
+    "Real interactive wrapper contract",
+    "--plan",
+    "Check the Klemm session environment and finish.",
+    "--finish",
+    "--",
+    "node",
+    "-e",
+    "console.log(['mission=' + process.env.KLEMM_MISSION_ID, 'agent=' + process.env.KLEMM_AGENT_ID, 'session=' + process.env.KLEMM_CODEX_SESSION_ID, 'context=' + process.env.KLEMM_CODEX_CONTEXT_COMMAND, 'run=' + process.env.KLEMM_CODEX_RUN_COMMAND, 'debrief=' + process.env.KLEMM_CODEX_DEBRIEF_COMMAND].join('\\n'))",
+  ], { env });
+
+  assert.equal(wrapped.status, 0, wrapped.stderr);
+  assert.match(wrapped.stdout, /Session: codex-session-/);
+  assert.match(wrapped.stdout, /mission=mission-wrap-contract/);
+  assert.match(wrapped.stdout, /agent=agent-codex/);
+  assert.match(wrapped.stdout, /session=codex-session-/);
+  assert.match(wrapped.stdout, /context=klemm codex context --mission mission-wrap-contract/);
+  assert.match(wrapped.stdout, /run=klemm codex run --mission mission-wrap-contract --/);
+  assert.match(wrapped.stdout, /debrief=klemm codex debrief --mission mission-wrap-contract/);
+
+  const context = await runKlemm(["codex", "context", "--mission", "mission-wrap-contract"], { env });
+  assert.equal(context.status, 0, context.stderr);
+  const packet = JSON.parse(context.stdout);
+  assert.ok(packet.agentActivities.some((activity) => activity.type === "session_start"));
+  assert.ok(packet.agentActivities.some((activity) => activity.type === "session_finish"));
+  assert.ok(packet.agentActivities.some((activity) => activity.type === "plan"));
+  assert.ok(packet.agentActivities.some((activity) => activity.type === "debrief"));
+  assert.equal(packet.supervisedRuns.length, 1);
+  assert.match(packet.supervisedRuns[0].stdout, /mission=mission-wrap-contract/);
+
+  const debrief = await runKlemm(["debrief", "--mission", "mission-wrap-contract"], { env });
+  assert.match(debrief.stdout, /session_start/);
+  assert.match(debrief.stdout, /session_finish/);
+  assert.match(debrief.stdout, /Recent supervised runs:/);
+});
+
+test("wrapped Codex sessions queue risky launch commands before execution", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-wrap-queue-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  const wrapped = await runKlemm([
+    "codex",
+    "wrap",
+    "--id",
+    "mission-wrap-queue",
+    "--goal",
+    "Queue risky wrapped launch",
+    "--plan",
+    "Try a risky publish command.",
+    "--",
+    "git",
+    "push",
+    "origin",
+    "main",
+  ], { env });
+
+  assert.equal(wrapped.status, 0, wrapped.stderr);
+  assert.match(wrapped.stdout, /Guarded command decision: queue/);
+  assert.match(wrapped.stdout, /Launch queued before execution/);
+  assert.doesNotMatch(wrapped.stdout, /Klemm supervised exit:/);
+
+  const queue = await runKlemm(["queue"], { env });
+  assert.match(queue.stdout, /git_push/);
+  assert.match(queue.stdout, /origin main/);
+
+  const context = await runKlemm(["codex", "context", "--mission", "mission-wrap-queue"], { env });
+  const packet = JSON.parse(context.stdout);
+  assert.equal(packet.queue.length, 1);
+  assert.ok(packet.agentActivities.some((activity) => activity.type === "session_finish" && /queued/.test(activity.summary)));
+  assert.equal(packet.supervisedRuns.length, 0);
+});
+
 test("dogfood status and TUI show the active operator loop next actions", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-dogfood-console-"));
   const env = { KLEMM_DATA_DIR: dataDir };

@@ -245,6 +245,8 @@ async function wrapCodexSessionFromCli(args) {
   const command = separator >= 0 ? args.slice(separator + 1) : [];
   const flags = parseFlags(flagArgs);
   const protocolVersion = flags.protocolVersion ? Number(flags.protocolVersion) : 1;
+  const agentId = flags.agent ?? "agent-codex";
+  const sessionId = flags.sessionId ?? `codex-session-${Date.now()}`;
   const missionState = store.update((state) =>
     startCodexHub(state, {
       id: flags.id,
@@ -254,6 +256,7 @@ async function wrapCodexSessionFromCli(args) {
   );
   const mission = missionState.missions[0];
   console.log(`Codex wrapper session started: ${mission.id}`);
+  console.log(`Session: ${sessionId}`);
   console.log("Klemm is watching");
   console.log(`Data dir: ${KLEMM_DATA_DIR}`);
   console.log("Watching: commands, tool output, diffs, queue, alignment");
@@ -261,10 +264,36 @@ async function wrapCodexSessionFromCli(args) {
   console.log(`Review: env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm dogfood status --mission ${mission.id}`);
   console.log(`Finish: env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm mission finish ${mission.id} "work complete"`);
 
+  const sessionEnv = buildCodexSessionEnv({
+    missionId: mission.id,
+    agentId,
+    sessionId,
+    protocolVersion,
+    adapterClientId: flags.adapterClient,
+    adapterToken: flags.adapterToken,
+  });
+
+  const started = executeAdapterEnvelopeTool({
+    protocolVersion,
+    missionId: mission.id,
+    agentId,
+    adapterClientId: flags.adapterClient,
+    adapterToken: flags.adapterToken,
+    event: "session_start",
+    target: sessionId,
+    summary: `Wrapped Codex session ${sessionId} started.`,
+  }).result;
+  console.log(`Session start reported: ${started.accepted === false ? "rejected" : "accepted"}`);
+  if (started.accepted === false) {
+    console.log(`Error: ${started.error}`);
+    process.exitCode = 1;
+    return;
+  }
+
   const plan = executeAdapterEnvelopeTool({
     protocolVersion,
     missionId: mission.id,
-    agentId: flags.agent ?? "agent-codex",
+    agentId,
     adapterClientId: flags.adapterClient,
     adapterToken: flags.adapterToken,
     event: "plan",
@@ -278,41 +307,72 @@ async function wrapCodexSessionFromCli(args) {
     return;
   }
 
+  let launchOutcome = "completed";
   if (command.length > 0) {
     const guarded = store.update((state) =>
       proposeAction(state, buildCommandProposal(command, {
         missionId: mission.id,
-        actor: flags.agent ?? "agent-codex",
+        actor: agentId,
         suggestedRewrite: flags.rewriteTo,
       })),
     );
     const decision = guarded.decisions[0];
     console.log(`Guarded command decision: ${decision.decision}`);
     if (decision.decision === "allow" && !flags.dryRun) {
-      await superviseFromCli(["--mission", mission.id, "--actor", flags.agent ?? "agent-codex", "--watch-loop", "--intercept-output", "--", ...command]);
+      await withTemporaryEnv(sessionEnv, async () => {
+        await superviseFromCli(["--mission", mission.id, "--actor", agentId, "--watch-loop", "--intercept-output", "--capture", "--record-tree", "--", ...command]);
+      });
+      launchOutcome = process.exitCode && process.exitCode !== 0 ? `exited_${process.exitCode}` : "completed";
+    } else if (decision.decision === "allow" && flags.dryRun) {
+      launchOutcome = "dry_run";
+    } else {
+      launchOutcome = decision.decision === "queue" ? "queued" : "blocked";
+      console.log(`Launch ${launchOutcome} before execution`);
+      printDecision(decision);
     }
   }
 
   if (flags.dryRun) {
     console.log("Dry run: Codex launch skipped");
   } else if (command.length === 0) {
-    await superviseFromCli([
-      "--mission",
-      mission.id,
-      "--actor",
-      flags.agent ?? "agent-codex",
-      "--watch-loop",
-      "--intercept-output",
-      "--",
-      ...resolveDefaultCodexCommand(flags),
-    ]);
+    await withTemporaryEnv(sessionEnv, async () => {
+      await superviseFromCli([
+        "--mission",
+        mission.id,
+        "--actor",
+        agentId,
+        "--watch-loop",
+        "--intercept-output",
+        "--capture",
+        "--record-tree",
+        "--",
+        ...resolveDefaultCodexCommand(flags),
+      ]);
+    });
+    launchOutcome = process.exitCode && process.exitCode !== 0 ? `exited_${process.exitCode}` : "completed";
+  }
+
+  const finishedSession = executeAdapterEnvelopeTool({
+    protocolVersion,
+    missionId: mission.id,
+    agentId,
+    adapterClientId: flags.adapterClient,
+    adapterToken: flags.adapterToken,
+    event: "session_finish",
+    target: sessionId,
+    summary: `Wrapped Codex session ${sessionId} finished: ${launchOutcome}.`,
+  }).result;
+  console.log(`Session finish reported: ${finishedSession.accepted === false ? "rejected" : "accepted"}`);
+  if (finishedSession.accepted === false) {
+    console.log(`Error: ${finishedSession.error}`);
+    process.exitCode = 1;
   }
 
   const debriefText = summarizeDebrief(store.getState(), { missionId: mission.id });
   const debrief = executeAdapterEnvelopeTool({
     protocolVersion,
     missionId: mission.id,
-    agentId: flags.agent ?? "agent-codex",
+    agentId,
     adapterClientId: flags.adapterClient,
     adapterToken: flags.adapterToken,
     event: "debrief",
@@ -330,6 +390,42 @@ async function wrapCodexSessionFromCli(args) {
   if (flags.finish) {
     const finished = finishMissionLocal(mission.id, "Wrapped Codex session completed.");
     console.log(`Mission finished: ${finished.id}`);
+  }
+}
+
+function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, adapterClientId, adapterToken }) {
+  const contextCommand = `klemm codex context --mission ${missionId}`;
+  const runCommand = `klemm codex run --mission ${missionId} --`;
+  const debriefCommand = `klemm codex debrief --mission ${missionId}`;
+  return {
+    KLEMM_MISSION_ID: missionId,
+    KLEMM_AGENT_ID: agentId,
+    KLEMM_CODEX_SESSION_ID: sessionId,
+    KLEMM_CODEX_CONTEXT_COMMAND: contextCommand,
+    KLEMM_CODEX_RUN_COMMAND: runCommand,
+    KLEMM_CODEX_DEBRIEF_COMMAND: debriefCommand,
+    KLEMM_PROTOCOL_VERSION: String(protocolVersion),
+    ...(adapterClientId ? { KLEMM_ADAPTER_CLIENT_ID: adapterClientId } : {}),
+    ...(adapterToken ? { KLEMM_ADAPTER_TOKEN: adapterToken } : {}),
+  };
+}
+
+async function withTemporaryEnv(env, callback) {
+  const previous = {};
+  for (const key of Object.keys(env)) {
+    previous[key] = process.env[key];
+    process.env[key] = env[key];
+  }
+  try {
+    return await callback();
+  } finally {
+    for (const key of Object.keys(env)) {
+      if (previous[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = previous[key];
+      }
+    }
   }
 }
 
@@ -2826,7 +2922,7 @@ function buildCodexSkillTemplate() {
     "",
     "# Klemm",
     "",
-    "Start with `klemm codex hub`, fetch `klemm codex context`, run commands through `klemm codex run`, ask authority before risky actions, and debrief with `klemm codex debrief`.",
+    "Start real sessions with `klemm codex wrap` or the installed `klemm-codex` wrapper. The wrapper starts the hub mission, injects `KLEMM_MISSION_ID`, `KLEMM_AGENT_ID`, `KLEMM_CODEX_CONTEXT_COMMAND`, `KLEMM_CODEX_RUN_COMMAND`, and `KLEMM_CODEX_DEBRIEF_COMMAND`, routes allowed work through capture-mode supervision, queues risky launches before execution, and reports the final debrief. Inside an active session, fetch `klemm codex context`, run commands through `klemm codex run`, ask authority before risky actions, and debrief with `klemm codex debrief`.",
     "",
   ].join("\n");
 }
@@ -3004,7 +3100,7 @@ Commands:
   klemm codex dogfood --id mission-id --goal "..." --plan "..."
   klemm codex report --mission mission-id --type tool_call --tool shell --command "npm test"
   klemm codex run --mission mission-id -- <command> [args...]
-  klemm codex wrap --id mission-id --goal "..." [--adapter-client id] [--adapter-token token] [--dry-run] -- <command> [args...]
+  klemm codex wrap --id mission-id --goal "..." [--session-id id] [--adapter-client id] [--adapter-token token] [--dry-run] [--finish] -- <command> [args...]
   klemm codex install --output-dir path [--data-dir path]
   klemm mission start --hub codex --goal "..." [--allow a,b] [--block x,y] [--rewrite]
   klemm mission current

@@ -72,7 +72,7 @@ klemm codex wrap --id <mission-id> --goal "<goal>" --adapter-client codex-local 
 klemm codex install --output-dir ./codex-klemm --data-dir ./data
 ```
 
-Use `klemm codex dogfood` when starting a real `/klemm` session. Use `klemm codex report` for plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` so commands flow through supervised watch-loop monitoring with `agent-codex` as the actor. Use `klemm codex wrap` or the installed `klemm-codex` wrapper for end-to-end dogfooding: mission start, Codex registration, plan report, guarded command preflight, supervised execution when allowed, and final debrief report.
+Use `klemm codex wrap` or the installed `klemm-codex` wrapper when starting a real `/klemm` session. The wrapper creates a `codex-session-*` contract, injects `KLEMM_MISSION_ID`, `KLEMM_AGENT_ID`, `KLEMM_CODEX_CONTEXT_COMMAND`, `KLEMM_CODEX_RUN_COMMAND`, and `KLEMM_CODEX_DEBRIEF_COMMAND`, reports session start/plan/session finish/debrief, preflights the launch command, captures supervised execution when allowed, and queues risky launches before execution. Use `klemm codex dogfood` only when opening a hub mission without launching a wrapped session. Use `klemm codex report` for additional plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` for commands inside an already-wrapped session so they flow through supervised watch-loop monitoring with `agent-codex` as the actor.
 Use `klemm codex install` to write the skill, MCP config, and wrapper bundle for a Codex environment.
 
 When launching agent runtimes through Klemm, use the named wrapper:

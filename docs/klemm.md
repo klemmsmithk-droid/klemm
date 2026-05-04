@@ -127,7 +127,7 @@ npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe
 
 `klemm supervise` remains the lower-level process wrapper for direct commands. Both surfaces classify commands before launch. High-risk commands are queued before execution. Safe rewrites can replace a broad reversible command with a narrower command.
 
-`klemm codex wrap` is the dogfood wrapper installed as `klemm-codex`. It starts a Codex hub mission, registers Codex, reports plan/debrief envelopes, preflights the wrapped command through Klemm authority, and routes allowed work through supervised execution.
+`klemm codex wrap` is the dogfood wrapper installed as `klemm-codex`. It starts a Codex hub mission, registers Codex, creates a `codex-session-*` contract, injects `KLEMM_MISSION_ID`, `KLEMM_AGENT_ID`, and Codex helper commands into the child environment, reports session start/plan/session finish/debrief envelopes, preflights the wrapped command through Klemm authority, captures allowed work through supervised execution, and queues risky launches before execution.
 
 ## Continuous Agent Monitor
 

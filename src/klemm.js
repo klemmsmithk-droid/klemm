@@ -1847,13 +1847,13 @@ function normalizeEventType(type) {
 
 function normalizeAdapterEventType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
-  const known = new Set(["plan", "tool_call", "diff", "uncertainty", "subagent", "debrief", "activity"]);
+  const known = new Set(["session_start", "session_finish", "plan", "tool_call", "diff", "uncertainty", "subagent", "debrief", "activity"]);
   return known.has(value) ? value : "activity";
 }
 
 function normalizeActivityType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
-  const known = new Set(["command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "debrief", "activity"]);
+  const known = new Set(["session_start", "session_finish", "plan", "command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "uncertainty", "debrief", "activity"]);
   return known.has(value) ? value : "activity";
 }
 
