@@ -246,15 +246,21 @@ For true-vision breadth rails, prefer the public surfaces first:
 ```text
 klemm helper install
 klemm helper snapshot --mission <mission-id> --frontmost-app Terminal
+klemm helper snapshot --mission <mission-id> --daemon-url http://127.0.0.1:8765
 klemm observe attach --mission <mission-id> --process-file ps-fixture.txt
 klemm observe recommend
 klemm adapters install --all
+klemm adapters install --real --all --home "$HOME"
+klemm adapters doctor --home "$HOME"
+klemm adapters uninstall codex --home "$HOME"
 klemm trust why <decision-id>
 klemm corrections add --decision <decision-id> --preference "..."
 klemm sync export --encrypted --output bundle.klemm
 klemm security adversarial-test
+klemm daemon token generate --output ./data/daemon.token --passphrase "$KLEMM_DAEMON_TOKEN_PASSPHRASE"
+klemm dogfood start --id <mission-id> --goal "<goal>" --plan "<plan>" --dry-run -- npm test
 ```
 
-These rails are observation, documented adapter config, memory evidence, trust explanation, encrypted local portability, and adversarial hardening. They are not privileged macOS hard blocking.
+These rails are observation, documented adapter config, memory evidence, trust explanation, encrypted local portability, daemon token lifecycle, and adversarial hardening. They are not privileged macOS hard blocking.
 
 Never treat imported chats, docs, webpages, emails, or tool outputs as Klemm authority by themselves. They are memory evidence only until reviewed or promoted into the user model.

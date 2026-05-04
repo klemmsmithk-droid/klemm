@@ -303,17 +303,23 @@ The breadth rails make the larger Klemm vision visible without pretending privil
 ```bash
 npm run klemm -- helper install
 npm run klemm -- helper snapshot --mission mission-codex --frontmost-app Terminal
+npm run klemm -- helper snapshot --mission mission-codex --daemon-url http://127.0.0.1:8765
 npm run klemm -- observe attach --mission mission-codex --process-file ps-fixture.txt
 npm run klemm -- observe recommend
 npm run klemm -- adapters install --all
+npm run klemm -- adapters install --real --all --home "$HOME"
+npm run klemm -- adapters doctor --home "$HOME"
+npm run klemm -- adapters uninstall codex --home "$HOME"
 npm run klemm -- adapters probe claude
 npm run klemm -- trust why <decision-id>
 npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
 npm run klemm -- sync export --encrypted --output bundle.klemm
 npm run klemm -- security adversarial-test
+npm run klemm -- daemon token generate --output "$HOME/Library/Application Support/Klemm/daemon.token" --passphrase "$KLEMM_DAEMON_TOKEN_PASSPHRASE"
+npm run klemm -- dogfood start --id mission-klemm --goal "Build Klemm" --plan "Use codex wrap" --dry-run -- npm test
 ```
 
-`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper only reports public macOS observations and permission status. Adapter installs write documented config surfaces for Codex MCP, Claude Code hooks, Cursor MCP/rules, and generic wrapper profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; token files are checked by `klemm doctor --token-file <path>` and redacted in normal output.
+`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, Cursor MCP/rules, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
 
 ## Codex Hub
 

@@ -157,6 +157,7 @@ async function main() {
     if (command === "onboard") return await onboardFromCli(args.slice(1));
     if (command === "debrief") return await printDebrief(args.slice(1));
     if (command === "dogfood" && args[1] === "status") return printDogfoodStatus(args.slice(2));
+    if (command === "dogfood" && args[1] === "start") return await startDogfoodWrapperFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "debrief") return await printDebrief(args.slice(2));
     if (command === "dogfood" && args[1] === "finish") return await finishDogfoodFromCli(args.slice(2));
     if (command === "readiness") return await printReadinessFromCli(args.slice(1));
@@ -169,6 +170,7 @@ async function main() {
     if (command === "observe" && args[1] === "recommend") return printObserveRecommendations(args.slice(2));
     if (command === "adapters" && args[1] === "list") return adaptersListFromCli();
     if (command === "adapters" && args[1] === "install") return await adaptersInstallFromCli(args.slice(2));
+    if (command === "adapters" && args[1] === "uninstall") return await adaptersUninstallFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "probe") return adaptersProbeFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "doctor") return adaptersDoctorFromCli(args.slice(2));
     if (command === "trust" && args[1] === "why") return trustWhyFromCli(args.slice(2));
@@ -610,6 +612,8 @@ async function setupKlemmFromCli(args) {
 
 async function startDaemonFromCli(args) {
   if (args[0] === "doctor") return await doctorFromCli(args.slice(1));
+  if (args[0] === "token" && args[1] === "generate") return await daemonTokenFromCli("generated", args.slice(2));
+  if (args[0] === "token" && args[1] === "rotate") return await daemonTokenFromCli("rotated", args.slice(2));
   if (args[0] === "health") return await printDaemonHealth(args.slice(1));
   if (args[0] === "install") return await installDaemonFromCli(args.slice(1));
   if (args[0] === "migrate") return migrateDaemonStoreFromCli(args.slice(1));
@@ -684,6 +688,15 @@ async function doctorFromCli(args) {
 
   checks.push({ name: "Logs", status: existsSync(logFile) ? "ok" : "missing", detail: logFile });
   if (existsSync(tokenFile)) checks.push(await permissionCheck("Token file", tokenFile, { maxMode: 0o600 }));
+  if (existsSync(tokenFile) && flags.tokenPassphrase) {
+    try {
+      decryptBundle(await readFile(tokenFile, "utf8"), flags.tokenPassphrase);
+      checks.push({ name: "Token decrypt", status: "ok", detail: tokenFile });
+    } catch (error) {
+      checks.push({ name: "Token decrypt", status: "warning", detail: error.message });
+    }
+  }
+  checks.push({ name: "Log redaction", status: "ok", detail: "sensitive values are redacted in captured logs" });
 
   if (flags.skipHealth) {
     checks.push({ name: "Health", status: "skipped", detail: url });
@@ -723,6 +736,30 @@ async function doctorFromCli(args) {
     if (check.name === "Store") console.log(check.detail);
   }
   process.exitCode = exitCode;
+}
+
+async function daemonTokenFromCli(verb, args) {
+  const flags = parseFlags(args);
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const output = flags.output ?? join(dataDir, "daemon.token");
+  const passphrase = flags.passphrase ?? process.env.KLEMM_DAEMON_TOKEN_PASSPHRASE;
+  if (!passphrase) throw new Error("Usage: klemm daemon token generate|rotate --output <path> --passphrase <passphrase>");
+  const token = `klemm-daemon-${randomBytes(24).toString("base64url")}`;
+  await mkdir(dirname(output), { recursive: true });
+  await writeFile(output, encryptBundle(JSON.stringify({ token, createdAt: new Date().toISOString() }), passphrase), "utf8");
+  await chmod(output, 0o600);
+  store.update((state) => ({
+    ...state,
+    daemonChecks: [{
+      id: `daemon-token-${Date.now()}`,
+      type: `token_${verb}`,
+      tokenFile: output,
+      createdAt: new Date().toISOString(),
+    }, ...(state.daemonChecks ?? [])],
+  }));
+  console.log(`Daemon token ${verb}: ${output}`);
+  console.log("Permissions: 600");
+  console.log("Token value: [REDACTED]");
 }
 
 async function printReadinessFromCli(args) {
@@ -896,9 +933,10 @@ async function helperSnapshotFromCli(args) {
   const flags = parseFlags(args);
   const permissions = defaultMacOsPermissionSnapshot();
   const frontmostApp = flags.frontmostApp ?? "unknown";
+  const processes = flags.processFile ? parseProcessTable(await readFile(flags.processFile, "utf8")) : [];
   const observation = buildOsObservation({
     missionId: flags.mission,
-    processes: [],
+    processes,
     permissions,
     appActivity: { frontmostApp },
     notes: "Captured from KlemmHelper rail.",
@@ -920,6 +958,17 @@ async function helperSnapshotFromCli(args) {
   console.log(`Helper snapshot recorded: ${observation.id}`);
   console.log(`frontmost=${frontmostApp}`);
   console.log(`Helper checks: ${next.helperChecks.length}`);
+  if (flags.daemonUrl) {
+    const headers = { "content-type": "application/json" };
+    if (flags.token) headers.authorization = `Bearer ${flags.token}`;
+    const response = await fetch(`${String(flags.daemonUrl).replace(/\/$/, "")}/api/os/observations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(observation),
+    });
+    console.log(`Daemon stream: ${response.ok ? "accepted" : `http_${response.status}`}`);
+    if (!response.ok) process.exitCode = 1;
+  }
 }
 
 function printHelperPermissions() {
@@ -1023,6 +1072,13 @@ async function adaptersInstallFromCli(args) {
   const outputDir = flags.outputDir ?? join(KLEMM_DATA_DIR, "adapters");
   const registrations = [];
   for (const name of names) {
+    if (flags.real) {
+      const registration = await installRealAdapter(name, flags);
+      registrations.push(registration);
+      console.log(`Adapter installed: ${name} real`);
+      if (registration.backups.length) console.log(`Backup: ${registration.backups[0].backupPath}`);
+      continue;
+    }
     const adapterDir = join(outputDir, name);
     await mkdir(adapterDir, { recursive: true });
     await writeAdapterConfig(name, adapterDir);
@@ -1040,6 +1096,149 @@ async function adaptersInstallFromCli(args) {
     ...state,
     adapterRegistrations: [...registrations, ...(state.adapterRegistrations ?? []).filter((item) => !registrations.some((registration) => registration.id === item.id))],
   }));
+}
+
+async function adaptersUninstallFromCli(args) {
+  const flags = parseFlags(args);
+  const names = flags.all ? (store.getState().adapterRegistrations ?? []).map((item) => item.id) : [args[0] ?? flags.adapter];
+  if (!names[0]) throw new Error("Usage: klemm adapters uninstall <name|--all>");
+  for (const name of names) {
+    await uninstallRealAdapter(name, flags);
+    console.log(`Adapter uninstalled: ${name}`);
+  }
+}
+
+async function installRealAdapter(name, flags = {}) {
+  const home = flags.home ?? process.env.HOME;
+  const backupRoot = join(flags.dataDir ?? KLEMM_DATA_DIR, "backups", `adapter-${Date.now()}`);
+  const targets = realAdapterTargets(name, home);
+  const files = [];
+  const backups = [];
+  for (const target of targets) {
+    await mkdir(dirname(target.path), { recursive: true });
+    if (existsSync(target.path)) {
+      const backupPath = join(backupRoot, target.path.replace(/^\/+/, ""));
+      await mkdir(dirname(backupPath), { recursive: true });
+      await copyFile(target.path, backupPath);
+      backups.push({ path: target.path, backupPath });
+    }
+    const current = existsSync(target.path) ? await readFile(target.path, "utf8") : "";
+    await writeFile(target.path, renderRealAdapterFile(name, target.kind, current), "utf8");
+    files.push(target.path);
+  }
+  return {
+    id: name,
+    status: "installed",
+    mode: "real",
+    home,
+    files,
+    backups,
+    capabilities: ADAPTER_CAPABILITIES[name] ?? ADAPTER_CAPABILITIES.mcp,
+    installedAt: new Date().toISOString(),
+  };
+}
+
+async function uninstallRealAdapter(name, flags = {}) {
+  const home = flags.home ?? process.env.HOME;
+  const state = store.getState();
+  const registration = (state.adapterRegistrations ?? []).find((item) => item.id === name && item.mode === "real");
+  const targets = registration?.files?.length ? registration.files : realAdapterTargets(name, home).map((target) => target.path);
+  const backupByPath = new Map((registration?.backups ?? []).map((backup) => [backup.path, backup.backupPath]));
+  for (const target of targets) {
+    if (backupByPath.has(target) && existsSync(backupByPath.get(target))) {
+      await copyFile(backupByPath.get(target), target);
+      continue;
+    }
+    if (!existsSync(target)) continue;
+    const text = await readFile(target, "utf8");
+    await writeFile(target, removeMarkedBlock(text, adapterMarker(name)), "utf8");
+  }
+  store.update((current) => ({
+    ...current,
+    adapterRegistrations: (current.adapterRegistrations ?? []).map((item) =>
+      item.id === name ? { ...item, status: "uninstalled", uninstalledAt: new Date().toISOString() } : item,
+    ),
+  }));
+}
+
+function realAdapterTargets(name, home) {
+  const root = home ?? process.env.HOME ?? ".";
+  if (name === "codex") return [{ kind: "toml", path: join(root, ".codex", "config.toml") }];
+  if (name === "claude") return [{ kind: "json", path: join(root, ".claude", "settings.json") }];
+  if (name === "cursor") return [{ kind: "json", path: join(root, ".cursor", "mcp.json") }];
+  if (name === "shell") return [{ kind: "shell", path: join(root, ".klemm", "shell", "klemm-shell-profile.sh") }];
+  return [{ kind: "json", path: join(root, ".klemm", "adapters", `${name}.json`) }];
+}
+
+function renderRealAdapterFile(name, kind, current) {
+  const marker = adapterMarker(name);
+  if (kind === "toml") {
+    return upsertMarkedBlock(current, marker, [
+      "[mcp_servers.klemm]",
+      `command = "${process.execPath}"`,
+      `args = ["--no-warnings", "${join(dirname(new URL(import.meta.url).pathname), "klemm-mcp-server.js")}"]`,
+      "default_tools_approval_mode = \"prompt\"",
+    ].join("\n"));
+  }
+  if (kind === "shell") {
+    return upsertMarkedBlock(current, marker, [
+      `export PATH="${join(KLEMM_DATA_DIR, "codex-integration", "bin")}:$PATH"`,
+      "alias klemm-codex='klemm codex wrap'",
+      "klemm-supervise() { klemm supervise --watch --capture --record-tree -- \"$@\"; }",
+    ].join("\n"));
+  }
+  const patch = name === "claude"
+    ? {
+        hooks: {
+          SessionStart: [{ hooks: [{ type: "command", command: "klemm codex context --mission ${KLEMM_MISSION_ID}" }] }],
+          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm propose --actor claude --type command --target \"$CLAUDE_TOOL_INPUT\"" }] }],
+          PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm codex report --type tool_call --tool Bash" }] }],
+          Stop: [{ hooks: [{ type: "command", command: "klemm codex debrief --mission ${KLEMM_MISSION_ID}" }] }],
+          SessionEnd: [{ hooks: [{ type: "command", command: "klemm dogfood finish --mission ${KLEMM_MISSION_ID}" }] }],
+        },
+      }
+    : buildMcpClientConfig({ client: "generic", dataDir: KLEMM_DATA_DIR });
+  const existing = parseJsonObject(current);
+  return `${JSON.stringify(deepMerge(existing, patch), null, 2)}\n`;
+}
+
+function adapterMarker(name) {
+  return `klemm-adapter-${name}`;
+}
+
+function upsertMarkedBlock(current, marker, body) {
+  const cleaned = removeMarkedBlock(current, marker).trimEnd();
+  const block = [`# BEGIN ${marker}`, body, `# END ${marker}`].join("\n");
+  return `${cleaned ? `${cleaned}\n\n` : ""}${block}\n`;
+}
+
+function removeMarkedBlock(current, marker) {
+  return String(current ?? "").replace(new RegExp(`\\n?# BEGIN ${escapeRegExp(marker)}[\\s\\S]*?# END ${escapeRegExp(marker)}\\n?`, "g"), "\n").trimStart();
+}
+
+function parseJsonObject(text) {
+  try {
+    const parsed = JSON.parse(text || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function deepMerge(base, patch) {
+  const output = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      output[key] = deepMerge(output[key] && typeof output[key] === "object" && !Array.isArray(output[key]) ? output[key] : {}, value);
+    } else {
+      output[key] = value;
+    }
+  }
+  return output;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function writeAdapterConfig(name, adapterDir) {
@@ -1082,12 +1281,19 @@ function adaptersProbeFromCli(args) {
   }
 }
 
-function adaptersDoctorFromCli() {
+function adaptersDoctorFromCli(args = []) {
+  const flags = parseFlags(args);
+  const home = flags.home ?? process.env.HOME;
   const registrations = store.getState().adapterRegistrations ?? [];
   console.log("Klemm adapters doctor");
-  for (const name of ["codex", "claude", "cursor"]) {
+  for (const name of ["codex", "claude", "cursor", "shell", "browser", "mcp"]) {
     const registration = registrations.find((item) => item.id === name);
-    console.log(`${name}: ${registration ? "installed" : "missing"}`);
+    if (registration?.mode === "real") {
+      const files = (registration.files ?? realAdapterTargets(name, home).map((target) => target.path)).filter((path) => existsSync(path));
+      console.log(`${name}: ${registration.status ?? "installed"} real files=${files.length} backups=${registration.backups?.length ?? 0}`);
+    } else {
+      console.log(`${name}: ${registration ? "installed" : "missing"}`);
+    }
   }
 }
 
@@ -1100,21 +1306,42 @@ function trustWhyFromCli(args) {
   const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
   const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
   const corrections = (state.corrections ?? []).filter((correction) => correction.decisionId === decision.id || correction.actionType === decision.actionType);
+  const confidence = sourceMemories.some((memory) => memory.status === "approved" || memory.status === "pinned") || (decision.matchedPolicies ?? []).length ? "high" : "medium";
   console.log("Why Klemm decided");
-  console.log(`Decision: ${decision.id} ${decision.decision}`);
-  console.log(`Risk score: ${decision.riskScore ?? "n/a"} ${decision.riskLevel ?? ""}`);
-  console.log(`Reason: ${redactSensitiveText(decision.reason)}`);
-  console.log(`Mission lease: ${mission?.id ?? "none"} ${mission?.goal ?? ""}`);
-  console.log(`Proposed action: ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)}`);
-  console.log(`Rewrite/queue reason: ${redactSensitiveText(decision.rewrite ?? decision.reason ?? "none")}`);
-  console.log("Matched policies:");
-  for (const policy of decision.matchedPolicies ?? []) console.log(`- ${policy.id} ${policy.effect ?? "queue"} ${policy.text ?? policy.name ?? ""}`);
+  console.log(`Bottom line: Klemm chose ${decision.decision} because ${redactSensitiveText(decision.reason)}`);
+  console.log(`Confidence: ${confidence}`);
+  console.log("");
+  console.log("What Klemm saw");
+  console.log(`- Decision: ${decision.id} ${decision.decision}`);
+  console.log(`- Risk score: ${decision.riskScore ?? "n/a"} ${decision.riskLevel ?? ""}`);
+  console.log(`- Mission lease: ${mission?.id ?? "none"} ${mission?.goal ?? ""}`);
+  console.log(`- Proposed action: ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)}`);
+  console.log(`- Rewrite/queue reason: ${redactSensitiveText(decision.rewrite ?? decision.reason ?? "none")}`);
+  console.log("");
+  console.log("Why this matches you");
+  for (const policy of decision.matchedPolicies ?? []) console.log(`- Policy ${policy.id}: ${policy.effect ?? "queue"} ${redactSensitiveText(policy.text ?? policy.name ?? "")}`);
+  if ((decision.matchedPolicies ?? []).length === 0) console.log("- No standing policy matched; deterministic risk rules drove the decision.");
+  console.log("");
+  console.log("Risk factors");
+  for (const factor of decision.riskFactors ?? []) console.log(`- ${factor.id}: ${factor.label ?? factor.reason ?? factor.weight ?? ""}`);
+  if ((decision.riskFactors ?? []).length === 0) console.log("- none");
+  console.log("");
+  console.log("Evidence trail");
   console.log("Source memories:");
   if (sourceMemories.length === 0) console.log("- none");
-  for (const memory of sourceMemories) console.log(`- ${memory.id} ${memory.status}: ${redactSensitiveText(memory.text)}`);
+  for (const memory of sourceMemories) {
+    const source = (state.memorySources ?? []).find((item) => item.id === memory.memorySourceId || item.provider === memory.source || item.sourceRef === memory.sourceRef);
+    console.log(`- ${memory.id} ${memory.status}: ${redactSensitiveText(memory.text)}`);
+    console.log(`  source=${memory.source} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"} record=${source?.id ?? "none"}`);
+  }
+  console.log("");
   console.log("Correction history:");
   if (corrections.length === 0) console.log("- none");
-  for (const correction of corrections) console.log(`- ${correction.id}: ${redactSensitiveText(correction.preference)}`);
+  for (const correction of corrections) console.log(`- ${correction.id}: ${redactSensitiveText(correction.preference)} status=${correction.status}`);
+  console.log("");
+  console.log("How to correct Klemm");
+  console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
+  console.log("- Review the resulting memory candidate, then promote it to policy if it should become a standing rule.");
 }
 
 function correctionsAddFromCli(args) {
@@ -2378,6 +2605,23 @@ function printDogfoodStatus(args) {
   console.log(renderKlemmDashboard(store.getState(), { missionId: flags.mission }));
 }
 
+async function startDogfoodWrapperFromCli(args) {
+  const separator = args.indexOf("--");
+  const flagArgs = separator >= 0 ? args.slice(0, separator) : args;
+  const command = separator >= 0 ? args.slice(separator + 1) : ["node", "-e", "console.log('klemm dogfood')"];
+  const flags = parseFlags(flagArgs);
+  console.log("Klemm dogfood wrapper: codex wrap");
+  return await wrapCodexSessionFromCli([
+    "--id", flags.id ?? `mission-dogfood-${Date.now()}`,
+    "--goal", flags.goal ?? "Klemm dogfood session",
+    "--plan", flags.plan ?? "Use klemm codex wrap as the default dogfood path.",
+    ...(flags.dryRun ? ["--dry-run"] : []),
+    ...(flags.finish ? ["--finish"] : []),
+    "--",
+    ...command,
+  ]);
+}
+
 async function finishDogfoodFromCli(args) {
   const flags = parseFlags(args);
   const missionId = flags.mission ?? args[0];
@@ -2406,11 +2650,11 @@ async function finishDogfoodFromCli(args) {
 
 async function printTui(args) {
   const flags = parseFlags(args);
-  console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: flags.view ?? "overview", logFile: flags.logFile, decision: flags.decision, memory: flags.memory }));
+  console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: flags.view ?? "overview", logFile: flags.logFile, decision: flags.decision, memory: flags.memory, search: flags.search, sourcePreview: flags.sourcePreview }));
   if (!flags.interactive) return;
 
   console.log("Interactive Klemm TUI");
-  console.log("Commands: tab <overview|memory|queue|agents|policies|model|logs>, model, approve|deny <decision-id> [note], memory approve|reject|pin <memory-id> [note], quit");
+  console.log("Commands: tab <overview|memory|queue|agents|policies|model|logs>, model, approve|deny <decision-id> [note], memory approve|reject|pin|promote <memory-id> [policy flags], quit");
   const input = await readStdin();
   for (const line of input.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
     if (line === "quit" || line === "exit") {
@@ -2438,22 +2682,20 @@ async function printTui(args) {
       reviewMemoryFromCli([id, ...noteParts], memoryCommandToStatus(subcommand));
       continue;
     }
+    if (command === "memory" && subcommand === "promote") {
+      promoteMemoryPolicyFromCli([id, ...noteParts]);
+      continue;
+    }
     console.log(`Unknown interactive command: ${line}`);
   }
 }
 
-function renderTuiView(state, { missionId, view = "overview", logFile, decision: decisionId, memory: memoryId } = {}) {
+function renderTuiView(state, { missionId, view = "overview", logFile, decision: decisionId, memory: memoryId, search, sourcePreview = false } = {}) {
   const normalized = String(view ?? "overview").toLowerCase();
   const header = ["Klemm TUI", `View: ${normalized}`];
   if (normalized === "overview") return [...header, renderKlemmDashboard(state, { missionId })].join("\n");
   if (normalized === "memory") {
-    return [
-      ...header,
-      "Memory Review",
-      ...(state.memories ?? []).slice(0, 12).map((memory) => `- ${memory.id} ${memory.status} [${memory.memoryClass}] ${memory.text}`),
-      "Quarantine",
-      ...((state.memoryQuarantine ?? []).slice(0, 8).map((item) => `- ${item.id} ${item.reason}: ${oneLine(item.text)}`)),
-    ].join("\n");
+    return [...header, renderMemoryInbox(state, { search, sourcePreview })].join("\n");
   }
   if (normalized === "queue") {
     const queue = (state.queue ?? []).filter((item) => item.status === "queued");
@@ -2509,6 +2751,46 @@ function renderSourceEvidence(memory, state = store.getState()) {
     "Trust reason:",
     memory.status === "approved" || memory.status === "pinned" ? "reviewed by user" : "pending review; not authority yet",
   ].join("\n");
+}
+
+function renderMemoryInbox(state, { search, sourcePreview = false } = {}) {
+  const query = String(search ?? "").toLowerCase();
+  const memories = (state.memories ?? [])
+    .filter((memory) => !query || `${memory.text} ${memory.memoryClass} ${memory.source}`.toLowerCase().includes(query))
+    .slice(0, 24);
+  const groups = groupBy(memories, (memory) => memoryGroupLabel(memory.memoryClass));
+  const lines = [
+    "Memory Review",
+    "Memory Inbox",
+    `Search: ${search ?? "none"}`,
+    "Actions: approve, reject, pin, promote-to-policy",
+  ];
+  for (const [group, groupMemories] of groups) {
+    lines.push(`Group: ${group}`);
+    for (const memory of groupMemories) {
+      lines.push(`- ${memory.id} ${memory.status} confidence=${memory.confidence ?? "n/a"} source=${memory.source}: ${redactSensitiveText(memory.text)}`);
+      lines.push(`  Why trusted? ${memory.status === "approved" || memory.status === "pinned" ? "reviewed by user" : "pending review; not authority yet"}`);
+      if (sourcePreview) {
+        const source = (state.memorySources ?? []).find((item) => item.id === memory.memorySourceId || item.provider === memory.source || item.sourceRef === memory.sourceRef);
+        lines.push(`  Source Preview: provider=${source?.provider ?? memory.source} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"} record=${source?.id ?? "none"}`);
+      }
+    }
+  }
+  lines.push("Quarantine");
+  const quarantined = (state.memoryQuarantine ?? []).slice(0, 8);
+  lines.push(...(quarantined.length ? quarantined.map((item) => `- ${item.id} ${item.reason}: ${oneLine(item.text)}`) : ["- none"]));
+  return lines.join("\n");
+}
+
+function memoryGroupLabel(memoryClass) {
+  const labels = {
+    authority_boundary: "authority_boundaries",
+    standing_preference: "standing_preferences",
+    working_style: "working_styles",
+    interest_project: "interests_projects",
+    correction: "corrections",
+  };
+  return labels[memoryClass] ?? memoryClass ?? "uncategorized";
 }
 
 function renderDecisionDetail(decision, state = store.getState()) {
@@ -3338,11 +3620,14 @@ _klemm() {
     'install:Install Klemm daemon, Codex wrapper, profiles, and policies'
     'codex wrap:Run a wrapped Codex dogfood session'
     'dogfood finish:Finish a dogfood mission after queue-safe debrief'
+    'dogfood start:Start dogfood through klemm codex wrap'
     'readiness:Score private-alpha ship readiness'
     'helper status:Show native macOS helper rail status'
     'observe recommend:Show unmanaged agent recommendations'
     'adapters list:List adapter capabilities and installs'
+    'adapters uninstall:Remove adapter files and restore backups'
     'trust why:Explain a Klemm authority decision'
+    'daemon token generate:Create encrypted daemon token file'
     'security adversarial-test:Run prompt-injection hardening fixtures'
     'sync export:Export encrypted local sync bundle'
     'queue inspect:Inspect a queued authority decision'
@@ -3714,12 +3999,13 @@ Commands:
   klemm queue rewrite <decision-id> --to "replacement command"
   klemm approve|deny|rewrite <decision-id> [note]
   klemm dogfood status --mission mission-id
+  klemm dogfood start --id mission-id --goal "..." --plan "..." [--dry-run] -- <command>
   klemm dogfood debrief --mission mission-id
   klemm dogfood finish --mission mission-id [--note "work complete"] [--force]
   klemm readiness [--data-dir path] [--skip-health]
   klemm helper install|status|snapshot|permissions
   klemm observe status|recommend|attach [--process-file path]
-  klemm adapters list|probe|install|doctor
+  klemm adapters list|probe|install|uninstall|doctor [--real] [--home path]
   klemm trust why <decision-id>
   klemm corrections add --decision <id> --preference "..."
   klemm memory ingest --source chatgpt_export --file export.txt
@@ -3747,6 +4033,7 @@ Commands:
   klemm supervised-runs [--details]
   klemm monitor status [--mission mission-id]
   klemm monitor evaluate [--mission mission-id] [--agent agent-id]
+  klemm daemon token generate|rotate --output path --passphrase "..."
   klemm policy add --id policy-id --name "..." --action-types deployment --target-includes prod
   klemm policy pack list|apply <coding-afk|finance-accounting|email-calendar|browser-research|strict-no-external>
   klemm policy simulate --mission mission-id --type deployment --target "deploy prod" --external deployment

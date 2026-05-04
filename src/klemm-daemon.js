@@ -92,6 +92,7 @@ export function createKlemmHttpServer({ getState, saveState }) {
       }
 
       if (request.method === "POST" && url.pathname === "/api/os/observations") {
+        if (!requireDaemonToken(request, response)) return;
         return runTool(response, "record_os_observation", await readJson(request), { getState, saveState });
       }
 
