@@ -19,6 +19,23 @@ export function createKlemmAdapterClient(options = {}) {
       if (!options.transport?.send) throw new Error("Klemm adapter transport is required to send envelopes");
       return await options.transport.send(envelopeToSend);
     },
+    async call(toolName, payload = {}) {
+      if (!options.transport?.call) throw new Error("Klemm adapter transport is required to call Klemm tools");
+      return await options.transport.call(toolName, {
+        missionId: base.missionId,
+        agentId: base.agentId,
+        ...payload,
+      });
+    },
+    async proxyAsk(payload = {}) {
+      return await this.call("proxy_ask", payload);
+    },
+    async proxyContinue(payload = {}) {
+      return await this.call("proxy_continue", payload);
+    },
+    async proxyStatus(payload = {}) {
+      return await this.call("proxy_status", payload);
+    },
     plan(payload = {}) {
       return envelope("plan", payload);
     },
@@ -73,6 +90,19 @@ export function createKlemmHttpTransport(options = {}) {
   if (!fetchImpl) throw new Error("fetch is required for Klemm HTTP transport");
 
   return {
+    async call(toolName, payload = {}) {
+      const route = httpToolRoute(toolName);
+      const headers = { "content-type": "application/json" };
+      if (daemonToken) headers.authorization = `Bearer ${daemonToken}`;
+      const response = await fetchImpl(`${baseUrl}${route.path}${route.method === "GET" ? queryString(payload) : ""}`, {
+        method: route.method,
+        headers,
+        ...(route.method === "GET" ? {} : { body: JSON.stringify(payload) }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(`Klemm HTTP tool failed: HTTP ${response.status} ${body.error ?? ""}`.trim());
+      return body;
+    },
     async send(envelope) {
       let current = { ...envelope };
       for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -123,12 +153,34 @@ export function createKlemmMcpTransport(options = {}) {
   const env = options.env ?? process.env;
 
   return {
+    async call(toolName, payload = {}) {
+      const response = await callMcpTool({ command, args, env }, toolName, payload);
+      if (response.isError) throw new Error(`Klemm MCP transport failed: ${response.content?.[0]?.text ?? "unknown error"}`);
+      return response.structuredContent ?? JSON.parse(response.content?.[0]?.text ?? "{}");
+    },
     async send(envelope) {
       const response = await callMcpTool({ command, args, env }, "record_adapter_envelope", envelope);
       if (response.isError) throw new Error(`Klemm MCP transport failed: ${response.content?.[0]?.text ?? "unknown error"}`);
       return response.structuredContent ?? JSON.parse(response.content?.[0]?.text ?? "{}");
     },
   };
+}
+
+function httpToolRoute(toolName) {
+  if (toolName === "proxy_ask") return { method: "POST", path: "/api/proxy/ask" };
+  if (toolName === "proxy_continue") return { method: "POST", path: "/api/proxy/continue" };
+  if (toolName === "proxy_status") return { method: "GET", path: "/api/proxy/status" };
+  throw new Error(`Klemm HTTP transport does not expose tool: ${toolName}`);
+}
+
+function queryString(payload = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(payload)) {
+    if (value === undefined || value === null) continue;
+    params.set(key, String(value));
+  }
+  const serialized = params.toString();
+  return serialized ? `?${serialized}` : "";
 }
 
 export function buildAdapterEnvelope(options = {}) {

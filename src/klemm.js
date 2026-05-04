@@ -239,7 +239,7 @@ export function addReviewedProxyMemory(state, options = {}) {
 export function askProxy(state, options = {}) {
   const now = options.now ?? new Date().toISOString();
   const goal = findGoal(state, options.goalId ?? options.goal ?? options.missionId);
-  const mission = goal ? findMission(state, goal.missionId) : findMission(state, options.missionId);
+  const mission = goal ? findMission(state, goal.missionId) : findMission(state, options.missionId ?? options.goalId ?? options.goal);
   const question = {
     id: options.id ?? `proxy-question-${compactTimestamp(now)}-${(state.proxyQuestions?.length ?? 0) + 1}`,
     goalId: goal?.id,
@@ -327,22 +327,31 @@ export function continueProxy(state, options = {}) {
   const activities = (state.agentActivities ?? []).filter((activity) => activity.missionId === goal.missionId);
   const latestReport = (state.alignmentReports ?? []).find((report) => report.missionId === goal.missionId);
   const riskyGoal = (goal.riskHints ?? []).length > 0 || ["needs_review", "scope_drift", "unsafe", "stuck"].includes(goal.latestAlignment);
-  const blocked = unresolved.length > 0 || riskyGoal || ["scope_drift", "unsafe", "stuck"].includes(latestReport?.state);
+  const reportState = latestReport?.state;
+  const nudge = reportState === "needs_nudge";
+  const stuck = reportState === "stuck";
+  const blocked = unresolved.length > 0 || riskyGoal || ["scope_drift", "unsafe", "stuck"].includes(reportState);
   const continuation = {
     id: options.id ?? `proxy-continuation-${compactTimestamp(now)}-${(state.proxyContinuations?.length ?? 0) + 1}`,
     goalId: goal.id,
     missionId: goal.missionId,
     agentId: options.agentId ?? options.agent ?? activities[0]?.agentId ?? "unknown_agent",
-    shouldContinue: !blocked,
+    shouldContinue: !blocked || nudge,
     escalationRequired: blocked,
-    confidence: blocked ? "low" : "high",
+    confidence: blocked ? "low" : nudge ? "medium" : "high",
     reason: blocked
       ? unresolved.length
         ? `${unresolved.length} queued decision(s) must be resolved before Klemm can stand in.`
         : "Recent goal or monitor evidence suggests drift, risk, or stuck work."
+      : nudge
+        ? latestReport.reason
       : "Recent work is local, aligned, and queue-clean.",
     nextPrompt: blocked
-      ? "Pause and ask Kyle; Klemm lacks enough safe authority to continue."
+      ? stuck
+        ? "Summarize and pause for Kyle; repeated failures suggest the agent is stuck."
+        : "Pause and ask Kyle; Klemm lacks enough safe authority to continue."
+      : nudge
+        ? "Continue, but switch strategy before repeating the same command; inspect the failure, narrow the test, and report the course correction."
       : "Continue implementation toward the active goal; dogfood Klemm, run focused tests, then full verification; do not push or deploy without queue approval.",
     createdAt: now,
   };
@@ -1032,9 +1041,11 @@ export function distillMemory(state, options = {}) {
       continue;
     }
 
-    const memoryClass = classifyMemoryLine(line);
+    const promptIntent = buildPromptIntentMemoryText(line);
+    const memoryClass = promptIntent ? "prompt_intent_pattern" : classifyMemoryLine(line);
     if (!memoryClass) continue;
-    const normalizedText = normalizeMemoryText(line);
+    const text = promptIntent ?? line;
+    const normalizedText = normalizeMemoryText(text);
     if (seenMemoryTexts.has(normalizedText)) {
       duplicateCount += 1;
       continue;
@@ -1044,10 +1055,10 @@ export function distillMemory(state, options = {}) {
     memories.push({
       id: `memory-${compactTimestamp(now)}-${state.memories.length + memories.length + 1}`,
       memoryClass,
-      text: line,
+      text,
       source,
       sourceRef,
-      confidence: inferMemoryConfidence(line, memoryClass),
+      confidence: inferMemoryConfidence(text, memoryClass),
       status: "pending_review",
       createdAt: now,
     });
@@ -1230,7 +1241,7 @@ export function buildUserModelSummary(state, options = {}) {
   const sections = {
     identityPersonality: memories.filter((memory) => memory.memoryClass === "personality_interest"),
     interestsProjects: memories.filter((memory) => ["project_context", "personality_interest"].includes(memory.memoryClass)),
-    workingStyle: memories.filter((memory) => memory.memoryClass === "standing_preference"),
+    workingStyle: memories.filter((memory) => memory.memoryClass === "standing_preference" || memory.memoryClass === "prompt_intent_pattern"),
     authorityBoundaries: memories.filter((memory) => memory.memoryClass === "authority_boundary"),
     relationshipContext: memories.filter((memory) => memory.memoryClass === "relationship_context"),
     priorCorrections: memories.filter((memory) => memory.memoryClass === "prior_correction"),
@@ -2330,8 +2341,11 @@ function distillContextRecords(state, { provider, sourceRef, records, now }) {
     }
 
     const memoryClass = classifyMemoryLine(text);
-    if (!memoryClass) continue;
-    const normalizedText = normalizeMemoryText(text);
+    const promptIntent = buildPromptIntentMemoryText(text);
+    const finalMemoryClass = promptIntent ? "prompt_intent_pattern" : memoryClass;
+    if (!finalMemoryClass) continue;
+    const memoryText = promptIntent ?? text;
+    const normalizedText = normalizeMemoryText(memoryText);
     if (seenMemoryTexts.has(normalizedText)) {
       duplicateCount += 1;
       continue;
@@ -2339,11 +2353,11 @@ function distillContextRecords(state, { provider, sourceRef, records, now }) {
     seenMemoryTexts.add(normalizedText);
     memories.push({
       id: `memory-${compactTimestamp(now)}-${(state.memories?.length ?? 0) + memories.length + 1}`,
-      memoryClass,
-      text,
+      memoryClass: finalMemoryClass,
+      text: memoryText,
       source: provider,
       sourceRef,
-      confidence: inferMemoryConfidence(text, memoryClass),
+      confidence: inferMemoryConfidence(memoryText, finalMemoryClass),
       status: "pending_review",
       evidence: {
         provider,
@@ -2927,6 +2941,24 @@ function normalizeOutcome(outcome) {
   if (outcome === "rewritten") return "rewritten";
   if (outcome === "held") return "held";
   throw new Error("outcome must be approved, denied, rewritten, or held");
+}
+
+function buildPromptIntentMemoryText(text) {
+  const compact = String(text ?? "").replace(/\s+/g, " ").trim();
+  const lower = compact.toLowerCase();
+  if (/^what'?s next\??$|^whats next\??$/.test(lower)) {
+    return `Kyle often says "what's next?" to request a concrete next implementation slice rather than a broad explanation.`;
+  }
+  if (/^proceed\.?$/.test(lower) || /\bthe user said proceed\b/.test(lower)) {
+    return `Kyle uses "proceed" to authorize continuing previously discussed safe local work when it remains aligned with the active goal.`;
+  }
+  if (/\bdo all that\b|\bno corners\b|\bno cut corners\b|\bdogfood klemm\b/i.test(compact)) {
+    return `Kyle uses "do all that", "no corners cut", or "dogfood Klemm" to mean full-effort safe local implementation, focused tests, verification, and debrief.`;
+  }
+  if (/\bkeep going\b|\bcontinue\b/i.test(compact) && /\bsafe local|implementation|tests?|verified|goal\b/i.test(compact)) {
+    return `Kyle often asks agents to keep going when the next step is safe, local, testable, and tied to the current goal.`;
+  }
+  return null;
 }
 
 function classifyMemoryLine(line) {

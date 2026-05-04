@@ -323,6 +323,8 @@ async function wrapCodexSessionFromCli(args) {
   console.log("Stop: Ctrl-C");
   console.log(`Review: env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm dogfood status --mission ${mission.id}`);
   console.log(`Finish: env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm mission finish ${mission.id} "work complete"`);
+  console.log(`Proxy ask: ${sessionEnvPreview("KLEMM_PROXY_ASK_COMMAND", mission.id, agentId)}`);
+  console.log(`Proxy continue: ${sessionEnvPreview("KLEMM_PROXY_CONTINUE_COMMAND", mission.id, agentId)}`);
 
   const sessionEnv = buildCodexSessionEnv({
     missionId: mission.id,
@@ -457,6 +459,9 @@ function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, 
   const contextCommand = `klemm codex context --mission ${missionId}`;
   const runCommand = `klemm codex run --mission ${missionId} --`;
   const debriefCommand = `klemm codex debrief --mission ${missionId}`;
+  const proxyAskCommand = `klemm proxy ask --goal ${missionId} --agent ${agentId}`;
+  const proxyContinueCommand = `klemm proxy continue --goal ${missionId} --agent ${agentId}`;
+  const proxyStatusCommand = `klemm proxy status --goal ${missionId}`;
   return {
     KLEMM_MISSION_ID: missionId,
     KLEMM_AGENT_ID: agentId,
@@ -464,10 +469,19 @@ function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, 
     KLEMM_CODEX_CONTEXT_COMMAND: contextCommand,
     KLEMM_CODEX_RUN_COMMAND: runCommand,
     KLEMM_CODEX_DEBRIEF_COMMAND: debriefCommand,
+    KLEMM_PROXY_ASK_COMMAND: proxyAskCommand,
+    KLEMM_PROXY_CONTINUE_COMMAND: proxyContinueCommand,
+    KLEMM_PROXY_STATUS_COMMAND: proxyStatusCommand,
     KLEMM_PROTOCOL_VERSION: String(protocolVersion),
     ...(adapterClientId ? { KLEMM_ADAPTER_CLIENT_ID: adapterClientId } : {}),
     ...(adapterToken ? { KLEMM_ADAPTER_TOKEN: adapterToken } : {}),
   };
+}
+
+function sessionEnvPreview(name, missionId, agentId) {
+  if (name === "KLEMM_PROXY_ASK_COMMAND") return `KLEMM_PROXY_ASK_COMMAND="klemm proxy ask --goal ${missionId} --agent ${agentId}"`;
+  if (name === "KLEMM_PROXY_CONTINUE_COMMAND") return `KLEMM_PROXY_CONTINUE_COMMAND="klemm proxy continue --goal ${missionId} --agent ${agentId}"`;
+  return `${name}=unknown`;
 }
 
 async function withTemporaryEnv(env, callback) {
@@ -4333,6 +4347,24 @@ function renderProxyTui(state, { missionId } = {}) {
   for (const continuation of status.continuations.slice(0, 5)) {
     lines.push(`- ${continuation.id} ${continuation.confidence} continue=${continuation.shouldContinue ? "yes" : "no"}: ${redactSensitiveText(continuation.nextPrompt)}`);
   }
+  lines.push(renderProxyReviewInbox(state, status));
+  return lines.join("\n");
+}
+
+function renderProxyReviewInbox(state, status = getProxyStatus(state)) {
+  const answerIds = new Set((status.answers ?? []).map((answer) => answer.id));
+  const reviews = (state.proxyReviews ?? []).filter((review) => answerIds.size === 0 || answerIds.has(review.proxyAnswerId));
+  const lines = [
+    "Proxy Review Inbox",
+    "Choices: good_answer, too_aggressive, should_have_asked, make_rule",
+  ];
+  if (reviews.length === 0) {
+    lines.push("- none");
+    return lines.join("\n");
+  }
+  for (const review of reviews.slice(0, 8)) {
+    lines.push(`- ${review.proxyAnswerId} ${review.status}: ${redactSensitiveText(review.note)}`);
+  }
   return lines.join("\n");
 }
 
@@ -4439,6 +4471,7 @@ function memoryGroupLabel(memoryClass) {
   const labels = {
     authority_boundary: "authority_boundaries",
     standing_preference: "standing_preferences",
+    prompt_intent_pattern: "prompt_intent_patterns",
     working_style: "working_style",
     interest_project: "interests_projects",
     correction: "corrections",
