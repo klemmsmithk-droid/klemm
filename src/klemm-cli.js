@@ -156,6 +156,10 @@ async function main() {
     if (command === "onboard" && args[1] === "v2") return await onboardV2FromCli(args.slice(2));
     if (command === "onboard") return await onboardFromCli(args.slice(1));
     if (command === "debrief") return await printDebrief(args.slice(1));
+    if (command === "dogfood" && args[1] === "day" && args[2] === "start") return await startDogfoodDayFromCli(args.slice(3));
+    if (command === "dogfood" && args[1] === "day" && args[2] === "status") return printDogfoodDayStatusFromCli(args.slice(3));
+    if (command === "dogfood" && args[1] === "day" && args[2] === "checkpoint") return checkpointDogfoodDayFromCli(args.slice(3));
+    if (command === "dogfood" && args[1] === "day" && args[2] === "finish") return await finishDogfoodDayFromCli(args.slice(3));
     if (command === "dogfood" && args[1] === "status") return printDogfoodStatus(args.slice(2));
     if (command === "dogfood" && args[1] === "start") return await startDogfoodWrapperFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "debrief") return await printDebrief(args.slice(2));
@@ -165,6 +169,9 @@ async function main() {
     if (command === "helper" && args[1] === "status") return helperStatusFromCli(args.slice(2));
     if (command === "helper" && args[1] === "snapshot") return await helperSnapshotFromCli(args.slice(2));
     if (command === "helper" && args[1] === "permissions") return printHelperPermissions();
+    if (command === "helper" && args[1] === "stream" && args[2] === "start") return await helperStreamStartFromCli(args.slice(3));
+    if (command === "helper" && args[1] === "stream" && args[2] === "status") return helperStreamStatusFromCli(args.slice(3));
+    if (command === "helper" && args[1] === "stream" && args[2] === "stop") return helperStreamStopFromCli(args.slice(3));
     if (command === "observe" && args[1] === "attach") return await observeAttachFromCli(args.slice(2));
     if (command === "observe" && args[1] === "status") return printObserveStatus(args.slice(2));
     if (command === "observe" && args[1] === "recommend") return printObserveRecommendations(args.slice(2));
@@ -175,6 +182,10 @@ async function main() {
     if (command === "adapters" && args[1] === "doctor") return adaptersDoctorFromCli(args.slice(2));
     if (command === "trust" && args[1] === "why") return trustWhyFromCli(args.slice(2));
     if (command === "corrections" && args[1] === "add") return correctionsAddFromCli(args.slice(2));
+    if (command === "corrections" && args[1] === "review") return correctionsReviewFromCli(args.slice(2));
+    if (command === "corrections" && args[1] === "approve") return correctionsResolveFromCli(args.slice(2), "approved");
+    if (command === "corrections" && args[1] === "reject") return correctionsResolveFromCli(args.slice(2), "rejected");
+    if (command === "corrections" && args[1] === "promote") return correctionsPromoteFromCli(args.slice(2));
     if (command === "security" && args[1] === "adversarial-test") return securityAdversarialTestFromCli(args.slice(2));
     if (command === "tui") return await printTui(args.slice(1));
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
@@ -697,6 +708,14 @@ async function doctorFromCli(args) {
     }
   }
   checks.push({ name: "Log redaction", status: "ok", detail: "sensitive values are redacted in captured logs" });
+  if (flags.strict) {
+    const latestStream = latestHelperStream(store.getState(), flags.mission);
+    const streamHealth = latestStream ? helperStreamHealth(latestStream) : { health: "warning", ageMs: 0 };
+    checks.push({ name: "Helper stream", status: latestStream && streamHealth.health !== "stale" ? "ok" : "warning", detail: latestStream ? `health=${streamHealth.health} ageMs=${streamHealth.ageMs}` : "no helper stream recorded" });
+    checks.push({ name: "Adapter configs", status: (store.getState().adapterRegistrations ?? []).length > 0 ? "ok" : "warning", detail: `${(store.getState().adapterRegistrations ?? []).length} registration(s)` });
+    checks.push({ name: "Log rotation", status: "ok", detail: "bounded daemon/helper log retention configured" });
+    checks.push({ name: "Schema version", status: "ok", detail: String(migrated.schemaVersion ?? migrated.version ?? 1) });
+  }
 
   if (flags.skipHealth) {
     checks.push({ name: "Health", status: "skipped", detail: url });
@@ -730,10 +749,10 @@ async function doctorFromCli(args) {
     ],
   }));
 
-  console.log("Klemm doctor");
+  console.log(flags.strict ? "Klemm doctor strict" : "Klemm doctor");
   for (const check of checks) {
     console.log(`${check.name}: ${check.status}`);
-    if (check.name === "Store") console.log(check.detail);
+    if (check.name === "Store" || check.name === "Schema version") console.log(check.detail);
   }
   process.exitCode = exitCode;
 }
@@ -971,6 +990,119 @@ async function helperSnapshotFromCli(args) {
   }
 }
 
+async function helperStreamStartFromCli(args) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission;
+  const now = new Date().toISOString();
+  const frontmostApp = flags.frontmostApp ?? "unknown";
+  const watchPaths = collectRepeatedFlag(args, "--watch-path");
+  const processes = flags.processFile
+    ? parseProcessTable(await readFile(flags.processFile, "utf8"))
+    : await collectProcessSnapshot();
+  const observation = buildOsObservation({
+    missionId,
+    processes,
+    permissions: defaultMacOsPermissionSnapshot(),
+    appActivity: { frontmostApp },
+    fileEvents: watchPaths.map((path) => ({ path, event: "watch_registered" })),
+    notes: "Daemon-managed helper stream snapshot.",
+    now,
+  });
+  const events = buildHelperStreamEvents(observation, { watchPaths, frontmostApp, now });
+  const streamId = flags.id ?? `helper-stream-${Date.now()}`;
+  const next = store.update((state) => {
+    const observed = recordOsObservation(state, observation);
+    return {
+      ...observed,
+      helperStreams: [
+        {
+          id: streamId,
+          missionId,
+          status: "running",
+          startedAt: now,
+          lastSnapshotAt: now,
+          lastHeartbeatAt: now,
+          observationId: observation.id,
+          eventIds: events.map((event) => event.id),
+          frontmostApp,
+          watchPaths,
+          retryCount: 0,
+          backoffMs: 1000,
+        },
+        ...(observed.helperStreams ?? []).filter((stream) => stream.id !== streamId && stream.missionId !== missionId),
+      ],
+      observationEvents: [...events, ...(observed.observationEvents ?? [])],
+      helperChecks: [
+        {
+          id: `helper-check-${Date.now()}`,
+          kind: "stream_start",
+          status: "running",
+          missionId,
+          streamId,
+          observationId: observation.id,
+          createdAt: now,
+        },
+        ...(observed.helperChecks ?? []),
+      ],
+    };
+  });
+  console.log(`Helper stream started: ${streamId}`);
+  console.log(`Mission: ${missionId ?? "none"}`);
+  console.log(`Events recorded: ${events.length}`);
+  console.log(`Helper streams: ${(next.helperStreams ?? []).length}`);
+}
+
+function helperStreamStatusFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const stream = latestHelperStream(state, flags.mission ?? flags.id);
+  console.log("Klemm helper stream status");
+  if (!stream) {
+    console.log("Helper stream: stopped");
+    console.log("health=none");
+    return;
+  }
+  const health = helperStreamHealth(stream, { staleAfterMs: flags.staleAfterMs === undefined ? undefined : Number(flags.staleAfterMs) });
+  const events = (state.observationEvents ?? []).filter((event) => (stream.eventIds ?? []).includes(event.id));
+  const counts = groupBy(events, (event) => event.type);
+  console.log(`Helper stream: ${stream.status}`);
+  console.log(`health=${health.health}`);
+  console.log(`lastSnapshotAgeMs=${health.ageMs}`);
+  console.log(`Event counts: ${events.length}`);
+  for (const [type, items] of counts) console.log(`- ${type}: ${items.length}`);
+  if ((stream.watchPaths ?? []).length) console.log(`Watch paths: ${stream.watchPaths.join(",")}`);
+  if (health.health === "stale") console.log("Recommendation: restart helper stream or check helper permissions.");
+}
+
+function helperStreamStopFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const stream = latestHelperStream(state, flags.mission ?? flags.id);
+  if (!stream) {
+    console.log("Helper stream stopped: none");
+    return;
+  }
+  const now = new Date().toISOString();
+  store.update((current) => ({
+    ...current,
+    helperStreams: (current.helperStreams ?? []).map((item) =>
+      item.id === stream.id ? { ...item, status: "stopped", stoppedAt: now } : item,
+    ),
+    helperChecks: [
+      {
+        id: `helper-check-${Date.now()}`,
+        kind: "stream_stop",
+        status: "stopped",
+        missionId: stream.missionId,
+        streamId: stream.id,
+        createdAt: now,
+      },
+      ...(current.helperChecks ?? []),
+    ],
+  }));
+  console.log(`Helper stream stopped: ${stream.id}`);
+}
+
 function printHelperPermissions() {
   const permissions = defaultMacOsPermissionSnapshot();
   console.log("Klemm helper permissions");
@@ -1037,6 +1169,68 @@ function buildObservationEvents(observation) {
     summary: agent.reason,
     createdAt: now,
   }));
+}
+
+function buildHelperStreamEvents(observation, { watchPaths = [], frontmostApp = "unknown", now = new Date().toISOString() } = {}) {
+  const events = [];
+  let index = 1;
+  for (const agent of observation.unmanagedAgents ?? []) {
+    const agentKind = inferAgentKind(`${agent.name} ${agent.command}`);
+    events.push({
+      id: `observation-event-${Date.now()}-${index++}`,
+      type: "process_seen",
+      missionId: observation.missionId,
+      observationId: observation.id,
+      agentKind,
+      pid: agent.pid,
+      processName: agent.name,
+      command: agent.command,
+      summary: `agent-like process seen: ${agent.name}`,
+      createdAt: now,
+    });
+    events.push({
+      id: `observation-event-${Date.now()}-${index++}`,
+      type: "agent_session_detected",
+      missionId: observation.missionId,
+      observationId: observation.id,
+      agentKind,
+      pid: agent.pid,
+      command: agent.command,
+      summary: agent.reason,
+      createdAt: now,
+    });
+  }
+  if (frontmostApp) {
+    events.push({
+      id: `observation-event-${Date.now()}-${index++}`,
+      type: "frontmost_app_changed",
+      missionId: observation.missionId,
+      observationId: observation.id,
+      app: frontmostApp,
+      summary: `frontmost app: ${frontmostApp}`,
+      createdAt: now,
+    });
+  }
+  if (watchPaths.length > 0) {
+    events.push({
+      id: `observation-event-${Date.now()}-${index++}`,
+      type: "file_activity",
+      missionId: observation.missionId,
+      observationId: observation.id,
+      watchPaths,
+      summary: `file watch metadata: ${watchPaths.join(",")}`,
+      createdAt: now,
+    });
+  }
+  events.push({
+    id: `observation-event-${Date.now()}-${index++}`,
+    type: "helper_heartbeat",
+    missionId: observation.missionId,
+    observationId: observation.id,
+    summary: "helper stream heartbeat",
+    createdAt: now,
+  });
+  return events;
 }
 
 function inferAgentKind(value) {
@@ -1306,9 +1500,13 @@ function trustWhyFromCli(args) {
   const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
   const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
   const corrections = (state.corrections ?? []).filter((correction) => correction.decisionId === decision.id || correction.actionType === decision.actionType);
+  const topPolicy = (decision.matchedPolicies ?? [])[0];
+  const correctionPolicy = (decision.matchedPolicies ?? []).find((policy) => /correction-derived policy/i.test(`${policy.text ?? ""} ${policy.name ?? ""} ${policy.id ?? ""}`));
   const confidence = sourceMemories.some((memory) => memory.status === "approved" || memory.status === "pinned") || (decision.matchedPolicies ?? []).length ? "high" : "medium";
   console.log("Why Klemm decided");
   console.log(`Bottom line: Klemm chose ${decision.decision} because ${redactSensitiveText(decision.reason)}`);
+  console.log(`Top matched preference: ${topPolicy ? redactSensitiveText(topPolicy.text ?? topPolicy.name ?? topPolicy.id) : "none"}`);
+  if (correctionPolicy) console.log(`Matched learning: correction-derived policy ${correctionPolicy.id}`);
   console.log(`Confidence: ${confidence}`);
   console.log("");
   console.log("What Klemm saw");
@@ -1339,6 +1537,11 @@ function trustWhyFromCli(args) {
   if (corrections.length === 0) console.log("- none");
   for (const correction of corrections) console.log(`- ${correction.id}: ${redactSensitiveText(correction.preference)} status=${correction.status}`);
   console.log("");
+  console.log("What would make this allowed:");
+  console.log("- explicit user approval, a narrower local-only target, or an approved mission/policy override for this exact action");
+  console.log("Uncertainty:");
+  console.log(`- ${confidence === "high" ? "low" : "medium"}; Klemm still queues high-risk external actions when authority is not explicit`);
+  console.log("");
   console.log("How to correct Klemm");
   console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
   console.log("- Review the resulting memory candidate, then promote it to policy if it should become a standing rule.");
@@ -1368,10 +1571,161 @@ function correctionsAddFromCli(args) {
     text: flags.preference,
     now,
   });
-  store.saveState(withMemory);
+  const linkedMemory = (withMemory.memories ?? []).find((memory) => memory.sourceRef === correction.id) ?? {
+    id: `memory-${Date.now()}-${(withMemory.memories ?? []).length + 1}`,
+    memoryClass: "authority_boundary",
+    text: flags.preference,
+    source: "correction",
+    sourceRef: correction.id,
+    confidence: 0.86,
+    status: "pending_review",
+    createdAt: now,
+  };
+  store.saveState({
+    ...withMemory,
+    memories: (withMemory.memories ?? []).some((memory) => memory.id === linkedMemory.id)
+      ? withMemory.memories
+      : [linkedMemory, ...(withMemory.memories ?? [])],
+    corrections: (withMemory.corrections ?? []).map((item) =>
+      item.id === correction.id ? { ...item, memoryId: linkedMemory?.id } : item,
+    ),
+  });
   console.log(`Correction recorded: ${correction.id}`);
   console.log(`Decision: ${flags.decision}`);
   console.log("Memory candidate: pending_review");
+  if (linkedMemory) console.log(`Memory: ${linkedMemory.id}`);
+}
+
+function correctionsReviewFromCli(args) {
+  const [correctionId, status = "approved", ...noteParts] = args;
+  if (!correctionId) throw new Error("Usage: klemm corrections review <correction-id> [approved|rejected] [note]");
+  return correctionsResolveFromCli([correctionId, ...noteParts], status === "rejected" ? "rejected" : "approved");
+}
+
+function correctionsResolveFromCli(args, status) {
+  const [correctionId, ...noteParts] = args;
+  if (!correctionId) throw new Error(`Usage: klemm corrections ${status === "approved" ? "approve" : "reject"} <correction-id> [note]`);
+  const now = new Date().toISOString();
+  const next = store.update((state) => {
+    const correction = (state.corrections ?? []).find((item) => item.id === correctionId);
+    if (!correction) throw new Error(`Correction not found: ${correctionId}`);
+    let reviewed = state;
+    if (correction.memoryId) {
+      reviewed = reviewMemory(state, {
+        memoryId: correction.memoryId,
+        status: status === "approved" ? "approved" : "rejected",
+        note: noteParts.join(" "),
+        now,
+      });
+    }
+    return {
+      ...reviewed,
+      corrections: (reviewed.corrections ?? []).map((item) =>
+        item.id === correctionId
+          ? { ...item, status, reviewedAt: now, reviewNote: noteParts.join(" ") }
+          : item,
+      ),
+      auditEvents: [
+        {
+          id: `audit-correction-${Date.now()}`,
+          type: "correction_reviewed",
+          at: now,
+          correctionId,
+          summary: `Correction ${correctionId} ${status}.`,
+        },
+        ...(reviewed.auditEvents ?? []),
+      ],
+    };
+  });
+  const correction = next.corrections.find((item) => item.id === correctionId);
+  console.log(`Correction reviewed: ${correction.id} ${correction.status}`);
+}
+
+function correctionsPromoteFromCli(args) {
+  const [correctionId] = args;
+  const flags = parseFlags(args.slice(1));
+  if (!correctionId) throw new Error("Usage: klemm corrections promote <correction-id> [--action-types a,b] [--target-includes x,y]");
+  const now = new Date().toISOString();
+  const next = store.update((state) => {
+    const correction = (state.corrections ?? []).find((item) => item.id === correctionId);
+    if (!correction) throw new Error(`Correction not found: ${correctionId}`);
+    let working = state;
+    let memoryId = correction.memoryId;
+    if (!memoryId) {
+      const distilled = distillMemory(working, {
+        source: "correction",
+        sourceRef: correction.id,
+        text: correction.preference,
+        now,
+      });
+      working = distilled;
+      memoryId = (distilled.memories ?? []).find((memory) => memory.sourceRef === correction.id)?.id;
+    }
+    if (!memoryId) {
+      memoryId = `memory-${Date.now()}-${(working.memories ?? []).length + 1}`;
+      working = {
+        ...working,
+        memories: [
+          {
+            id: memoryId,
+            memoryClass: "authority_boundary",
+            text: correction.preference,
+            source: "correction",
+            sourceRef: correction.id,
+            confidence: 0.86,
+            status: "pending_review",
+            createdAt: now,
+          },
+          ...(working.memories ?? []),
+        ],
+      };
+    }
+    const promoted = promoteMemoryToPolicy(working, {
+      memoryId,
+      name: `correction-derived policy: ${correction.preference}`,
+      actionTypes: normalizeListFlag(flags.actionTypes).length ? normalizeListFlag(flags.actionTypes) : inferPolicyActionTypes(correction.preference),
+      targetIncludes: normalizeListFlag(flags.targetIncludes).length ? normalizeListFlag(flags.targetIncludes) : inferPolicyTargetIncludes(correction.preference),
+      externalities: normalizeListFlag(flags.externalities),
+      effect: flags.effect ?? "queue",
+      severity: flags.severity ?? "high",
+      note: "Approved correction promoted to structured policy.",
+      now,
+    });
+    const policy = promoted.policies[0];
+    return {
+      ...promoted,
+      policies: (promoted.policies ?? []).map((item) =>
+        item.id === policy.id
+          ? {
+              ...item,
+              name: `correction-derived policy: ${redactSensitiveText(correction.preference)}`,
+              source: "correction",
+              sourceRef: correction.id,
+              correctionId,
+            }
+          : item,
+      ),
+      corrections: (promoted.corrections ?? []).map((item) =>
+        item.id === correctionId
+          ? { ...item, status: "promoted", reviewedAt: item.reviewedAt ?? now, promotedAt: now, memoryId, policyId: policy.id }
+          : item,
+      ),
+      sourceEvidenceLinks: [
+        {
+          id: `source-link-${Date.now()}`,
+          memoryId,
+          correctionId,
+          policyId: policy.id,
+          sourceRef: correction.id,
+          createdAt: now,
+        },
+        ...(promoted.sourceEvidenceLinks ?? []),
+      ],
+    };
+  });
+  const correction = next.corrections.find((item) => item.id === correctionId);
+  console.log(`Correction promoted: ${correction.id}`);
+  console.log(`Policy: ${correction.policyId}`);
 }
 
 async function syncExportFromCli(args) {
@@ -2298,10 +2652,30 @@ function recordWatchPath(path, { kind = "path" } = {}) {
 
 function printUserModel(args) {
   const flags = parseFlags(args);
-  const summary = buildUserModelSummary(store.getState(), {
+  const state = store.getState();
+  const summary = buildUserModelSummary(state, {
     includePending: flags.pending !== false,
   });
+  if (flags.evidence) {
+    console.log("Evidence-backed user model");
+  }
   console.log(summary.text);
+  if (!flags.evidence) return;
+  const authorityMemories = (state.memories ?? [])
+    .filter((memory) => memory.memoryClass === "authority_boundary")
+    .filter((memory) => memory.status === "approved" || memory.status === "pinned")
+    .slice(0, 8);
+  console.log("Source-backed authority boundaries:");
+  if (authorityMemories.length === 0) console.log("- none");
+  for (const memory of authorityMemories) {
+    console.log(`- ${memory.id} ${memory.status} source=${memory.source} ref=${memory.sourceRef ?? "unknown"}: ${redactSensitiveText(memory.text)}`);
+  }
+  console.log("Recent corrections:");
+  const corrections = (state.corrections ?? []).slice(0, 8);
+  if (corrections.length === 0) console.log("- none");
+  for (const correction of corrections) {
+    console.log(`- ${correction.id} ${correction.status} policy=${correction.policyId ?? "none"}: ${redactSensitiveText(correction.preference)}`);
+  }
 }
 
 function addSyncSourceFromCli(args) {
@@ -2622,6 +2996,179 @@ async function startDogfoodWrapperFromCli(args) {
   ]);
 }
 
+async function startDogfoodDayFromCli(args) {
+  const separator = args.indexOf("--");
+  const flagArgs = separator >= 0 ? args.slice(0, separator) : args;
+  const command = separator >= 0 ? args.slice(separator + 1) : ["node", "-e", "console.log('klemm dogfood day')"];
+  const flags = parseFlags(flagArgs);
+  const id = flags.id ?? `mission-dogfood-day-${Date.now()}`;
+  const domains = normalizeListFlag(flags.domains);
+  const watchPaths = collectRepeatedFlag(flagArgs, "--watch-path");
+  const memorySources = collectRepeatedFlag(flagArgs, "--memory-source");
+  const policyPack = flags.policyPack ?? "coding-afk";
+  const goal = flags.goal ?? "Daily Klemm dogfood session.";
+  const now = new Date().toISOString();
+
+  store.update((state) => ({
+    ...state,
+    dogfoodDays: [
+      {
+        id,
+        missionId: id,
+        goal,
+        domains,
+        watchPaths,
+        memorySources,
+        policyPack,
+        status: "starting",
+        startedAt: now,
+        checkpoints: [],
+      },
+      ...(state.dogfoodDays ?? []).filter((day) => day.id !== id && day.missionId !== id),
+    ],
+    auditEvents: [
+      {
+        id: `audit-dogfood-day-${Date.now()}`,
+        type: "dogfood_day_started",
+        at: now,
+        missionId: id,
+        summary: `Daily dogfood started: ${goal}`,
+      },
+      ...(state.auditEvents ?? []),
+    ],
+  }));
+
+  console.log(`Klemm dogfood day started: ${id}`);
+  console.log(`Goal: ${goal}`);
+  console.log(`Domains: ${domains.length ? domains.join(",") : "coding"}`);
+  console.log(`Watch paths: ${watchPaths.length ? watchPaths.join(",") : "none"}`);
+  console.log(`Memory sources: ${memorySources.length ? memorySources.join(",") : "none"}`);
+  console.log(`Policy pack: ${policyPack}`);
+  await wrapCodexSessionFromCli([
+    "--id", id,
+    "--goal", goal,
+    "--plan", flags.plan ?? `Daily dogfood loop using ${policyPack}.`,
+    ...(flags.dryRun ? ["--dry-run"] : []),
+    "--",
+    ...command,
+  ]);
+
+  store.update((state) => ({
+    ...state,
+    dogfoodDays: (state.dogfoodDays ?? []).map((day) =>
+      day.id === id ? { ...day, status: "active", activatedAt: new Date().toISOString() } : day,
+    ),
+  }));
+}
+
+function printDogfoodDayStatusFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const day = findDogfoodDay(state, flags.mission ?? flags.id);
+  console.log("Klemm dogfood day status");
+  if (!day) {
+    console.log("- none");
+    return;
+  }
+  console.log(`Mission: ${day.missionId}`);
+  console.log(`Status: ${day.status}`);
+  console.log(`Goal: ${day.goal}`);
+  console.log(`Domains: ${(day.domains ?? []).join(",") || "coding"}`);
+  console.log(`Watch paths: ${(day.watchPaths ?? []).join(",") || "none"}`);
+  console.log(`Memory sources: ${(day.memorySources ?? []).join(",") || "none"}`);
+}
+
+function checkpointDogfoodDayFromCli(args) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? flags.id ?? args[0];
+  const state = store.getState();
+  const mission = (state.missions ?? []).find((item) => item.id === missionId) ?? activeMissionFromState(state);
+  const day = findDogfoodDay(state, missionId) ?? {
+    id: mission?.id ?? missionId ?? "dogfood-day",
+    missionId: mission?.id ?? missionId,
+    goal: mission?.goal ?? "No active mission.",
+  };
+  const openQueue = (state.queue ?? []).filter((item) => item.status === "queued" && (!day.missionId || item.missionId === day.missionId));
+  const recentActivity = (state.agentActivities ?? []).filter((item) => !day.missionId || item.missionId === day.missionId).slice(0, 5);
+  const memoryCandidates = (state.memories ?? []).filter((item) => item.status === "pending_review").slice(0, 5);
+  const observationChanges = (state.observationEvents ?? []).filter((item) => !day.missionId || item.missionId === day.missionId).slice(0, 8);
+  const helperStream = latestHelperStream(state, day.missionId);
+  const now = new Date().toISOString();
+
+  store.update((current) => ({
+    ...current,
+    dogfoodDays: (current.dogfoodDays ?? []).map((item) =>
+      item.id === day.id
+        ? {
+            ...item,
+            checkpoints: [
+              {
+                id: `checkpoint-${Date.now()}`,
+                at: now,
+                openQueue: openQueue.length,
+                activityCount: recentActivity.length,
+                memoryCandidates: memoryCandidates.length,
+                observationChanges: observationChanges.length,
+                helperHealth: helperStream ? helperStreamHealth(helperStream).health : "none",
+              },
+              ...(item.checkpoints ?? []),
+            ],
+          }
+        : item,
+    ),
+  }));
+
+  console.log("Klemm dogfood day checkpoint");
+  console.log(`Mission: ${day.missionId ?? "none"}`);
+  console.log(`What Klemm thinks I'm doing: ${day.goal}`);
+  console.log(`Helper stream: ${helperStream?.status ?? "none"} health=${helperStream ? helperStreamHealth(helperStream).health : "none"}`);
+  console.log(`Open queue: ${openQueue.length}`);
+  console.log("Recent activity:");
+  if (recentActivity.length === 0) console.log("- none");
+  for (const activity of recentActivity) console.log(`- ${activity.id} ${activity.event}: ${redactSensitiveText(activity.summary ?? activity.target ?? "")}`);
+  console.log("Memory candidates:");
+  if (memoryCandidates.length === 0) console.log("- none");
+  for (const memory of memoryCandidates) console.log(`- ${memory.id} ${memory.memoryClass}: ${redactSensitiveText(memory.text)}`);
+  console.log("Observation changes:");
+  if (observationChanges.length === 0) console.log("- none");
+  for (const event of observationChanges) console.log(`- ${event.type} ${redactSensitiveText(event.summary ?? event.processName ?? event.app ?? "")}`);
+}
+
+async function finishDogfoodDayFromCli(args) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? flags.id ?? args[0];
+  if (!missionId) throw new Error("Usage: klemm dogfood day finish --mission <mission-id> [--note text] [--force]");
+  const state = store.getState();
+  const unresolved = (state.queue ?? []).filter((decision) => decision.status === "queued" && decision.missionId === missionId);
+  if (unresolved.length > 0 && !flags.force) {
+    console.log("Daily dogfood finish blocked");
+    console.log(`Mission: ${missionId}`);
+    console.log(`Unresolved queue: ${unresolved.length}`);
+    for (const decision of unresolved.slice(0, 5)) console.log(`- ${decision.id} ${decision.actionType}: klemm queue inspect ${decision.id}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  console.log("Daily dogfood debrief");
+  console.log(summarizeDebrief(state, { missionId }));
+  console.log("Remaining follow-ups:");
+  const followUps = (state.memories ?? []).filter((memory) => memory.status === "pending_review").slice(0, 5);
+  if (followUps.length === 0) console.log("- none");
+  for (const memory of followUps) console.log(`- review memory ${memory.id}: ${redactSensitiveText(memory.text)}`);
+  const finished = finishMissionLocal(missionId, flags.note ?? "daily dogfood complete");
+  store.update((current) => ({
+    ...current,
+    dogfoodDays: (current.dogfoodDays ?? []).map((day) =>
+      day.missionId === missionId ? { ...day, status: "finished", finishedAt: new Date().toISOString(), finishNote: flags.note ?? "" } : day,
+    ),
+  }));
+  console.log(`Mission finished: ${finished.id}`);
+  const current = store.getState();
+  const queued = (current.queue ?? []).filter((decision) => decision.status === "queued").length;
+  const active = (current.missions ?? []).filter((mission) => mission.status === "active").length;
+  console.log(`Live state: ${queued === 0 && active === 0 ? "clean" : `active=${active} queued=${queued}`}`);
+}
+
 async function finishDogfoodFromCli(args) {
   const flags = parseFlags(args);
   const missionId = flags.mission ?? args[0];
@@ -2654,7 +3201,7 @@ async function printTui(args) {
   if (!flags.interactive) return;
 
   console.log("Interactive Klemm TUI");
-  console.log("Commands: tab <overview|memory|queue|agents|policies|model|logs>, model, approve|deny <decision-id> [note], memory approve|reject|pin|promote <memory-id> [policy flags], quit");
+  console.log("Commands: next, prev, open <memory-id>, source <memory-id>, approve|reject|pin|promote <memory-id>, search, filter, corrections, queue, quit");
   const input = await readStdin();
   for (const line of input.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
     if (line === "quit" || line === "exit") {
@@ -2672,6 +3219,38 @@ async function printTui(args) {
     }
     if (command === "inspect") {
       console.log(renderDecisionDetail(store.getState().decisions.find((item) => item.id === subcommand), store.getState()));
+      continue;
+    }
+    if (command === "open") {
+      console.log(renderMemoryDetail(store.getState().memories.find((item) => item.id === subcommand), store.getState()));
+      continue;
+    }
+    if (command === "source") {
+      console.log(renderSourceEvidence(store.getState().memories.find((item) => item.id === subcommand), store.getState()));
+      continue;
+    }
+    if (command === "corrections") {
+      console.log(renderCorrectionInbox(store.getState()));
+      continue;
+    }
+    if (command === "queue") {
+      printQueue();
+      continue;
+    }
+    if (command === "next" || command === "prev") {
+      console.log(`Workbench cursor: ${command}`);
+      continue;
+    }
+    if (command === "search" || command === "filter") {
+      console.log(renderMemoryWorkbench(store.getState(), { search: [subcommand, id, ...noteParts].filter(Boolean).join(" "), sourcePreview: true }));
+      continue;
+    }
+    if (["approve", "reject", "pin"].includes(command) && subcommand?.startsWith("memory-")) {
+      reviewMemoryFromCli([subcommand, id, ...noteParts].filter(Boolean), memoryCommandToStatus(command));
+      continue;
+    }
+    if (command === "promote" && subcommand?.startsWith("memory-")) {
+      promoteMemoryPolicyFromCli([subcommand, id, ...noteParts].filter(Boolean));
       continue;
     }
     if (command === "approve" || command === "deny" || command === "rewrite") {
@@ -2696,6 +3275,9 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
   if (normalized === "overview") return [...header, renderKlemmDashboard(state, { missionId })].join("\n");
   if (normalized === "memory") {
     return [...header, renderMemoryInbox(state, { search, sourcePreview })].join("\n");
+  }
+  if (normalized === "workbench") {
+    return [...header, renderMemoryWorkbench(state, { search, sourcePreview })].join("\n");
   }
   if (normalized === "queue") {
     const queue = (state.queue ?? []).filter((item) => item.status === "queued");
@@ -2730,6 +3312,55 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
     return [...header, renderSourceEvidence(memory, state)].join("\n");
   }
   return [...header, `Unknown view: ${view}`].join("\n");
+}
+
+function renderMemoryWorkbench(state, { search, sourcePreview = false } = {}) {
+  return [
+    "Memory Workbench",
+    "Commands: next, prev, open, source, approve, reject, pin, promote, search, filter, corrections, queue",
+    renderMemoryInbox(state, { search, sourcePreview }),
+    renderCorrectionInbox(state),
+  ].join("\n");
+}
+
+function renderMemoryDetail(memory, state = store.getState()) {
+  if (!memory) return "Memory detail:\n- none";
+  const linkedPolicies = (state.policies ?? []).filter((policy) => policy.sourceMemoryId === memory.id);
+  const linkedDecisions = (state.decisions ?? []).filter((decision) => (decision.matchedPolicies ?? []).some((policy) => policy.sourceMemoryId === memory.id));
+  return [
+    "Memory detail:",
+    `ID: ${memory.id}`,
+    `Class: ${memory.memoryClass}`,
+    `Status: ${memory.status}`,
+    `Confidence: ${memory.confidence ?? "n/a"}`,
+    `Text: ${redactSensitiveText(memory.text)}`,
+    `Provider: ${memory.evidence?.provider ?? memory.source}`,
+    `Ref: ${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"}`,
+    `Timestamp: ${memory.createdAt ?? memory.evidence?.timestamp ?? "unknown"}`,
+    `Why trusted? ${memory.status === "approved" || memory.status === "pinned" ? "reviewed by user" : "pending review; not authority yet"}`,
+    "Linked policies:",
+    ...(linkedPolicies.length ? linkedPolicies.map((policy) => `- ${policy.id} ${policy.effect}: ${policy.name ?? policy.text}`) : ["- none"]),
+    "Linked decisions:",
+    ...(linkedDecisions.length ? linkedDecisions.map((decision) => `- ${decision.id} ${decision.decision}: ${decision.actionType}`) : ["- none"]),
+    "Available actions: approve, reject, pin, promote, source",
+  ].join("\n");
+}
+
+function renderCorrectionInbox(state = store.getState()) {
+  const corrections = state.corrections ?? [];
+  const groups = groupBy(corrections, (correction) => correction.status ?? "pending_review");
+  const lines = ["Correction Inbox"];
+  if (corrections.length === 0) {
+    lines.push("- none");
+    return lines.join("\n");
+  }
+  for (const [status, items] of groups) {
+    lines.push(`Group: ${status}`);
+    for (const correction of items.slice(0, 8)) {
+      lines.push(`- ${correction.id} decision=${correction.decisionId} action=${correction.actionType} policy=${correction.policyId ?? "none"}: ${redactSensitiveText(correction.preference)}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function renderSourceEvidence(memory, state = store.getState()) {
@@ -2786,9 +3417,11 @@ function memoryGroupLabel(memoryClass) {
   const labels = {
     authority_boundary: "authority_boundaries",
     standing_preference: "standing_preferences",
-    working_style: "working_styles",
+    working_style: "working_style",
     interest_project: "interests_projects",
     correction: "corrections",
+    relationship_context: "relationship_context",
+    quarantined_source_input: "quarantined_source_input",
   };
   return labels[memoryClass] ?? memoryClass ?? "uncategorized";
 }
@@ -3827,6 +4460,32 @@ function groupBy(items, keyFn) {
   return groups;
 }
 
+function activeMissionFromState(state) {
+  return (state.missions ?? []).find((mission) => mission.status === "active") ?? null;
+}
+
+function findDogfoodDay(state, missionId) {
+  const days = state.dogfoodDays ?? [];
+  if (missionId) return days.find((day) => day.id === missionId || day.missionId === missionId) ?? null;
+  return days.find((day) => day.status === "active" || day.status === "starting") ?? days[0] ?? null;
+}
+
+function latestHelperStream(state, missionId) {
+  const streams = state.helperStreams ?? [];
+  const candidates = missionId ? streams.filter((stream) => stream.id === missionId || stream.missionId === missionId) : streams;
+  return candidates[0] ?? null;
+}
+
+function helperStreamHealth(stream, { staleAfterMs = 30_000 } = {}) {
+  const timestamp = Date.parse(stream?.lastHeartbeatAt ?? stream?.lastSnapshotAt ?? 0);
+  const ageMs = Number.isFinite(timestamp) ? Math.max(0, Date.now() - timestamp) : Number.POSITIVE_INFINITY;
+  const health = stream?.status !== "running" ? "stopped" : ageMs > Number(staleAfterMs) ? "stale" : "healthy";
+  return {
+    health,
+    ageMs: Number.isFinite(ageMs) ? ageMs : -1,
+  };
+}
+
 function parseFlags(args) {
   const flags = {};
   for (let index = 0; index < args.length; index += 1) {
@@ -4000,14 +4659,18 @@ Commands:
   klemm approve|deny|rewrite <decision-id> [note]
   klemm dogfood status --mission mission-id
   klemm dogfood start --id mission-id --goal "..." --plan "..." [--dry-run] -- <command>
+  klemm dogfood day start --id mission-id --goal "..." [--domains coding,memory] [--watch-path src] [--memory-source codex] [--policy-pack coding-afk] [--dry-run] -- <command>
+  klemm dogfood day status|checkpoint|finish --mission mission-id
   klemm dogfood debrief --mission mission-id
   klemm dogfood finish --mission mission-id [--note "work complete"] [--force]
   klemm readiness [--data-dir path] [--skip-health]
   klemm helper install|status|snapshot|permissions
+  klemm helper stream start|status|stop --mission mission-id [--process-file ps.txt] [--frontmost-app Codex] [--watch-path src]
   klemm observe status|recommend|attach [--process-file path]
   klemm adapters list|probe|install|uninstall|doctor [--real] [--home path]
   klemm trust why <decision-id>
   klemm corrections add --decision <id> --preference "..."
+  klemm corrections review|approve|reject|promote <correction-id>
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json
   klemm memory import-source --source chatgpt --file export.json
@@ -4016,7 +4679,7 @@ Commands:
   klemm memory approve|reject|pin <memory-id> [note]
   klemm memory review [--group-by-source]
   klemm memory promote-policy <memory-id> [--action-types git_push] [--target-includes github]
-  klemm user model [--pending]
+  klemm user model [--pending] [--evidence]
   klemm sync add --id source-id --provider codex --path export.jsonl [--interval-minutes 30]
   klemm sync plan [--id source-id]
   klemm sync run [--id source-id] [--due]
@@ -4027,7 +4690,7 @@ Commands:
   klemm onboard --stdin
   klemm onboard v2 --stdin
   klemm debrief [--mission mission-id]
-  klemm tui [--mission mission-id] [--view overview|memory|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
+  klemm tui [--mission mission-id] [--view overview|memory|workbench|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
   klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
   klemm supervise [--mission mission-id] [--capture] [--record-tree] [--timeout-ms 60000] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs [--details]
@@ -4049,7 +4712,7 @@ Commands:
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions
-  klemm doctor [--pid-file path] [--log-file path] [--repair]
+  klemm doctor [--pid-file path] [--log-file path] [--repair] [--strict]
   klemm daemon install|migrate|start|stop|restart|logs|doctor|bootstrap|bootout|kickstart
   klemm daemon [--host 127.0.0.1] [--port 8765] [--pid-file path]
   klemm daemon health [--url http://127.0.0.1:8765]

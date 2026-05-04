@@ -321,6 +321,8 @@ The breadth rails make the larger Klemm vision visible without pretending privil
 npm run klemm -- helper install
 npm run klemm -- helper snapshot --mission mission-codex --frontmost-app Terminal
 npm run klemm -- helper snapshot --mission mission-codex --daemon-url http://127.0.0.1:8765
+npm run klemm -- helper stream start --mission mission-codex --frontmost-app Codex --watch-path ./src
+npm run klemm -- helper stream status --mission mission-codex
 npm run klemm -- observe attach --mission mission-codex --process-file ps-fixture.txt
 npm run klemm -- observe recommend
 npm run klemm -- adapters install --all
@@ -330,10 +332,16 @@ npm run klemm -- adapters uninstall codex --home "$HOME"
 npm run klemm -- adapters probe claude
 npm run klemm -- trust why <decision-id>
 npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
+npm run klemm -- corrections approve <correction-id>
+npm run klemm -- corrections promote <correction-id> --action-types deployment --target-includes production
 npm run klemm -- sync export --encrypted --output bundle.klemm
 npm run klemm -- security adversarial-test
 npm run klemm -- daemon token generate --output "$HOME/Library/Application Support/Klemm/daemon.token" --passphrase "$KLEMM_DAEMON_TOKEN_PASSPHRASE"
+npm run klemm -- daemon doctor --strict --token-file "$HOME/Library/Application Support/Klemm/daemon.token" --token-passphrase "$KLEMM_DAEMON_TOKEN_PASSPHRASE"
 npm run klemm -- dogfood start --id mission-klemm --goal "Build Klemm" --plan "Use codex wrap" --dry-run -- npm test
+npm run klemm -- dogfood day start --id mission-klemm-day --goal "Daily Klemm build" --domains coding,memory --watch-path ./src --memory-source codex-history --policy-pack coding-afk --dry-run -- npm test
+npm run klemm -- dogfood day checkpoint --mission mission-klemm-day
+npm run klemm -- dogfood day finish --mission mission-klemm-day
 ```
 
 `macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, Cursor MCP/rules, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
@@ -354,10 +362,10 @@ npm run klemm -- context import --provider chrome_history --file ./History.sqlit
 npm run klemm -- context import --provider git_history --file git.log
 npm run klemm -- memory review --group-by-source
 npm run klemm -- memory promote-policy <memory-id> --action-types deployment --target-includes prod,production
-npm run klemm -- user model
+npm run klemm -- user model --evidence
 ```
 
-Imports record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `user model` renders an agent-usable summary grouped into working style, authority boundaries, interests/projects, relationship context, and corrections.
+Imports record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `user model --evidence` renders an agent-usable summary plus source-backed authority boundaries and recent corrections.
 
 ## Next Working Surfaces
 
@@ -367,6 +375,7 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm codex event/context/debrief`: stable Codex adapter packet commands.
 - `klemm codex dogfood/report/run/wrap`: hardened Codex dogfood adapter flow and end-to-end wrapper.
 - `klemm dogfood finish`: queue-safe dogfood closeout with debrief, mission finish, and final live-state check.
+- `klemm dogfood day start/status/checkpoint/finish`: daily dogfood loop with wrapped Codex start, mission alignment checkpoint, queue-safe finish, and useful debriefs.
 - `klemm readiness`: private-alpha ship gate for install artifacts, wrapper, MCP config, policy pack, supervised session proof, reviewed memory, clean queue, clean missions, doctor health, and audit trail.
 - `klemm codex install`: Codex-ready skill, MCP config, and wrapper bundle.
 - `klemm run codex|claude|shell`: named runtime wrapper plus profile-file v2 config for supervised agent launches.
@@ -375,23 +384,24 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm memory import-source/search`: memory source records and search.
 - `klemm context import`: provider-specific ChatGPT, Claude, Codex, Chrome history, and git history importers with evidence.
 - `klemm helper install/status/snapshot/permissions`: SwiftPM helper rail for public macOS observation snapshots.
+- `klemm helper stream start/status/stop`: daemon-managed helper stream lifecycle with heartbeat/stale detection, file-watch metadata, frontmost app, and unmanaged-agent events.
 - `klemm observe status/recommend/attach`: normalized observation events and unmanaged-agent recommendations.
 - `klemm adapters list/probe/install/uninstall/doctor`: documented Codex, Claude, Cursor, shell, browser, and MCP adapter rails with generated or real backed-up installs.
-- `klemm trust why` and `klemm corrections add`: end-to-end decision explanation and correction-driven policy learning.
+- `klemm trust why` and `klemm corrections add/approve/reject/promote`: end-to-end decision explanation and correction-driven policy learning.
 - `klemm daemon token generate|rotate`: encrypted local daemon token lifecycle with doctor permission/decrypt checks.
 - `klemm dogfood start`: default dogfood entrypoint that routes through `klemm codex wrap`.
 - `klemm sync export/import --encrypted`: local passphrase-encrypted sync bundles.
 - `klemm security adversarial-test`: prompt-injection hardening fixtures for imported context and tool output.
 - `klemm sync add/plan/run/status`: scheduled local context sync with due planning, checksum dedupe, and source snapshots.
 - `klemm memory promote-policy`: turn reviewed memory into structured authority policy.
-- `klemm user model`: agent-usable local profile summary from reviewed and pending memory candidates.
+- `klemm user model --evidence`: agent-usable local profile summary plus source-backed authority boundaries and recent corrections.
 - `klemm debrief`: inspection-first summary of events, rewrites, queue, and memory candidates.
 - `klemm queue inspect`: decision drilldown with rewrite, source memories, policies, and explanation.
-- `klemm tui --interactive`: lightweight terminal dashboard with approve/deny and memory-review commands.
-- `klemm tui --view`: focused terminal views for memory, queue, agents, policies, model, logs, and trust drilldowns.
+- `klemm tui --interactive`: lightweight terminal dashboard with approve/deny, workbench, correction, queue, and memory-review commands.
+- `klemm tui --view`: focused terminal views for memory, workbench, queue, agents, policies, model, logs, and trust drilldowns.
 - `klemm supervise --capture`: transcript, exit code, duration, file-change capture, process metadata, and live-intervention details for supervised processes.
 - `klemm supervise --intercept-output`: live streamed-output risk interception and queueing.
-- `klemm doctor`: lifecycle doctor for store migrations, stale pid repair, logs, and daemon health readiness.
+- `klemm daemon doctor --strict`: lifecycle doctor for encrypted tokens, helper stream health, adapter configs, log redaction/rotation, schema, stale pid, and daemon health readiness.
 - `klemm status`: daemon-aware status with local store fallback visibility.
 - `klemm daemon health`: lifecycle probe for the local authority daemon.
 - `klemm os snapshot/status/permissions`: public-capability OS observation, unmanaged-agent detection, and permission status reporting.

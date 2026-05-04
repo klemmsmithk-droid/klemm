@@ -54,6 +54,8 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     syncBundles: [],
     securityRuns: [],
     helperChecks: [],
+    helperStreams: [],
+    dogfoodDays: [],
     agentActivities: [],
     alignmentReports: [],
     agentInterventions: [],
@@ -754,6 +756,8 @@ export function migrateKlemmState(state, { now = new Date().toISOString(), targe
     syncBundles: state.syncBundles ?? [],
     securityRuns: state.securityRuns ?? [],
     helperChecks: state.helperChecks ?? [],
+    helperStreams: state.helperStreams ?? [],
+    dogfoodDays: state.dogfoodDays ?? [],
     schemaMigrations: state.schemaMigrations ?? [],
     policies: state.policies ?? [],
     agentActivities: state.agentActivities ?? [],
@@ -1188,6 +1192,7 @@ export function summarizeDebrief(state, { missionId } = {}) {
   const alignmentReports = mission ? (state.alignmentReports ?? []).filter((report) => report.missionId === mission.id) : state.alignmentReports ?? [];
   const agentInterventions = mission ? (state.agentInterventions ?? []).filter((intervention) => intervention.missionId === mission.id) : state.agentInterventions ?? [];
   const agentActivities = mission ? (state.agentActivities ?? []).filter((activity) => activity.missionId === mission.id) : state.agentActivities ?? [];
+  const helperStream = latestHelperStreamForMission(state, mission?.id);
   const lines = [
     "Klemm debrief",
     `Mission: ${mission?.id ?? "all"}`,
@@ -1204,6 +1209,7 @@ export function summarizeDebrief(state, { missionId } = {}) {
     `Supervised runs: ${supervisedRuns.length}`,
     `OS observations: ${osObservations.length}`,
     `Observation events: ${(state.observationEvents ?? []).filter((event) => !mission || event.missionId === mission.id).length}`,
+    `Helper stream: ${helperStream?.status ?? "none"} health=${helperStream ? helperStreamHealthForState(helperStream) : "none"}`,
     `Adapter registrations: ${(state.adapterRegistrations ?? []).length}`,
     `Corrections: ${(state.corrections ?? []).length}`,
     `Sync bundles: ${(state.syncBundles ?? []).length}`,
@@ -1242,6 +1248,7 @@ export function renderKlemmDashboard(state, { missionId, now = new Date().toISOS
   const supervisedRuns = mission ? (state.supervisedRuns ?? []).filter((run) => run.missionId === mission.id) : state.supervisedRuns ?? [];
   const osObservations = mission ? (state.osObservations ?? []).filter((observation) => observation.missionId === mission.id) : state.osObservations ?? [];
   const alignmentReports = mission ? (state.alignmentReports ?? []).filter((report) => report.missionId === mission.id) : state.alignmentReports ?? [];
+  const helperStream = latestHelperStreamForMission(state, mission?.id);
 
   return [
     "Klemm",
@@ -1254,6 +1261,7 @@ export function renderKlemmDashboard(state, { missionId, now = new Date().toISOS
     `Supervised runs: ${supervisedRuns.length}`,
     `OS observations: ${osObservations.length}`,
     `Observation events: ${(state.observationEvents ?? []).filter((event) => !mission || event.missionId === mission.id).length}`,
+    `Helper stream: ${helperStream?.status ?? "none"} health=${helperStream ? helperStreamHealthForState(helperStream) : "none"}`,
     `Adapter registrations: ${(state.adapterRegistrations ?? []).length}`,
     `Corrections: ${(state.corrections ?? []).length}`,
     `Sync bundles: ${(state.syncBundles ?? []).length}`,
@@ -1437,6 +1445,19 @@ export function classifyAuthority(proposal, mission = {}, matchedPolicies = []) 
 
 function activeMission(state) {
   return state.missions.find((mission) => mission.status === "active");
+}
+
+function latestHelperStreamForMission(state, missionId) {
+  const streams = state.helperStreams ?? [];
+  if (!missionId) return streams[0] ?? null;
+  return streams.find((stream) => stream.missionId === missionId || stream.id === missionId) ?? null;
+}
+
+function helperStreamHealthForState(stream) {
+  if (stream.status !== "running") return "stopped";
+  const timestamp = Date.parse(stream.lastHeartbeatAt ?? stream.lastSnapshotAt ?? 0);
+  if (!Number.isFinite(timestamp)) return "stale";
+  return Date.now() - timestamp > 30_000 ? "stale" : "healthy";
 }
 
 function extractContextRecords(provider, { payload = "", filePath, sourceRef } = {}) {

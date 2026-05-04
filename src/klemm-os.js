@@ -13,7 +13,6 @@ const AGENT_PROCESS_PATTERNS = [
   /\bbrowser-agent\b/i,
   /\bmcp-agent\b/i,
   /\bshell-agent\b/i,
-  /\bagent\b/i,
   /\bautonomous\b/i,
 ];
 
