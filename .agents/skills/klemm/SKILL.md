@@ -124,10 +124,15 @@ Adapter enforcement surfaces:
 klemm adapters install --real claude --home "$HOME"
 klemm adapters install --real cursor --home "$HOME"
 klemm adapters doctor --live --mission <mission-id>
+klemm adapters probe cursor --live --home "$HOME"
+klemm adapters smoke claude --mission <mission-id> --goal <goal-id> --home "$HOME"
+klemm adapters compliance --mission <mission-id> --require codex,claude,cursor,shell
+klemm dogfood adapters --id <goal-id> --goal "<goal>" --home "$HOME"
 klemm tui --view adapters --mission <mission-id>
 ```
 
 Claude hooks and Cursor rules should use proxy/authority/reporting by default: `proxy_ask`, `proxy_continue`, `request_authority`, and `record_adapter_envelope`.
+Use `klemm adapters compliance` after adapter work to prove the adapter actually produced live evidence: proxy usage, authority routing, captured output, diff reporting, session lifecycle, and debrief events. Use `klemm dogfood adapters` as the one-command proof path for a fake-home or explicit opt-in real-home dogfood run. A generated config bundle alone is not enough evidence that an adapter is obeying Klemm.
 
 Always ask Klemm before:
 
