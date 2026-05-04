@@ -5,6 +5,7 @@ import { existsSync, openSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { chmod, copyFile, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { createInterface } from "node:readline/promises";
 
 import {
   addReviewedProxyMemory,
@@ -108,11 +109,39 @@ const POLICY_PACKS = {
   ],
 };
 
+const START_CONTEXT_PROVIDERS = [
+  {
+    id: "chatgpt",
+    name: "ChatGPT",
+    url: "https://chatgpt.com",
+    aliases: ["1", "chatgpt", "chat", "openai"],
+  },
+  {
+    id: "claude",
+    name: "Claude",
+    url: "https://claude.ai",
+    aliases: ["2", "claude", "anthropic"],
+  },
+  {
+    id: "gemini",
+    name: "Gemini",
+    url: "https://gemini.google.com",
+    aliases: ["3", "gemini", "google"],
+  },
+  {
+    id: "codex",
+    name: "Codex",
+    url: "https://chatgpt.com/codex",
+    aliases: ["4", "codex"],
+  },
+];
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] ?? "status";
 
   try {
+    if (command === "start") return await startInteractiveFromCli(args.slice(1));
     if (command === "status") return await printStatus();
     if (command === "version") return await printVersion();
     if (command === "codex" && args[1] === "hub") return startCodexHubFromCli(args.slice(2));
@@ -3522,6 +3551,270 @@ async function printStatus() {
   console.log(`Memories: ${status.memoryCount} (${status.pendingMemoryReviewCount} pending review)`);
   console.log(`Authority decisions: ${status.recentDecisionCount}`);
   console.log(`OS observations: ${status.osObservationCount}`);
+}
+
+async function startInteractiveFromCli(args) {
+  const flags = parseFlags(args);
+  printStartMenu();
+  if (process.stdin.isTTY) {
+    return await startInteractiveTty(flags);
+  }
+  const input = await readStdin();
+  const lines = input.split(/\r?\n/);
+  return await processStartMenuLines(lines, flags);
+}
+
+async function startInteractiveTty(flags) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      const raw = await rl.question("klemm> ");
+      const choice = normalizeStartChoice(raw);
+      if (choice === "quit") {
+        console.log("Goodbye.");
+        return;
+      }
+      if (choice === "directions") {
+        console.log("Directions");
+        console.log("Type directions for Klemm, then press return.");
+        const text = await rl.question("direction> ");
+        saveStartDirection(text);
+        continue;
+      }
+      if (choice === "context") {
+        printStartContextMenu();
+        const provider = await rl.question("provider> ");
+        await openStartContextProvider(provider, flags);
+        continue;
+      }
+      await runStartMenuChoice(choice);
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+async function processStartMenuLines(lines, flags) {
+  let index = 0;
+  while (index < lines.length) {
+    const raw = lines[index]?.trim() ?? "";
+    index += 1;
+    if (!raw) continue;
+    const choice = normalizeStartChoice(raw);
+    if (choice === "quit") {
+      console.log("Goodbye.");
+      return;
+    }
+    if (choice === "directions") {
+      console.log("Directions");
+      console.log("Type directions for Klemm, then press return.");
+      const text = lines[index]?.trim() ?? "";
+      index += 1;
+      saveStartDirection(text);
+      continue;
+    }
+    if (choice === "context") {
+      printStartContextMenu();
+      const provider = lines[index]?.trim() ?? "";
+      index += 1;
+      await openStartContextProvider(provider, flags);
+      continue;
+    }
+    await runStartMenuChoice(choice);
+  }
+}
+
+function printStartMenu() {
+  console.log("Klemm Start");
+  console.log("Choose:");
+  console.log("1. Status");
+  console.log("2. Directions");
+  console.log("3. Context");
+  console.log("4. Agents");
+  console.log("5. Quit");
+  console.log("Type a number or name:");
+}
+
+function normalizeStartChoice(raw) {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "1" || value === "status") return "status";
+  if (value === "2" || value === "directions" || value === "direction") return "directions";
+  if (value === "3" || value === "context" || value === "connect") return "context";
+  if (value === "4" || value === "agents" || value === "agent") return "agents";
+  if (value === "5" || value === "quit" || value === "q" || value === "exit") return "quit";
+  return value;
+}
+
+async function runStartMenuChoice(choice) {
+  if (choice === "status") return await printStartStatus();
+  if (choice === "agents") return printStartAgents();
+  if (!choice) return;
+  console.log(`Unknown choice: ${choice}`);
+  printStartMenu();
+}
+
+async function printStartStatus() {
+  const state = store.getState();
+  const daemon = await probeDaemonHealth(process.env.KLEMM_DAEMON_URL);
+  const agentCalls = countAgentCalls(state);
+  const activeAgents = (state.agents ?? []).filter((agent) => agent.status !== "finished" && agent.status !== "stopped").length;
+  console.log("Status");
+  console.log(`Klemm running: ${daemon.ok ? "yes (daemon)" : "yes (local CLI)"}`);
+  console.log(`Daemon: ${daemon.ok ? "running" : "not running"}`);
+  console.log(`Data dir: ${KLEMM_DATA_DIR}`);
+  console.log(`Agent calls: ${agentCalls}`);
+  console.log(`Active agents: ${activeAgents}`);
+  console.log(`Queued decisions: ${(state.queue ?? []).filter((item) => item.status === "queued").length}`);
+}
+
+function countAgentCalls(state) {
+  return [
+    state.agentActivities,
+    state.proxyQuestions,
+    state.proxyAnswers,
+    state.proxyContinuations,
+    state.decisions,
+    state.supervisedRuns,
+  ].reduce((total, items) => total + (items?.length ?? 0), 0);
+}
+
+function saveStartDirection(text) {
+  const direction = String(text ?? "").trim();
+  if (!direction) {
+    console.log("No direction saved.");
+    return;
+  }
+  const next = store.update((state) => {
+    const now = new Date().toISOString();
+    const id = buildStartRecordId("direction", state.userDirections);
+    const memoryId = buildStartRecordId("memory", state.memories);
+    return {
+      ...state,
+      userDirections: [
+        {
+          id,
+          direction,
+          status: "active",
+          createdAt: now,
+          source: "klemm_start",
+        },
+        ...(state.userDirections ?? []),
+      ],
+      memories: [
+        {
+          id: memoryId,
+          memoryClass: "authority_boundary",
+          text: direction,
+          source: "directions",
+          sourceRef: id,
+          confidence: 0.95,
+          status: "approved",
+          createdAt: now,
+          updatedAt: now,
+          evidence: {
+            provider: "klemm_start",
+            ref: id,
+          },
+        },
+        ...(state.memories ?? []),
+      ],
+      auditEvents: [
+        {
+          id: buildStartRecordId("audit", state.auditEvents),
+          type: "user_direction_added",
+          at: now,
+          summary: `User direction added through klemm start: ${redactSensitiveText(direction)}`,
+        },
+        ...(state.auditEvents ?? []),
+      ],
+    };
+  });
+  const saved = next.userDirections?.[0];
+  console.log(`Direction saved: ${saved.id}`);
+  console.log(`Direction: ${redactSensitiveText(saved.direction)}`);
+}
+
+function printStartContextMenu() {
+  console.log("Context");
+  console.log("Choose a service to connect as read-only context:");
+  START_CONTEXT_PROVIDERS.forEach((provider, index) => {
+    console.log(`${index + 1}. ${provider.name}`);
+  });
+}
+
+async function openStartContextProvider(rawProvider, flags = {}) {
+  const provider = findStartContextProvider(rawProvider);
+  if (!provider) {
+    console.log(`Unknown context provider: ${rawProvider || "none"}`);
+    return;
+  }
+  console.log(`Opening ${provider.name} connection`);
+  console.log(`URL: ${provider.url}`);
+  const openResult = await openBrowserUrl(provider.url, flags);
+  console.log(`Browser open: ${openResult}`);
+  const next = store.update((state) => {
+    const now = new Date().toISOString();
+    const id = buildStartRecordId("context-connection", state.contextConnectionRequests);
+    return {
+      ...state,
+      contextConnectionRequests: [
+        {
+          id,
+          provider: provider.id,
+          providerName: provider.name,
+          url: provider.url,
+          status: flags.noOpen ? "open_skipped" : "open_requested",
+          createdAt: now,
+          source: "klemm_start",
+        },
+        ...(state.contextConnectionRequests ?? []),
+      ],
+      auditEvents: [
+        {
+          id: buildStartRecordId("audit", state.auditEvents),
+          type: "context_connection_requested",
+          at: now,
+          summary: `Context connection requested for ${provider.name}.`,
+        },
+        ...(state.auditEvents ?? []),
+      ],
+    };
+  });
+  console.log(`Connection request saved: ${next.contextConnectionRequests?.[0]?.id}`);
+}
+
+function findStartContextProvider(rawProvider) {
+  const value = String(rawProvider ?? "").trim().toLowerCase();
+  return START_CONTEXT_PROVIDERS.find((provider) => provider.aliases.includes(value) || provider.id === value || provider.name.toLowerCase() === value);
+}
+
+async function openBrowserUrl(url, flags = {}) {
+  if (flags.noOpen) return "skipped (--no-open)";
+  const command = process.env.KLEMM_OPEN_COMMAND ?? (process.platform === "darwin" ? "open" : "xdg-open");
+  try {
+    const child = spawn(command, [url], { detached: true, stdio: "ignore" });
+    child.unref();
+    return `requested (${command})`;
+  } catch (error) {
+    return `failed (${error.message})`;
+  }
+}
+
+function printStartAgents() {
+  const agents = store.getState().agents ?? [];
+  console.log("Agents in use");
+  if (agents.length === 0) {
+    console.log("No active agents registered.");
+    return;
+  }
+  for (const agent of agents) {
+    console.log(`- ${agent.id} ${agent.status} mission=${agent.missionId} kind=${agent.kind} name="${agent.name}"`);
+  }
+}
+
+function buildStartRecordId(prefix, items = []) {
+  const stamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+  return `${prefix}-${stamp}-${(items?.length ?? 0) + 1}`;
 }
 
 async function startMissionFromCli(args) {
@@ -7370,7 +7663,7 @@ function helperStreamHealth(stream, { staleAfterMs = 30_000 } = {}) {
 
 function parseFlags(args) {
   const flags = {};
-  const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "encrypted", "preview", "apply", "promotePolicy", "force"]);
+  const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen"]);
   for (let index = 0; index < args.length; index += 1) {
     const part = args[index];
     if (!part.startsWith("--")) continue;
@@ -7391,7 +7684,7 @@ function firstPositionalArg(args) {
     const part = args[index];
     if (part.startsWith("--")) {
       const key = toCamel(part.slice(2));
-      const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "encrypted", "preview", "apply", "promotePolicy", "force"]);
+      const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen"]);
       if (!booleanFlags.has(key) && args[index + 1] && !args[index + 1].startsWith("--")) index += 1;
       continue;
     }
@@ -7528,6 +7821,7 @@ function printHelp() {
 Klemm CLI
 
 Commands:
+  klemm start [--no-open]
   klemm install [--data-dir path] [--policy-pack coding-afk] [--agents codex,claude,shell] [--check-health]
   klemm setup [--data-dir path] [--codex-dir path] [--codex-history path] [--never "..."] [--dry-run-launchctl]
   klemm status

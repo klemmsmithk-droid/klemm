@@ -9,6 +9,8 @@ Klemm is the user's local personal authority layer. Codex is only a temporary hu
 
 ## Startup
 
+For the human-facing front door, prefer `klemm start`. It opens the compact terminal menu Kyle expects: Status, Directions, Context, and Agents. Use it when the user wants to configure Klemm, add standing directions, connect ChatGPT/Claude/Gemini/Codex context sources, or inspect which agents are in use.
+
 When the user invokes `/klemm supervise this session` or equivalent:
 
 Use the wrapper-first flow. Prefer `klemm codex wrap` or the installed `klemm-codex` wrapper as the default path, because it starts the mission, registers Codex, reports the plan, preflights commands, routes allowed work through supervision, and emits the final debrief.
