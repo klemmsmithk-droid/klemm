@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -112,4 +112,31 @@ test("supervise --watch records activity, evaluates alignment, and surfaces the 
   assert.match(status.stdout, /Agent monitor/);
   assert.match(status.stdout, /Activities: 1/);
   assert.match(status.stdout, /Latest alignment: needs_nudge/);
+});
+
+test("live output interceptor ignores credential words in CLI help text", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-live-help-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  const scriptPath = join(dataDir, "print-help.js");
+  await writeFile(scriptPath, "console.log('Usage: codex login --token <token> manages authentication credentials');", "utf8");
+  const mission = await runKlemm(["mission", "start", "--id", "mission-help-text", "--hub", "codex", "--goal", "Read CLI help output"], { env });
+  assert.equal(mission.status, 0, mission.stderr);
+
+  const supervised = await runKlemm([
+    "supervise",
+    "--mission",
+    "mission-help-text",
+    "--intercept-output",
+    "--",
+    "node",
+    scriptPath,
+  ], { env });
+
+  assert.equal(supervised.status, 0, supervised.stderr);
+  assert.match(supervised.stdout, /Klemm supervised exit: 0/);
+  assert.doesNotMatch(supervised.stdout, /Klemm live intervention/);
+
+  const queue = await runKlemm(["queue"], { env });
+  assert.equal(queue.status, 0, queue.stderr);
+  assert.match(queue.stdout, /No queued decisions/);
 });

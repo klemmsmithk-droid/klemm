@@ -120,11 +120,17 @@ async function main() {
     if (command === "setup") return await setupKlemmFromCli(args.slice(1));
     if (command === "install" && args[1] !== "mcp") return await installKlemmFromCli(args.slice(1));
     if (command === "mission" && args[1] === "start") return startMissionFromCli(args.slice(2));
+    if (command === "mission" && args[1] === "list") return listMissionsFromCli();
+    if (command === "mission" && args[1] === "current") return printCurrentMissionFromCli();
+    if (command === "mission" && args[1] === "finish") return finishMissionFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
     if (command === "agents") return printAgents();
     if (command === "propose") return proposeFromCli(args.slice(1));
     if (command === "queue" && args[1] === "inspect") return printQueueDecisionFromCli(args.slice(2));
+    if (command === "queue" && args[1] === "approve") return recordQueueOutcome(args.slice(2), "approved");
+    if (command === "queue" && args[1] === "deny") return recordQueueOutcome(args.slice(2), "denied");
+    if (command === "queue" && args[1] === "rewrite") return recordQueueOutcome(args.slice(2), "rewritten");
     if (command === "queue") return printQueue();
     if (command === "approve") return recordQueueOutcome(args.slice(1), "approved");
     if (command === "deny") return recordQueueOutcome(args.slice(1), "denied");
@@ -832,6 +838,75 @@ function startMissionFromCli(args) {
   console.log(`Rewrite allowed: ${mission.rewriteAllowed}`);
 }
 
+function listMissionsFromCli() {
+  const missions = store.getState().missions ?? [];
+  console.log("Klemm missions");
+  if (missions.length === 0) {
+    console.log("No missions.");
+    return;
+  }
+  for (const mission of missions) {
+    console.log(`- ${mission.id} ${mission.status} hub=${mission.hub} goal=${mission.goal}`);
+  }
+}
+
+function printCurrentMissionFromCli() {
+  const mission = (store.getState().missions ?? []).find((item) => item.status === "active");
+  if (!mission) {
+    console.log("No active mission.");
+    return;
+  }
+  console.log(`Current mission: ${mission.id}`);
+  console.log(`Hub: ${mission.hub}`);
+  console.log(`Goal: ${mission.goal}`);
+  console.log(`Expires: ${mission.expiresAt}`);
+}
+
+function finishMissionFromCli(args) {
+  const [missionId, ...noteParts] = args;
+  if (!missionId) throw new Error("Usage: klemm mission finish <mission-id> [note]");
+  const note = noteParts.join(" ");
+  const now = new Date().toISOString();
+  let finished;
+  store.update((state) => {
+    const missions = (state.missions ?? []).map((mission) => {
+      if (mission.id !== missionId) return mission;
+      finished = {
+        ...mission,
+        status: "finished",
+        finishedAt: now,
+        finishNote: note,
+      };
+      return finished;
+    });
+    if (!finished) throw new Error(`Mission not found: ${missionId}`);
+    const agents = (state.agents ?? []).map((agent) =>
+      agent.missionId === missionId
+        ? { ...agent, status: "finished", finishedAt: now }
+        : agent,
+    );
+    return {
+      ...state,
+      missions,
+      agents,
+      events: [
+        {
+          id: `event-mission-finished-${Date.now()}`,
+          missionId,
+          agentId: "klemm",
+          type: "mission_finished",
+          summary: note || `Mission ${missionId} finished.`,
+          createdAt: now,
+        },
+        ...(state.events ?? []),
+      ],
+    };
+  });
+  console.log(`Mission finished: ${finished.id}`);
+  console.log(`Goal: ${finished.goal}`);
+  console.log(`Note: ${note || "none"}`);
+}
+
 function registerAgentFromCli(args) {
   const flags = parseFlags(args);
   const next = store.update((state) =>
@@ -1049,19 +1124,23 @@ function printQueueDecisionFromCli(args) {
 }
 
 function recordQueueOutcome(args, outcome) {
-  const [decisionId, ...noteParts] = args;
+  const flags = parseFlags(args);
+  const positional = args.filter((item, index) => item !== "--to" && args[index - 1] !== "--to");
+  const [decisionId, ...noteParts] = positional;
   if (!decisionId) throw new Error(`Usage: klemm ${outcome === "denied" ? "deny" : outcome} <decision-id> [note]`);
   const next = store.update((state) =>
     recordQueuedDecision(state, {
       decisionId,
       outcome,
       note: noteParts.join(" "),
+      rewrite: flags.to,
     }),
   );
   const queued = next.queue.find((item) => item.id === decisionId);
 
   console.log(`Decision recorded: ${queued.status}`);
   console.log(`Decision ID: ${queued.id}`);
+  if (queued.rewrite) console.log(`Rewrite: ${queued.rewrite}`);
   console.log(`Note: ${queued.note || "none"}`);
 }
 
@@ -2133,7 +2212,8 @@ function buildLiveOutputProposal(text, transcript, { missionId, actor } = {}) {
       missionRelevance: "related",
     };
   }
-  if (/\b(secret|token|credential|api[-_ ]?key|oauth)\b/i.test(haystack)) {
+  if (looksLikeCliHelpText(haystack)) return null;
+  if (looksLikeCredentialAction(haystack)) {
     return {
       id: `live-output-${Date.now()}`,
       missionId,
@@ -2157,6 +2237,16 @@ function buildLiveOutputProposal(text, transcript, { missionId, actor } = {}) {
     };
   }
   return null;
+}
+
+function looksLikeCliHelpText(text) {
+  return /\bUsage:\s+\S+/i.test(text) || /\b(Options|Commands|Arguments):/i.test(text);
+}
+
+function looksLikeCredentialAction(text) {
+  const credential = "(secret|token|credential|api[-_ ]?key|oauth)";
+  const verb = "(set|create|update|change|rotate|delete|revoke|write|save|store|export|print|leak|send|submit|grant)";
+  return new RegExp(`\\b${verb}\\b.{0,120}\\b${credential}\\b|\\b${credential}\\b.{0,120}\\b${verb}\\b`, "i").test(text);
 }
 
 function persistCapturedRun(flags, command, result, cwd) {
@@ -2816,12 +2906,17 @@ Commands:
   klemm codex wrap --id mission-id --goal "..." [--adapter-client id] [--adapter-token token] [--dry-run] -- <command> [args...]
   klemm codex install --output-dir path [--data-dir path]
   klemm mission start --hub codex --goal "..." [--allow a,b] [--block x,y] [--rewrite]
+  klemm mission current
+  klemm mission list
+  klemm mission finish <mission-id> [note]
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
   klemm event record --mission mission-id --agent agent-codex --type command_planned --summary "..."
   klemm agents
   klemm propose --mission mission-id --actor Codex --type git_push --target "origin main"
   klemm queue
   klemm queue inspect <decision-id>
+  klemm queue approve|deny <decision-id> [note]
+  klemm queue rewrite <decision-id> --to "replacement command"
   klemm approve|deny|rewrite <decision-id> [note]
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json

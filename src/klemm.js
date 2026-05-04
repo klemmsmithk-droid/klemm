@@ -330,6 +330,7 @@ export function recordQueuedDecision(state, options = {}) {
       status: outcome,
       resolvedAt: now,
       note: options.note ?? "",
+      rewrite: options.rewrite ?? item.rewrite,
     };
   });
   if (!found) throw new Error(`Queued decision not found: ${decisionId}`);
@@ -341,6 +342,7 @@ export function recordQueuedDecision(state, options = {}) {
           status: outcome,
           resolvedAt: now,
           userNote: options.note ?? "",
+          rewrite: options.rewrite ?? decision.rewrite,
         }
       : decision,
   );

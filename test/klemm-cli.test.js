@@ -157,6 +157,88 @@ test("klemm supervise executes safe Klemm rewrites instead of the original comma
   assert.doesNotMatch(result.stdout, /original-command/);
 });
 
+test("klemm queue subcommands inspect, approve, deny, and rewrite decisions", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-queue-cli-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  const mission = await runKlemm(["mission", "start", "--id", "mission-queue", "--hub", "codex", "--goal", "Exercise queue commands"], { env });
+  assert.equal(mission.status, 0, mission.stderr);
+
+  for (const id of ["decision-approve", "decision-deny", "decision-rewrite"]) {
+    const proposal = await runKlemm([
+      "propose",
+      "--id",
+      id,
+      "--mission",
+      "mission-queue",
+      "--actor",
+      "Codex",
+      "--type",
+      "git_push",
+      "--target",
+      `origin ${id}`,
+      "--external",
+      "publishes_code",
+    ], { env });
+    assert.equal(proposal.status, 0, proposal.stderr);
+    assert.match(proposal.stdout, /Decision: queue/);
+  }
+
+  const inspected = await runKlemm(["queue", "inspect", "decision-approve"], { env });
+  assert.equal(inspected.status, 0, inspected.stderr);
+  assert.match(inspected.stdout, /Decision Detail/);
+
+  const approved = await runKlemm(["queue", "approve", "decision-approve", "approved from queue cli"], { env });
+  assert.equal(approved.status, 0, approved.stderr);
+  assert.match(approved.stdout, /Decision recorded: approved/);
+
+  const denied = await runKlemm(["queue", "deny", "decision-deny", "denied from queue cli"], { env });
+  assert.equal(denied.status, 0, denied.stderr);
+  assert.match(denied.stdout, /Decision recorded: denied/);
+
+  const rewritten = await runKlemm(["queue", "rewrite", "decision-rewrite", "--to", "git status --short"], { env });
+  assert.equal(rewritten.status, 0, rewritten.stderr);
+  assert.match(rewritten.stdout, /Decision recorded: rewritten/);
+  assert.match(rewritten.stdout, /Rewrite: git status --short/);
+
+  const rewriteDetail = await runKlemm(["queue", "inspect", "decision-rewrite"], { env });
+  assert.match(rewriteDetail.stdout, /Suggested rewrite: git status --short/);
+
+  const queue = await runKlemm(["queue"], { env });
+  assert.equal(queue.status, 0, queue.stderr);
+  assert.match(queue.stdout, /No queued decisions/);
+});
+
+test("klemm mission list, current, and finish manage active mission lifecycle", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-missions-cli-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  assert.equal((await runKlemm(["mission", "start", "--id", "mission-one", "--hub", "codex", "--goal", "First mission"], { env })).status, 0);
+  assert.equal((await runKlemm(["mission", "start", "--id", "mission-two", "--hub", "codex", "--goal", "Second mission"], { env })).status, 0);
+
+  const current = await runKlemm(["mission", "current"], { env });
+  assert.equal(current.status, 0, current.stderr);
+  assert.match(current.stdout, /Current mission: mission-two/);
+  assert.match(current.stdout, /Second mission/);
+
+  const listed = await runKlemm(["mission", "list"], { env });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /mission-two active/);
+  assert.match(listed.stdout, /mission-one active/);
+
+  const finished = await runKlemm(["mission", "finish", "mission-two", "dogfood complete"], { env });
+  assert.equal(finished.status, 0, finished.stderr);
+  assert.match(finished.stdout, /Mission finished: mission-two/);
+  assert.match(finished.stdout, /Note: dogfood complete/);
+
+  const nextCurrent = await runKlemm(["mission", "current"], { env });
+  assert.equal(nextCurrent.status, 0, nextCurrent.stderr);
+  assert.match(nextCurrent.stdout, /Current mission: mission-one/);
+
+  const listedAgain = await runKlemm(["mission", "list"], { env });
+  assert.match(listedAgain.stdout, /mission-two finished/);
+});
+
 test("klemm CLI starts Codex hub, records events, ingests exports, and renders TUI dashboard", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-cli-"));
   const env = { KLEMM_DATA_DIR: dataDir };

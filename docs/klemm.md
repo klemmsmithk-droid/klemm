@@ -22,12 +22,17 @@ npm run klemm -- codex run --mission mission-codex -- npm test
 npm run klemm -- codex wrap --id mission-codex --goal "Wrapped Codex supervision" --adapter-client codex-local --adapter-token "$KLEMM_ADAPTER_TOKEN" --protocol-version 2 --dry-run -- git push origin main
 npm run klemm -- codex install --output-dir ./codex-klemm --data-dir ./data
 npm run klemm -- mission start --id mission-codex --hub codex --goal "Build Klemm while Kyle is AFK" --allow read_files,edit_local_code,run_tests --block git_push,external_send,credential_change,oauth_scope_change --rewrite
+npm run klemm -- mission current
+npm run klemm -- mission list
+npm run klemm -- mission finish mission-codex "work complete"
 npm run klemm -- agent register --id agent-codex --mission mission-codex --name Codex --kind coding_agent
 npm run klemm -- event record --mission mission-codex --agent agent-codex --type command_planned --summary "Codex plans a test run" --action-id decision-tests --action-type command --target "npm test"
 npm run klemm -- propose --id decision-push --mission mission-codex --actor Codex --type git_push --target "origin main" --external publishes_code
 npm run klemm -- queue
 npm run klemm -- queue inspect decision-push
-npm run klemm -- deny decision-push "Review before publishing"
+npm run klemm -- queue approve decision-push "Approved from queue"
+npm run klemm -- queue deny decision-push "Review before publishing"
+npm run klemm -- queue rewrite decision-push --to "git status --short"
 npm run klemm -- memory ingest-export --source chatgpt_export --file export.json
 npm run klemm -- context import --provider chatgpt --file export.json
 npm run klemm -- context import --provider chrome_history --file "$HOME/Library/Application Support/Google/Chrome/Default/History"
