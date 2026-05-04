@@ -325,12 +325,17 @@ npm run klemm -- helper stream start --mission mission-codex --frontmost-app Cod
 npm run klemm -- helper stream status --mission mission-codex
 npm run klemm -- observe attach --mission mission-codex --process-file ps-fixture.txt
 npm run klemm -- observe recommend
+npm run klemm -- observe loop start --id observer-codex --mission mission-codex --watch-path ./src --expect-domain coding
+npm run klemm -- observe loop tick --id observer-codex --changed-file src/klemm-cli.js --agent-output "running tests"
+npm run klemm -- observe loop status --id observer-codex
 npm run klemm -- adapters install --all
 npm run klemm -- adapters install --real --all --home "$HOME"
 npm run klemm -- adapters doctor --home "$HOME"
 npm run klemm -- adapters uninstall codex --home "$HOME"
 npm run klemm -- adapters probe claude
+npm run klemm -- adapters health --mission mission-codex --require codex,claude,cursor,shell
 npm run klemm -- trust why <decision-id>
+npm run klemm -- trust timeline --mission mission-codex
 npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
 npm run klemm -- corrections approve <correction-id>
 npm run klemm -- corrections promote <correction-id> --action-types deployment --target-includes production
@@ -342,6 +347,7 @@ npm run klemm -- dogfood start --id mission-klemm --goal "Build Klemm" --plan "U
 npm run klemm -- dogfood day start --id mission-klemm-day --goal "Daily Klemm build" --domains coding,memory --watch-path ./src --memory-source codex-history --policy-pack coding-afk --dry-run -- npm test
 npm run klemm -- dogfood day checkpoint --mission mission-klemm-day
 npm run klemm -- dogfood day finish --mission mission-klemm-day
+npm run klemm -- true-score --target 60
 ```
 
 `macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, Cursor MCP/rules, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
@@ -362,10 +368,12 @@ npm run klemm -- context import --provider chrome_history --file ./History.sqlit
 npm run klemm -- context import --provider git_history --file git.log
 npm run klemm -- memory review --group-by-source
 npm run klemm -- memory promote-policy <memory-id> --action-types deployment --target-includes prod,production
-npm run klemm -- user model --evidence
+npm run klemm -- memory sources --coverage
+npm run klemm -- memory evidence <memory-id>
+npm run klemm -- user model --evidence --coverage
 ```
 
-Imports record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `user model --evidence` renders an agent-usable summary plus source-backed authority boundaries and recent corrections.
+Imports record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `memory sources --coverage` shows provider coverage and user-model depth, `memory evidence <memory-id>` opens the evidence trail, and `user model --evidence --coverage` renders an agent-usable summary plus source-backed authority boundaries and recent corrections.
 
 ## Next Working Surfaces
 
@@ -386,15 +394,19 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm helper install/status/snapshot/permissions`: SwiftPM helper rail for public macOS observation snapshots.
 - `klemm helper stream start/status/stop`: daemon-managed helper stream lifecycle with heartbeat/stale detection, file-watch metadata, frontmost app, and unmanaged-agent events.
 - `klemm observe status/recommend/attach`: normalized observation events and unmanaged-agent recommendations.
+- `klemm observe loop start/tick/status/stop`: continuous observe-and-recommend loop for real agent sessions, drift, risk hints, and watched files.
 - `klemm adapters list/probe/install/uninstall/doctor`: documented Codex, Claude, Cursor, shell, browser, and MCP adapter rails with generated or real backed-up installs.
+- `klemm adapters health`: live adapter capability coverage from installs and recent adapter envelopes.
 - `klemm trust why` and `klemm corrections add/approve/reject/promote`: end-to-end decision explanation and correction-driven policy learning.
+- `klemm trust timeline`: mission-level timeline of observer ticks, risk hints, decisions, and activity.
+- `klemm true-score`: stricter true-final-product scorecard for tracking progress toward the actual 100% vision.
 - `klemm daemon token generate|rotate`: encrypted local daemon token lifecycle with doctor permission/decrypt checks.
 - `klemm dogfood start`: default dogfood entrypoint that routes through `klemm codex wrap`.
 - `klemm sync export/import --encrypted`: local passphrase-encrypted sync bundles.
 - `klemm security adversarial-test`: prompt-injection hardening fixtures for imported context and tool output.
 - `klemm sync add/plan/run/status`: scheduled local context sync with due planning, checksum dedupe, and source snapshots.
 - `klemm memory promote-policy`: turn reviewed memory into structured authority policy.
-- `klemm user model --evidence`: agent-usable local profile summary plus source-backed authority boundaries and recent corrections.
+- `klemm memory sources/evidence` and `klemm user model --evidence --coverage`: source inventory, evidence drilldowns, and agent-usable local profile summary.
 - `klemm debrief`: inspection-first summary of events, rewrites, queue, and memory candidates.
 - `klemm queue inspect`: decision drilldown with rewrite, source memories, policies, and explanation.
 - `klemm tui --interactive`: lightweight terminal dashboard with approve/deny, workbench, correction, queue, and memory-review commands.

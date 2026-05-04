@@ -141,6 +141,8 @@ async function main() {
     if (command === "memory" && args[1] === "import-source") return await importMemorySourceFromCli(args.slice(2));
     if (command === "context" && args[1] === "import") return await importContextSourceFromCli(args.slice(2));
     if (command === "memory" && args[1] === "search") return searchMemoryFromCli(args.slice(2));
+    if (command === "memory" && args[1] === "sources") return printMemorySourcesFromCli(args.slice(2));
+    if (command === "memory" && args[1] === "evidence") return printMemoryEvidenceFromCli(args.slice(2));
     if (command === "memory" && args[1] === "review") return printMemoryReview(args.slice(2));
     if (command === "memory" && args[1] === "promote-policy") return promoteMemoryPolicyFromCli(args.slice(2));
     if (command === "memory" && ["approve", "reject", "pin"].includes(args[1])) {
@@ -175,12 +177,18 @@ async function main() {
     if (command === "observe" && args[1] === "attach") return await observeAttachFromCli(args.slice(2));
     if (command === "observe" && args[1] === "status") return printObserveStatus(args.slice(2));
     if (command === "observe" && args[1] === "recommend") return printObserveRecommendations(args.slice(2));
+    if (command === "observe" && args[1] === "loop" && args[2] === "start") return await observeLoopStartFromCli(args.slice(3));
+    if (command === "observe" && args[1] === "loop" && args[2] === "tick") return await observeLoopTickFromCli(args.slice(3));
+    if (command === "observe" && args[1] === "loop" && args[2] === "status") return observeLoopStatusFromCli(args.slice(3));
+    if (command === "observe" && args[1] === "loop" && args[2] === "stop") return observeLoopStopFromCli(args.slice(3));
     if (command === "adapters" && args[1] === "list") return adaptersListFromCli();
     if (command === "adapters" && args[1] === "install") return await adaptersInstallFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "uninstall") return await adaptersUninstallFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "probe") return adaptersProbeFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "doctor") return adaptersDoctorFromCli(args.slice(2));
+    if (command === "adapters" && args[1] === "health") return adaptersHealthFromCli(args.slice(2));
     if (command === "trust" && args[1] === "why") return trustWhyFromCli(args.slice(2));
+    if (command === "trust" && args[1] === "timeline") return trustTimelineFromCli(args.slice(2));
     if (command === "corrections" && args[1] === "add") return correctionsAddFromCli(args.slice(2));
     if (command === "corrections" && args[1] === "review") return correctionsReviewFromCli(args.slice(2));
     if (command === "corrections" && args[1] === "approve") return correctionsResolveFromCli(args.slice(2), "approved");
@@ -209,6 +217,7 @@ async function main() {
     if (command === "os" && args[1] === "status") return printOsStatus(args.slice(2));
     if (command === "os" && args[1] === "permissions") return printOsPermissions();
     if (command === "doctor") return await doctorFromCli(args.slice(1));
+    if (command === "true-score") return trueScoreFromCli(args.slice(1));
     if (command === "daemon") {
       await startDaemonFromCli(args.slice(1));
       return;
@@ -902,6 +911,82 @@ async function buildPrivateAlphaReadinessReport(flags = {}) {
   };
 }
 
+function trueScoreFromCli(args) {
+  const flags = parseFlags(args);
+  const target = Number(flags.target ?? 60);
+  const report = buildTrueFinalProductScore(store.getState());
+  console.log("Klemm true final product score");
+  console.log(`Score: ${report.score}%`);
+  console.log(`Target: ${target}%`);
+  for (const gate of report.gates) {
+    console.log(`${gate.id}: ${gate.pass ? "pass" : "fail"} - ${gate.detail}`);
+  }
+  console.log("Still missing for 100%:");
+  for (const gap of report.gaps) console.log(`- ${gap}`);
+  process.exitCode = report.score >= target ? 0 : 1;
+}
+
+function buildTrueFinalProductScore(state) {
+  const coverage = buildUserModelCoverage(state);
+  const gates = [
+    {
+      id: "dogfood_daily_loop",
+      weight: 8,
+      pass: (state.dogfoodDays ?? []).length > 0 && ((state.supervisedRuns ?? []).length > 0 || (state.agentActivities ?? []).length > 0),
+      detail: `days=${(state.dogfoodDays ?? []).length} supervised_runs=${(state.supervisedRuns ?? []).length} activities=${(state.agentActivities ?? []).length}`,
+    },
+    {
+      id: "native_helper_rail",
+      weight: 8,
+      pass: (state.helperStreams ?? []).some((stream) => stream.status === "running") || (state.helperChecks ?? []).length > 0,
+      detail: `helper_streams=${(state.helperStreams ?? []).length} helper_checks=${(state.helperChecks ?? []).length}`,
+    },
+    {
+      id: "continuous_observation",
+      weight: 10,
+      pass: (state.observerLoops ?? []).some((loop) => (loop.ticks ?? []).length > 0) && (state.observationEvents ?? []).some((event) => event.type === "observer_tick"),
+      detail: `loops=${(state.observerLoops ?? []).length} observation_events=${(state.observationEvents ?? []).length}`,
+    },
+    {
+      id: "user_model_depth",
+      weight: 12,
+      pass: coverage.sources >= 1 && coverage.reviewed >= 1 && coverage.policies >= 1 && (coverage.classes.authority_boundaries > 0 || coverage.classes.working_style > 0),
+      detail: `sources=${coverage.sources} reviewed=${coverage.reviewed} policies=${coverage.policies}`,
+    },
+    {
+      id: "adapter_reality",
+      weight: 8,
+      pass: (state.adapterRegistrations ?? []).length >= 4 && (state.agentActivities ?? []).some((activity) => activity.agentId === "agent-codex"),
+      detail: `adapters=${(state.adapterRegistrations ?? []).length} activities=${(state.agentActivities ?? []).length}`,
+    },
+    {
+      id: "trust_explainability",
+      weight: 8,
+      pass: (state.decisions ?? []).some((decision) => (decision.matchedPolicies ?? []).length > 0 || decision.decision === "queue"),
+      detail: `decisions=${(state.decisions ?? []).length}`,
+    },
+    {
+      id: "security_lifecycle",
+      weight: 6,
+      pass: (state.securityRuns ?? []).length > 0 && (state.daemonChecks ?? []).some((check) => /token/i.test(check.type ?? check.id ?? "")),
+      detail: `security_runs=${(state.securityRuns ?? []).length} daemon_checks=${(state.daemonChecks ?? []).length}`,
+    },
+  ];
+  const score = gates.reduce((total, gate) => total + (gate.pass ? gate.weight : 0), 0);
+  return {
+    score,
+    gates,
+    gaps: [
+      "signed native macOS app/menu-bar presence",
+      "battle-tested live Codex, Claude, Cursor, browser, and shell adapters",
+      "deep long-history ingestion with pleasant review at scale",
+      "hosted encrypted sync and cross-device continuity",
+      "privileged interception/blocking where the user explicitly opts in",
+      "production update, recovery, telemetry, and adversarial security program",
+    ],
+  };
+}
+
 async function executableFileExists(path) {
   try {
     const info = await stat(path);
@@ -1154,6 +1239,255 @@ function printObserveRecommendations() {
   }
   for (const kind of kinds) console.log(`- ${installed.has(kind) ? "Use installed adapter/wrapper" : "Install adapter"}: ${kind}`);
   console.log("- Mode: observe-only; no privileged blocking outside supervised/adapted sessions");
+}
+
+async function observeLoopStartFromCli(args) {
+  const flags = parseFlags(args);
+  const now = new Date().toISOString();
+  const id = flags.id ?? `observer-loop-${Date.now()}`;
+  const missionId = flags.mission;
+  const watchPaths = collectRepeatedFlag(args, "--watch-path");
+  const expectedDomains = normalizeListFlag(flags.expectDomain ?? flags.expectedDomains);
+  const frontmostApp = flags.frontmostApp ?? "unknown";
+  const processes = flags.processFile
+    ? parseProcessTable(await readFile(flags.processFile, "utf8"))
+    : await collectProcessSnapshot();
+  const observation = buildOsObservation({
+    missionId,
+    processes,
+    permissions: defaultMacOsPermissionSnapshot(),
+    appActivity: { frontmostApp },
+    fileEvents: watchPaths.map((path) => ({ path, event: "watch_registered" })),
+    notes: "Continuous observer loop start.",
+    now,
+  });
+  const events = [
+    {
+      id: `observation-event-${Date.now()}-observer-start`,
+      type: "observer_loop_started",
+      missionId,
+      observationId: observation.id,
+      observerLoopId: id,
+      summary: `continuous observer started for ${missionId ?? "no mission"}`,
+      createdAt: now,
+    },
+    ...buildHelperStreamEvents(observation, { watchPaths, frontmostApp, now }),
+  ];
+  store.update((state) => {
+    const observed = recordOsObservation(state, observation);
+    return {
+      ...observed,
+      observerLoops: [
+        {
+          id,
+          missionId,
+          status: "running",
+          mode: "observe-and-recommend",
+          intervalMs: Number(flags.intervalMs ?? 1000),
+          watchPaths,
+          expectedDomains,
+          startedAt: now,
+          lastTickAt: now,
+          ticks: [],
+          eventIds: events.map((event) => event.id),
+        },
+        ...(observed.observerLoops ?? []).filter((loop) => loop.id !== id),
+      ],
+      observationEvents: [...events, ...(observed.observationEvents ?? [])],
+    };
+  });
+  console.log(`Continuous observer started: ${id}`);
+  console.log(`Mission: ${missionId ?? "none"}`);
+  console.log("Mode: observe-and-recommend");
+  console.log(`Watch paths: ${watchPaths.join(",") || "none"}`);
+}
+
+async function observeLoopTickFromCli(args) {
+  const flags = parseFlags(args);
+  const id = flags.id;
+  if (!id) throw new Error("Usage: klemm observe loop tick --id <observer-id>");
+  const state = store.getState();
+  const loop = (state.observerLoops ?? []).find((item) => item.id === id);
+  if (!loop) throw new Error(`Observer loop not found: ${id}`);
+  const now = new Date().toISOString();
+  const frontmostApp = flags.frontmostApp ?? "unknown";
+  const changedFiles = collectRepeatedFlag(args, "--changed-file");
+  const agentOutput = flags.agentOutput ?? "";
+  const processes = flags.processFile
+    ? parseProcessTable(await readFile(flags.processFile, "utf8"))
+    : [];
+  const observation = buildOsObservation({
+    missionId: loop.missionId,
+    processes,
+    permissions: defaultMacOsPermissionSnapshot(),
+    appActivity: { frontmostApp },
+    fileEvents: changedFiles.map((path) => ({ path, event: "changed" })),
+    notes: "Continuous observer loop tick.",
+    now,
+  });
+  const assessment = assessObserverTick(loop, { frontmostApp, changedFiles, agentOutput });
+  const tickId = `observer-tick-${Date.now()}`;
+  const events = [
+    {
+      id: `observation-event-${Date.now()}-observer-tick`,
+      type: "observer_tick",
+      missionId: loop.missionId,
+      observationId: observation.id,
+      observerLoopId: id,
+      tickId,
+      summary: `alignment=${assessment.alignment}`,
+      createdAt: now,
+    },
+    {
+      id: `observation-event-${Date.now()}-helper-heartbeat`,
+      type: "helper_heartbeat",
+      missionId: loop.missionId,
+      observationId: observation.id,
+      observerLoopId: id,
+      tickId,
+      summary: "observer loop heartbeat",
+      createdAt: now,
+    },
+  ];
+  if (frontmostApp) {
+    events.push({
+      id: `observation-event-${Date.now()}-frontmost`,
+      type: "frontmost_app_changed",
+      missionId: loop.missionId,
+      observationId: observation.id,
+      observerLoopId: id,
+      app: frontmostApp,
+      summary: `frontmost app: ${frontmostApp}`,
+      createdAt: now,
+    });
+  }
+  for (const file of changedFiles) {
+    events.push({
+      id: `observation-event-${Date.now()}-file-${events.length}`,
+      type: "file_activity",
+      missionId: loop.missionId,
+      observationId: observation.id,
+      observerLoopId: id,
+      path: file,
+      summary: `changed file: ${file}`,
+      createdAt: now,
+    });
+  }
+  if (assessment.riskHints.length > 0) {
+    for (const hint of assessment.riskHints) {
+      events.push({
+        id: `observation-event-${Date.now()}-risk-${events.length}`,
+        type: "risk_hint",
+        missionId: loop.missionId,
+        observationId: observation.id,
+        observerLoopId: id,
+        tickId,
+        summary: hint,
+        createdAt: now,
+      });
+    }
+  }
+  const tick = {
+    id: tickId,
+    at: now,
+    frontmostApp,
+    changedFiles,
+    outputPreview: oneLine(agentOutput).slice(0, 160),
+    alignment: assessment.alignment,
+    recommendation: assessment.recommendation,
+    riskHints: assessment.riskHints,
+    eventIds: events.map((event) => event.id),
+  };
+  store.update((current) => {
+    const observed = recordOsObservation(current, observation);
+    const withActivity = recordAgentActivity(observed, {
+      missionId: loop.missionId,
+      agentId: "observer-loop",
+      type: "observation",
+      summary: `Observer tick ${tick.alignment}`,
+      target: changedFiles.join(","),
+      evidence: { observerLoopId: id, riskHints: assessment.riskHints },
+      now,
+    });
+    return {
+      ...withActivity,
+      observerLoops: (withActivity.observerLoops ?? []).map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              lastTickAt: now,
+              ticks: [tick, ...(item.ticks ?? [])],
+              eventIds: [...events.map((event) => event.id), ...(item.eventIds ?? [])],
+            }
+          : item,
+      ),
+      observationEvents: [...events, ...(withActivity.observationEvents ?? [])],
+    };
+  });
+  console.log(`Observer tick recorded: ${tick.id}`);
+  console.log(`alignment=${tick.alignment}`);
+  console.log(`recommendation=${tick.recommendation}`);
+  console.log(`events=${events.map((event) => event.type).join(",")}`);
+}
+
+function observeLoopStatusFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const loop = findObserverLoop(state, flags.id ?? flags.mission);
+  console.log("Continuous observer status");
+  if (!loop) {
+    console.log("Observer loop: stopped");
+    console.log("health=none");
+    return;
+  }
+  const health = observerLoopHealth(loop, { staleAfterMs: flags.staleAfterMs ? Number(flags.staleAfterMs) : undefined });
+  console.log(`Observer loop: ${loop.status}`);
+  console.log(`health=${health}`);
+  console.log(`Mission: ${loop.missionId ?? "none"}`);
+  console.log(`ticks=${(loop.ticks ?? []).length}`);
+  console.log(`Watch paths: ${(loop.watchPaths ?? []).join(",") || "none"}`);
+  console.log("Recommendations:");
+  const latestRisk = (loop.ticks ?? []).find((tick) => tick.riskHints?.length);
+  if (latestRisk) console.log(`- ${latestRisk.recommendation}: ${latestRisk.riskHints.join("; ")}`);
+  else console.log("- keep observing supervised/adapted sessions");
+}
+
+function observeLoopStopFromCli(args) {
+  const flags = parseFlags(args);
+  const id = flags.id ?? args[0];
+  if (!id) throw new Error("Usage: klemm observe loop stop --id <observer-id>");
+  const now = new Date().toISOString();
+  store.update((state) => ({
+    ...state,
+    observerLoops: (state.observerLoops ?? []).map((loop) =>
+      loop.id === id ? { ...loop, status: "stopped", stoppedAt: now } : loop,
+    ),
+  }));
+  console.log(`Continuous observer stopped: ${id}`);
+}
+
+function assessObserverTick(loop, { frontmostApp, changedFiles = [], agentOutput = "" } = {}) {
+  const riskHints = [];
+  const output = String(agentOutput ?? "").toLowerCase();
+  if (/\bdeploy|production|publish|send|credential|secret|token|oauth|delete\b/.test(output)) {
+    riskHints.push("agent output mentions a risky external or authority-sensitive action");
+  }
+  const expected = new Set(loop.expectedDomains ?? []);
+  if (expected.has("coding")) {
+    for (const file of changedFiles) {
+      if (!/^(src|test|docs|README|macos|package|\.agents)\b/i.test(String(file))) {
+        riskHints.push(`file activity outside expected coding paths: ${file}`);
+      }
+    }
+  }
+  if (frontmostApp && !/codex|terminal|cursor|xcode|code/i.test(frontmostApp) && riskHints.length > 0) {
+    riskHints.push(`frontmost app changed during risky work: ${frontmostApp}`);
+  }
+  return {
+    alignment: riskHints.length ? "needs_review" : "on_track",
+    recommendation: riskHints.length ? "wrap_or_queue" : "continue_observing",
+    riskHints,
+  };
 }
 
 function buildObservationEvents(observation) {
@@ -1491,6 +1825,42 @@ function adaptersDoctorFromCli(args = []) {
   }
 }
 
+function adaptersHealthFromCli(args = []) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const missionId = flags.mission;
+  const required = normalizeListFlag(flags.require);
+  const registrations = state.adapterRegistrations ?? [];
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  const adapters = required.length ? required : [...new Set([...registrations.map((item) => item.id), "codex"])];
+  const coveredCapabilities = new Set();
+  console.log("Live adapter health");
+  console.log(`Mission: ${missionId ?? "all"}`);
+  for (const adapter of adapters) {
+    const registration = registrations.find((item) => item.id === adapter);
+    const capabilities = registration?.capabilities ?? ADAPTER_CAPABILITIES[adapter] ?? [];
+    for (const capability of capabilities) coveredCapabilities.add(capability);
+    const live = adapterHasLiveActivity(adapter, activities);
+    const status = live ? "live" : registration ? "installed" : "missing";
+    const lastActivity = live ? activities.find((activity) => activityMatchesAdapter(adapter, activity)) : null;
+    console.log(`${adapter}: ${status} capabilities=${capabilities.join(",") || "none"} last=${lastActivity?.createdAt ?? "none"}`);
+  }
+  console.log("Capability coverage:");
+  for (const capability of ["observes", "preflights", "can_block", "captures_output", "reports_diff", "reports_session_lifecycle"]) {
+    console.log(`- ${capability}: ${coveredCapabilities.has(capability) ? "yes" : "no"}`);
+  }
+}
+
+function adapterHasLiveActivity(adapter, activities) {
+  return activities.some((activity) => activityMatchesAdapter(adapter, activity));
+}
+
+function activityMatchesAdapter(adapter, activity) {
+  const value = `${activity.agentId ?? ""} ${activity.type ?? ""} ${activity.summary ?? ""}`.toLowerCase();
+  if (adapter === "codex") return value.includes("codex") || activity.agentId === "agent-codex";
+  return value.includes(adapter);
+}
+
 function trustWhyFromCli(args) {
   const decisionId = args[0];
   const state = store.getState();
@@ -1545,6 +1915,37 @@ function trustWhyFromCli(args) {
   console.log("How to correct Klemm");
   console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
   console.log("- Review the resulting memory candidate, then promote it to policy if it should become a standing rule.");
+}
+
+function trustTimelineFromCli(args) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission;
+  const state = store.getState();
+  const events = (state.observationEvents ?? []).filter((event) => !missionId || event.missionId === missionId);
+  const decisions = (state.decisions ?? []).filter((decision) => !missionId || decision.missionId === missionId);
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  const loops = (state.observerLoops ?? []).filter((loop) => !missionId || loop.missionId === missionId);
+  const rows = [
+    ...events.map((event) => ({ at: event.createdAt, kind: event.type, text: event.summary ?? event.app ?? event.command ?? "" })),
+    ...decisions.map((decision) => ({ at: decision.createdAt, kind: `decision_${decision.decision}`, text: `${decision.actionType} ${decision.target}` })),
+    ...activities.map((activity) => ({ at: activity.createdAt, kind: `activity_${activity.type}`, text: activity.summary ?? activity.target ?? "" })),
+  ].sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? ""))).slice(0, 20);
+  console.log("Trust timeline");
+  console.log(`Mission: ${missionId ?? "all"}`);
+  console.log(`Observer loops: ${loops.length}`);
+  console.log("What Klemm thinks changed:");
+  const latestTick = loops.flatMap((loop) => loop.ticks ?? [])[0];
+  if (latestTick) {
+    console.log(`- ${latestTick.alignment}: ${latestTick.riskHints?.join("; ") || "work stayed inside expected path"}`);
+  } else {
+    console.log("- no observer ticks yet");
+  }
+  console.log("Timeline:");
+  if (rows.length === 0) console.log("- none");
+  for (const row of rows) console.log(`- ${row.at ?? "unknown"} ${row.kind}: ${redactSensitiveText(row.text)}`);
+  console.log("Correction command:");
+  const queued = decisions.find((decision) => decision.decision === "queue");
+  console.log(queued ? `- klemm corrections add --decision ${queued.id} --preference "..."` : "- no queued decision to correct");
 }
 
 function correctionsAddFromCli(args) {
@@ -2531,6 +2932,35 @@ function printMemoryReview(args = []) {
   }
 }
 
+function printMemorySourcesFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const sources = state.memorySources ?? [];
+  const providerGroups = groupBy(sources, (source) => source.provider ?? "unknown");
+  console.log("Memory Source Inventory");
+  console.log(`Sources: ${sources.length}`);
+  console.log("Provider coverage:");
+  if (sources.length === 0) console.log("- none");
+  for (const [provider, items] of providerGroups) {
+    const distilled = items.reduce((total, item) => total + Number(item.distilledCount ?? 0), 0);
+    const quarantined = items.reduce((total, item) => total + Number(item.quarantinedCount ?? item.rejectedCount ?? 0), 0);
+    console.log(`- ${provider}: sources=${items.length} distilled=${distilled} quarantined=${quarantined}`);
+  }
+  if (flags.coverage) printUserModelCoverage(state);
+  console.log("Recent sources:");
+  for (const source of sources.slice(0, 8)) {
+    console.log(`- ${source.id} provider=${source.provider} ref=${source.sourceRef} records=${source.recordCount ?? source.messageCount ?? 0}`);
+  }
+}
+
+function printMemoryEvidenceFromCli(args) {
+  const memoryId = args[0];
+  if (!memoryId) throw new Error("Usage: klemm memory evidence <memory-id>");
+  const state = store.getState();
+  const memory = (state.memories ?? []).find((item) => item.id === memoryId);
+  console.log(renderSourceEvidence(memory, state));
+}
+
 function reviewMemoryFromCli(args, status) {
   const [memoryId, ...noteParts] = args;
   if (!memoryId) throw new Error(`Usage: klemm memory ${status} <memory-id> [note]`);
@@ -2676,6 +3106,33 @@ function printUserModel(args) {
   for (const correction of corrections) {
     console.log(`- ${correction.id} ${correction.status} policy=${correction.policyId ?? "none"}: ${redactSensitiveText(correction.preference)}`);
   }
+  if (flags.coverage) printUserModelCoverage(state);
+}
+
+function printUserModelCoverage(state) {
+  const coverage = buildUserModelCoverage(state);
+  console.log("User model coverage:");
+  for (const [key, value] of Object.entries(coverage.classes)) {
+    console.log(`- ${key}: ${value}`);
+  }
+  console.log(`Evidence depth: sources=${coverage.sources} reviewed=${coverage.reviewed} policies=${coverage.policies} corrections=${coverage.corrections}`);
+}
+
+function buildUserModelCoverage(state) {
+  const memories = state.memories ?? [];
+  return {
+    sources: (state.memorySources ?? []).length,
+    reviewed: memories.filter((memory) => memory.status === "approved" || memory.status === "pinned").length,
+    policies: (state.policies ?? []).filter((policy) => policy.status === "active").length,
+    corrections: (state.corrections ?? []).length,
+    classes: {
+      authority_boundaries: memories.filter((memory) => memory.memoryClass === "authority_boundary").length,
+      working_style: memories.filter((memory) => memory.memoryClass === "standing_preference").length,
+      projects_interests: memories.filter((memory) => ["project_context", "personality_interest"].includes(memory.memoryClass)).length,
+      relationship_context: memories.filter((memory) => memory.memoryClass === "relationship_context").length,
+      corrections: memories.filter((memory) => memory.memoryClass === "prior_correction" || memory.source === "correction").length,
+    },
+  };
 }
 
 function addSyncSourceFromCli(args) {
@@ -4476,6 +4933,19 @@ function latestHelperStream(state, missionId) {
   return candidates[0] ?? null;
 }
 
+function findObserverLoop(state, idOrMission) {
+  const loops = state.observerLoops ?? [];
+  if (!idOrMission) return loops[0] ?? null;
+  return loops.find((loop) => loop.id === idOrMission || loop.missionId === idOrMission) ?? null;
+}
+
+function observerLoopHealth(loop, { staleAfterMs = 30_000 } = {}) {
+  if (loop.status !== "running") return "stopped";
+  const timestamp = Date.parse(loop.lastTickAt ?? loop.startedAt ?? 0);
+  if (!Number.isFinite(timestamp)) return "stale";
+  return Date.now() - timestamp > staleAfterMs ? "stale" : "healthy";
+}
+
 function helperStreamHealth(stream, { staleAfterMs = 30_000 } = {}) {
   const timestamp = Date.parse(stream?.lastHeartbeatAt ?? stream?.lastSnapshotAt ?? 0);
   const ageMs = Number.isFinite(timestamp) ? Math.max(0, Date.now() - timestamp) : Number.POSITIVE_INFINITY;
@@ -4664,22 +5134,28 @@ Commands:
   klemm dogfood debrief --mission mission-id
   klemm dogfood finish --mission mission-id [--note "work complete"] [--force]
   klemm readiness [--data-dir path] [--skip-health]
+  klemm true-score [--target 60]
   klemm helper install|status|snapshot|permissions
   klemm helper stream start|status|stop --mission mission-id [--process-file ps.txt] [--frontmost-app Codex] [--watch-path src]
   klemm observe status|recommend|attach [--process-file path]
-  klemm adapters list|probe|install|uninstall|doctor [--real] [--home path]
+  klemm observe loop start|tick|status|stop --id observer-id --mission mission-id
+  klemm adapters list|probe|install|uninstall|doctor|health [--real] [--home path]
+  klemm adapters health [--mission mission-id] [--require codex,claude,cursor,shell]
   klemm trust why <decision-id>
+  klemm trust timeline --mission mission-id
   klemm corrections add --decision <id> --preference "..."
   klemm corrections review|approve|reject|promote <correction-id>
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json
   klemm memory import-source --source chatgpt --file export.json
   klemm context import --provider chatgpt|claude|codex|chrome_history|git_history --file export.json
+  klemm memory sources [--coverage]
+  klemm memory evidence <memory-id>
   klemm memory search --query "deploy review"
   klemm memory approve|reject|pin <memory-id> [note]
   klemm memory review [--group-by-source]
   klemm memory promote-policy <memory-id> [--action-types git_push] [--target-includes github]
-  klemm user model [--pending] [--evidence]
+  klemm user model [--pending] [--evidence] [--coverage]
   klemm sync add --id source-id --provider codex --path export.jsonl [--interval-minutes 30]
   klemm sync plan [--id source-id]
   klemm sync run [--id source-id] [--due]

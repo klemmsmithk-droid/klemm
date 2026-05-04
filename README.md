@@ -308,12 +308,17 @@ npm run klemm -- helper stream start --mission mission-codex --frontmost-app Cod
 npm run klemm -- helper stream status --mission mission-codex
 npm run klemm -- observe attach --mission mission-codex --process-file ps-fixture.txt
 npm run klemm -- observe recommend
+npm run klemm -- observe loop start --id observer-codex --mission mission-codex --watch-path ./src --expect-domain coding
+npm run klemm -- observe loop tick --id observer-codex --changed-file src/klemm-cli.js --agent-output "running tests"
+npm run klemm -- observe loop status --id observer-codex
 npm run klemm -- adapters install --all
 npm run klemm -- adapters install --real --all --home "$HOME"
 npm run klemm -- adapters doctor --home "$HOME"
 npm run klemm -- adapters uninstall codex --home "$HOME"
 npm run klemm -- adapters probe claude
+npm run klemm -- adapters health --mission mission-codex --require codex,claude,cursor,shell
 npm run klemm -- trust why <decision-id>
+npm run klemm -- trust timeline --mission mission-codex
 npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
 npm run klemm -- corrections approve <correction-id>
 npm run klemm -- corrections promote <correction-id> --action-types deployment --target-includes production
@@ -325,6 +330,7 @@ npm run klemm -- dogfood start --id mission-klemm --goal "Build Klemm" --plan "U
 npm run klemm -- dogfood day start --id mission-klemm-day --goal "Daily Klemm build" --domains coding,memory --watch-path ./src --memory-source codex-history --policy-pack coding-afk --dry-run -- npm test
 npm run klemm -- dogfood day checkpoint --mission mission-klemm-day
 npm run klemm -- dogfood day finish --mission mission-klemm-day
+npm run klemm -- true-score --target 60
 ```
 
 `macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, Cursor MCP/rules, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
@@ -373,11 +379,13 @@ npm run klemm -- context import --provider chrome_history --file ./History.sqlit
 npm run klemm -- context import --provider git_history --file git.log
 npm run klemm -- memory review --group-by-source
 npm run klemm -- memory promote-policy <memory-id> --action-types deployment --target-includes prod,production
-npm run klemm -- user model --evidence
+npm run klemm -- memory sources --coverage
+npm run klemm -- memory evidence <memory-id>
+npm run klemm -- user model --evidence --coverage
 npm run klemm -- memory search --query "deploy review"
 ```
 
-Imports now record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `user model --evidence` renders an agent-usable summary plus source-backed authority boundaries and recent corrections.
+Imports now record provider-level source records, per-memory evidence, and quarantine counts in addition to distilled memory candidates. `memory sources --coverage` shows provider coverage and user-model depth, `memory evidence <memory-id>` opens the evidence trail, and `user model --evidence --coverage` renders an agent-usable summary plus source-backed authority boundaries and recent corrections.
 
 ## macOS Helper Scaffold
 
@@ -389,7 +397,7 @@ This renders a LaunchAgent plist for a non-privileged Klemm daemon. Installing/l
 
 ## Terminal Dashboard
 
-`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, helper stream health, unresolved queue, memory candidates, recent interventions, and recent events. Focused views are available with `--view overview|memory|workbench|queue|agents|policies|model|logs|trust|evidence`. Use `--view workbench` for grouped memory review, source evidence, correction inbox, approve/reject/pin/promote flows, and source previews. Use `--view trust --decision <decision-id>`, `--view evidence --memory <memory-id>`, `klemm trust why <decision-id>`, or `klemm queue inspect <decision-id>` to drill into risk factors, suggested rewrites, source memories, matched policies, source evidence, correction history, and the decision explanation.
+`klemm tui` renders a lightweight terminal dashboard with mission, hub, active agents, helper stream health, unresolved queue, memory candidates, recent interventions, and recent events. Focused views are available with `--view overview|memory|workbench|queue|agents|policies|model|logs|trust|evidence`. Use `--view workbench` for grouped memory review, source evidence, correction inbox, approve/reject/pin/promote flows, and source previews. Use `--view trust --decision <decision-id>`, `--view evidence --memory <memory-id>`, `klemm trust why <decision-id>`, `klemm trust timeline --mission <mission-id>`, or `klemm queue inspect <decision-id>` to drill into risk factors, suggested rewrites, source memories, matched policies, source evidence, correction history, and the decision explanation.
 
 `klemm tui --interactive` accepts stdin commands:
 
