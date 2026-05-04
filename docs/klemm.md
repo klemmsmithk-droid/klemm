@@ -8,8 +8,10 @@ Klemm is not only an MCP tool. The MCP-style tool surface is an adapter; the loc
 
 ```bash
 npm run klemm -- status
+npm run klemm -- version
+npm run klemm -- install --data-dir ./data --policy-pack coding-afk --agents codex,claude,shell --skip-health
 npm run klemm -- setup --data-dir ./data --codex-dir ./codex-klemm --codex-history ./codex.jsonl --never "Never let agents deploy production without approval." --dry-run-launchctl
-npm run klemm -- onboard --stdin
+npm run klemm -- onboard v2 --stdin
 npm run klemm -- codex hub --id mission-codex --goal "Dogfood Codex supervision"
 npm run klemm -- codex event --mission mission-codex --type command_planned --summary "Codex plans focused tests" --action-id decision-tests --action-type command --target "npm test"
 npm run klemm -- codex context --mission mission-codex
@@ -68,6 +70,11 @@ npm run klemm -- daemon logs --tail 40
 npm run klemm -- daemon status --pid-file ./data/klemm.pid
 npm run klemm -- daemon doctor --pid-file ./data/klemm.pid --repair
 npm run klemm -- install mcp --client codex
+npm run klemm -- completion zsh
+npm run klemm -- profiles template --agent codex
+npm run klemm -- config export --output ./klemm-export.json
+npm run klemm -- config import --input ./klemm-export.json
+npm run klemm -- uninstall --dry-run
 npm run mcp
 ```
 
@@ -87,16 +94,17 @@ Klemm includes a real stdio MCP server. It speaks JSON-RPC 2.0, supports `initia
 
 `klemm codex install` writes a Codex-ready bundle: `/klemm` skill instructions, a Codex MCP config, and a `klemm-codex` wrapper that routes Codex commands through Klemm's watched runtime.
 
-## Setup And Onboarding
+## Install And Onboarding
 
 ```bash
+npm run klemm -- install --data-dir "$HOME/Library/Application Support/Klemm" --policy-pack coding-afk --agents codex,claude,shell
 npm run klemm -- setup --data-dir "$HOME/Library/Application Support/Klemm" --codex-dir "$HOME/.codex/klemm" --codex-history ./codex.jsonl --never "Never let agents push or deploy without approval." --dry-run-launchctl
-npm run klemm -- onboard --stdin
+npm run klemm -- onboard v2 --stdin
 ```
 
-`klemm setup` is the one-command installer path. It writes the LaunchAgent plist, migrates the local store, installs the Codex skill/MCP/wrapper bundle, registers default sync sources, promotes explicit "never" boundaries into memory-backed policies, and prints the launchctl/health plan.
+`klemm install` is the primary installer path. It writes the LaunchAgent plist, migrates the local store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profile templates, applies the selected policy pack, and runs doctor. `klemm setup` remains the lower-level setup path for explicit artifact wiring.
 
-`klemm onboard --stdin` is the first-run terminal wizard surface. It records an authority boundary, a repo/watch path, an optional Codex history source, and a working-style preference; approved answers become reviewed memories and structured policies.
+`klemm onboard v2 --stdin` is the first-run terminal wizard surface. It records the default mode, chat-history source, repo/watch path, agent wrappers to install, and first memory approvals.
 
 ## Agent Runtime Wrapper
 
@@ -229,6 +237,21 @@ npm run klemm -- doctor --pid-file ./data/klemm.pid --log-file ./data/logs/klemm
 
 `klemm doctor` and `klemm daemon doctor` migrate the local store, inspect pid/log/health readiness, record the check in the local store, and can repair stale pid files with `--repair`.
 
+`klemm status` reports daemon transport health and whether the local store fallback is available or active.
+
+## Packaging
+
+Packaging polish commands are intentionally terminal-native:
+
+```bash
+npm run klemm -- version
+npm run klemm -- completion zsh
+npm run klemm -- profiles template --agent codex
+npm run klemm -- config export --output ./klemm-export.json
+npm run klemm -- config import --input ./klemm-export.json
+npm run klemm -- uninstall --dry-run
+```
+
 Local endpoints:
 
 - `GET /api/health`
@@ -303,6 +326,8 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 ## Next Working Surfaces
 
 - `klemm codex hub`: one-command Codex hub dogfooding.
+- `klemm install`: adoption-grade install path for daemon, skill, MCP, wrapper, profiles, policy pack, and doctor.
+- `klemm onboard v2`: first-run mode/source/watch-path/agent-wrapper onboarding.
 - `klemm codex event/context/debrief`: stable Codex adapter packet commands.
 - `klemm codex dogfood/report/run/wrap`: hardened Codex dogfood adapter flow and end-to-end wrapper.
 - `klemm codex install`: Codex-ready skill, MCP config, and wrapper bundle.
@@ -321,6 +346,7 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm supervise --capture`: transcript, exit code, duration, file-change capture, process metadata, and live-intervention details for supervised processes.
 - `klemm supervise --intercept-output`: live streamed-output risk interception and queueing.
 - `klemm doctor`: lifecycle doctor for store migrations, stale pid repair, logs, and daemon health readiness.
+- `klemm status`: daemon-aware status with local store fallback visibility.
 - `klemm daemon health`: lifecycle probe for the local authority daemon.
 - `klemm os snapshot/status/permissions`: public-capability OS observation, unmanaged-agent detection, and permission status reporting.
 - `klemm supervise --watch` and `klemm monitor status/evaluate`: continuous agent activity monitoring and alignment interventions.
@@ -329,6 +355,7 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `record_adapter_envelope`: normalized adapter protocol entrypoint for plans, tool calls, diffs, uncertainty, and subagents.
 - `src/klemm-adapter-sdk.js`: embeddable HTTP/MCP adapter transport with retries and protocol negotiation.
 - `klemm policy add/pack`: structured policy v2 plus prebuilt policy packs.
+- `klemm completion/version/config/profiles/uninstall`: packaging polish for shell use, profile templates, config portability, and cleanup.
 - `klemm helper launch-agent`: non-privileged macOS LaunchAgent scaffold.
 
 ## Safety Model

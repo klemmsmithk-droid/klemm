@@ -11,20 +11,32 @@ Klemm is the user's local personal authority layer. Codex is only a temporary hu
 
 When the user invokes `/klemm supervise this session` or equivalent:
 
-1. Register Codex as the current hub with Klemm.
-2. Start a mission lease that captures the user's current goal, allowed actions, blocked actions, whether rewrites are allowed, and the escalation channel.
-3. Register any Codex subagents under the same mission before they begin work.
-4. Keep a debrief trail of decisions, blocked actions, rewrites, and queued user questions.
+Use the wrapper-first flow. Prefer `klemm codex wrap` or the installed `klemm-codex` wrapper as the default path, because it starts the mission, registers Codex, reports the plan, preflights commands, routes allowed work through supervision, and emits the final debrief.
+
+Session start checklist:
+
+1. Run `klemm status` and prefer the daemon transport when it is healthy.
+2. Start with `klemm codex wrap --id <mission-id> --goal "<goal>" --plan "<plan>" --dry-run -- <first-command>` when the first command needs preflight, or `klemm codex dogfood` when only opening the hub mission.
+3. Fetch `klemm codex context --mission <mission-id>` before making decisions.
+4. Register subagents before they begin work.
+5. Use `klemm queue inspect <decision-id>` for any queued or rewritten action.
+
+Session finish checklist:
+
+1. Report final diffs/tool outcomes through `klemm codex report`.
+2. Run `klemm codex debrief --mission <mission-id>`.
+3. Inspect unresolved queue items with `klemm queue` and `klemm queue inspect`.
+4. Leave the user with what was allowed, blocked, queued, rewritten, and still unresolved.
 
 Use the Klemm local CLI or MCP-style tools when available:
 
 ```text
-klemm setup --data-dir ./data --codex-dir ./codex-klemm --codex-history ./codex.jsonl --never "Never let agents push or deploy without approval." --dry-run-launchctl
-klemm onboard --stdin
+klemm install --data-dir ./data --policy-pack coding-afk --agents codex,claude,shell --skip-health
+klemm onboard v2 --stdin
 klemm codex hub --id <mission-id> --goal "<goal>"
 ```
 
-Use `klemm setup` for first install: it writes the daemon plist, migrates the store, installs Codex integration, registers sync sources, promotes explicit boundaries, and prints the health/launchctl plan. Use `klemm onboard --stdin` for first-run preference capture.
+Use `klemm install` for first install: it writes the daemon plist, migrates the store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profiles, applies a policy pack, and runs doctor. Use `klemm onboard v2 --stdin` for first-run mode/source/watch-path/agent-wrapper capture and first memory approvals.
 
 ## Authority Checks
 
@@ -199,6 +211,9 @@ klemm daemon logs --tail 40
 klemm daemon health --url http://127.0.0.1:8765
 klemm daemon status --pid-file ./data/klemm.pid
 klemm doctor --pid-file ./data/klemm.pid --log-file ./data/logs/klemm-daemon.log --repair
+klemm config export --output ./klemm-export.json
+klemm completion zsh
+klemm profiles template --agent codex
 node --no-warnings src/klemm-mcp-server.js
 klemm install mcp --client codex
 ```

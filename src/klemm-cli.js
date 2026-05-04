@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, openSync } from "node:fs";
 import { dirname } from "node:path";
-import { chmod, copyFile, mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 import {
@@ -106,7 +106,8 @@ async function main() {
   const command = args[0] ?? "status";
 
   try {
-    if (command === "status") return printStatus();
+    if (command === "status") return await printStatus();
+    if (command === "version") return await printVersion();
     if (command === "codex" && args[1] === "hub") return startCodexHubFromCli(args.slice(2));
     if (command === "codex" && args[1] === "event") return recordCodexEventFromCli(args.slice(2));
     if (command === "codex" && args[1] === "context") return printCodexContext(args.slice(2));
@@ -117,6 +118,7 @@ async function main() {
     if (command === "codex" && args[1] === "wrap") return await wrapCodexSessionFromCli(args.slice(2));
     if (command === "codex" && args[1] === "install") return await installCodexIntegrationFromCli(args.slice(2));
     if (command === "setup") return await setupKlemmFromCli(args.slice(1));
+    if (command === "install" && args[1] !== "mcp") return await installKlemmFromCli(args.slice(1));
     if (command === "mission" && args[1] === "start") return startMissionFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
@@ -142,6 +144,7 @@ async function main() {
     if (command === "sync" && args[1] === "plan") return printContextSyncPlan(args.slice(2));
     if (command === "sync" && args[1] === "run") return await runContextSyncFromCli(args.slice(2));
     if (command === "sync" && args[1] === "status") return printSyncStatus(args.slice(2));
+    if (command === "onboard" && args[1] === "v2") return await onboardV2FromCli(args.slice(2));
     if (command === "onboard") return await onboardFromCli(args.slice(1));
     if (command === "debrief") return printDebrief(args.slice(1));
     if (command === "tui") return await printTui(args.slice(1));
@@ -157,6 +160,11 @@ async function main() {
     if (command === "helper" && args[1] === "launch-agent") return renderLaunchAgentFromCli(args.slice(2));
     if (command === "mcp" && args[1] === "stdio") return printMcpCommand();
     if (command === "install" && args[1] === "mcp") return await installMcpFromCli(args.slice(2));
+    if (command === "completion") return printCompletion(args.slice(1));
+    if (command === "profiles" && args[1] === "template") return printProfileTemplate(args.slice(2));
+    if (command === "config" && args[1] === "export") return await exportConfigFromCli(args.slice(2));
+    if (command === "config" && args[1] === "import") return await importConfigFromCli(args.slice(2));
+    if (command === "uninstall") return await uninstallFromCli(args.slice(1));
     if (command === "os" && args[1] === "snapshot") return await recordOsSnapshotFromCli(args.slice(2));
     if (command === "os" && args[1] === "status") return printOsStatus(args.slice(2));
     if (command === "os" && args[1] === "permissions") return printOsPermissions();
@@ -329,6 +337,48 @@ async function installCodexIntegrationFromCli(args) {
   console.log(`Wrapper: ${wrapperPath}`);
 }
 
+async function installKlemmFromCli(args) {
+  const flags = parseFlags(args);
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const codexDir = flags.codexDir ?? join(dataDir, "codex-integration");
+  const profilesPath = flags.profiles ?? join(dataDir, "profiles", "default-profiles.json");
+  const plistPath = flags.plist ?? join(dataDir, "com.klemm.daemon.plist");
+  const policyPack = flags.policyPack ?? "coding-afk";
+  const agents = normalizeListFlag(flags.agents || "codex,claude,shell");
+  const pidFile = flags.pidFile ?? join(dataDir, "klemm.pid");
+  const logFile = flags.logFile ?? join(dataDir, "logs", "klemm-daemon.log");
+
+  console.log("Klemm install");
+  await installDaemonFromCli(["--output", plistPath, "--data-dir", dataDir, "--pid-file", pidFile, "--log-file", logFile]);
+  migrateDaemonStoreFromCli();
+  await installCodexIntegrationFromCli(["--output-dir", codexDir, "--data-dir", dataDir]);
+  await writeDefaultProfiles(profilesPath, { agents, dataDir });
+  console.log(`Default profiles: ${profilesPath}`);
+  policyPackFromCli(["apply", policyPack]);
+  await doctorFromCli(["--data-dir", dataDir, "--pid-file", pidFile, "--log-file", logFile, ...(flags.skipHealth ? ["--skip-health"] : [])]);
+
+  store.update((state) => ({
+    ...state,
+    installs: [
+      {
+        id: `install-${Date.now()}`,
+        dataDir,
+        codexDir,
+        profilesPath,
+        plistPath,
+        policyPack,
+        agents,
+        createdAt: new Date().toISOString(),
+      },
+      ...(state.installs ?? []),
+    ],
+  }));
+
+  console.log("Klemm install complete");
+  console.log(`Daemon plist: ${plistPath}`);
+  console.log(`Codex wrapper: ${join(codexDir, "bin", "klemm-codex")}`);
+}
+
 async function setupKlemmFromCli(args) {
   const flags = parseFlags(args);
   const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
@@ -468,9 +518,11 @@ async function doctorFromCli(args) {
     try {
       const response = await fetch(`${String(url).replace(/\/$/, "")}/api/health`);
       checks.push({ name: "Health", status: response.ok ? "ok" : `http_${response.status}`, detail: url });
+      checks.push({ name: "Daemon transport", status: response.ok ? "ok" : "unavailable", detail: url });
       if (!response.ok) exitCode = 1;
     } catch (error) {
       checks.push({ name: "Health", status: "unreachable", detail: error.message });
+      checks.push({ name: "Daemon transport", status: "unavailable", detail: url });
       exitCode = 1;
     }
   }
@@ -702,10 +754,13 @@ async function printDaemonProcessStatus(args) {
   }
 }
 
-function printStatus() {
+async function printStatus() {
   const state = store.getState();
   const status = getKlemmStatus(state);
+  const daemon = await probeDaemonHealth(process.env.KLEMM_DAEMON_URL);
   console.log("Klemm status");
+  console.log(`Daemon transport: ${daemon.ok ? "ok" : "unavailable"}`);
+  console.log(`Store fallback: ${daemon.ok ? "available" : "active"}`);
   console.log(`Active missions: ${status.activeMissionCount}`);
   console.log(`Active agents: ${status.activeAgentCount}`);
   console.log(`Queued decisions: ${status.queuedCount}`);
@@ -1300,6 +1355,64 @@ async function onboardFromCli(args) {
   console.log("Onboarding complete");
 }
 
+async function onboardV2FromCli(args) {
+  const flags = parseFlags(args);
+  if (!flags.stdin) {
+    console.log("Klemm onboarding v2");
+    console.log("Run with --stdin. Prompts: mode, chat history path, watch path, agents, approve yes/no.");
+    return;
+  }
+  const answers = (await readStdin()).split(/\r?\n/).map((line) => line.trim());
+  const [mode = "coding-afk", chatHistoryPath, watchPath, agentsText = "codex", approveAnswer] = answers;
+  const agents = normalizeListFlag(agentsText);
+  const approve = /^y(es)?$/i.test(approveAnswer ?? "");
+
+  console.log("Klemm onboarding v2");
+  console.log(`Default mode: ${mode}`);
+  policyPackFromCli(["apply", mode]);
+
+  if (chatHistoryPath) {
+    addSyncSourceFromCli(["--id", "chatgpt-history", "--provider", "chatgpt", "--path", chatHistoryPath]);
+    await importContextSourceFromCli(["--provider", "chatgpt", "--file", chatHistoryPath]);
+  }
+  if (watchPath) {
+    recordWatchPath(watchPath, { kind: "repo" });
+    console.log(`Watch path added: ${watchPath}`);
+  }
+
+  const profilesPath = flags.profiles ?? join(KLEMM_DATA_DIR, "profiles", "default-profiles.json");
+  await writeDefaultProfiles(profilesPath, { agents, dataDir: KLEMM_DATA_DIR });
+  console.log(`Agent wrappers: ${agents.join(",")}`);
+  console.log(`Default profiles: ${profilesPath}`);
+
+  let approvedCount = 0;
+  if (approve) {
+    const pending = store.getState().memories.filter((memory) => memory.status === "pending_review").slice(0, Number(flags.approveLimit ?? 5));
+    for (const memory of pending) {
+      store.update((state) => reviewMemory(state, { memoryId: memory.id, status: "approved", note: "Approved during onboarding v2." }));
+      approvedCount += 1;
+    }
+  }
+  console.log(`Approved first memory candidates: ${approvedCount}`);
+
+  store.update((state) => ({
+    ...state,
+    onboardingProfiles: [
+      {
+        id: `onboarding-v2-${Date.now()}`,
+        mode,
+        chatHistoryPath,
+        watchPath,
+        agents,
+        approvedFirstCandidates: approvedCount,
+        createdAt: new Date().toISOString(),
+      },
+      ...(state.onboardingProfiles ?? []),
+    ],
+  }));
+  console.log("Klemm onboarding v2 complete");
+}
+
 async function runContextSyncFromCli(args) {
   const flags = parseFlags(args);
   const state = store.getState();
@@ -1725,6 +1838,52 @@ async function loadRuntimeProfile(profileName, profileFile) {
     }
   }
   return profiles[profileName];
+}
+
+async function writeDefaultProfiles(profilesPath, { agents = ["codex", "claude", "shell"], dataDir = KLEMM_DATA_DIR } = {}) {
+  await mkdir(dirname(profilesPath), { recursive: true });
+  const profiles = {};
+  for (const agent of agents) {
+    profiles[agent] = buildProfileTemplate(agent, { dataDir });
+  }
+  await writeFile(profilesPath, `${JSON.stringify({ profiles }, null, 2)}\n`, "utf8");
+  return profilesPath;
+}
+
+function buildProfileTemplate(agent = "codex", { dataDir = KLEMM_DATA_DIR } = {}) {
+  const normalized = String(agent ?? "codex").toLowerCase();
+  if (normalized === "claude") {
+    return {
+      extends: "claude",
+      agentId: "agent-runtime-claude",
+      name: "Claude Code",
+      defaultMission: { id: "mission-claude-afk", goal: "Supervise Claude Code while the user is away.", blockedActions: ["git_push", "deployment", "external_send"] },
+      adapterClientId: "claude-local",
+      adapterToken: "${KLEMM_ADAPTER_TOKEN}",
+      protocolVersions: [2],
+      env: { KLEMM_PROFILE_NAME: "claude", KLEMM_DATA_DIR: dataDir },
+    };
+  }
+  if (normalized === "shell") {
+    return {
+      extends: "shell",
+      agentId: "agent-runtime-shell",
+      name: "Shell Agent",
+      command: [],
+      defaultMission: { id: "mission-shell-afk", goal: "Supervise shell agent work while the user is away.", blockedActions: ["git_push", "deployment", "external_send"] },
+      env: { KLEMM_PROFILE_NAME: "shell", KLEMM_DATA_DIR: dataDir },
+    };
+  }
+  return {
+    extends: "codex",
+    agentId: "agent-runtime-codex",
+    name: "Codex",
+    defaultMission: { id: "mission-codex-afk", goal: "Supervise Codex while the user is away.", blockedActions: ["git_push", "deployment", "external_send", "credential_change"] },
+    adapterClientId: "codex-local",
+    adapterToken: "${KLEMM_ADAPTER_TOKEN}",
+    protocolVersions: [2],
+    env: { KLEMM_PROFILE_NAME: "codex", KLEMM_DATA_DIR: dataDir },
+  };
 }
 
 function buildRuntimeEnv(profile = {}) {
@@ -2211,6 +2370,100 @@ async function installMcpFromCli(args) {
   console.log(rendered);
 }
 
+async function printVersion() {
+  let version = "0.1.0";
+  try {
+    const pkg = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8"));
+    version = pkg.version ?? version;
+  } catch {
+    // Keep the embedded fallback for installed single-file usage.
+  }
+  console.log(`Klemm version: ${version}`);
+}
+
+function printCompletion(args) {
+  const shell = args[0] ?? "zsh";
+  if (shell !== "zsh") throw new Error("Usage: klemm completion zsh");
+  console.log(`#compdef klemm
+_klemm() {
+  local -a commands
+  commands=(
+    'status:Show daemon and local store status'
+    'install:Install Klemm daemon, Codex wrapper, profiles, and policies'
+    'codex wrap:Run a wrapped Codex dogfood session'
+    'queue inspect:Inspect a queued authority decision'
+    'policy pack:List or apply built-in policy packs'
+    'profiles template:Print a runtime profile template'
+    'config export:Export local Klemm configuration'
+    'config import:Import local Klemm configuration'
+    'uninstall:Remove Klemm local artifacts'
+  )
+  _describe 'klemm command' commands
+}
+_klemm`);
+}
+
+function printProfileTemplate(args) {
+  const flags = parseFlags(args);
+  const agent = flags.agent ?? args[0] ?? "codex";
+  console.log(JSON.stringify({ profiles: { [agent]: buildProfileTemplate(agent) } }, null, 2));
+}
+
+async function exportConfigFromCli(args) {
+  const flags = parseFlags(args);
+  const output = flags.output;
+  if (!output) throw new Error("Usage: klemm config export --output <path>");
+  const profilesPath = flags.profiles ?? join(KLEMM_DATA_DIR, "profiles", "default-profiles.json");
+  let profiles = null;
+  try {
+    profiles = JSON.parse(await readFile(profilesPath, "utf8"));
+  } catch {
+    profiles = null;
+  }
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    version: "config-v1",
+    state: store.getState(),
+    profiles,
+  };
+  await writeFile(output, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  console.log(`Config exported: ${output}`);
+}
+
+async function importConfigFromCli(args) {
+  const flags = parseFlags(args);
+  const input = flags.input;
+  if (!input) throw new Error("Usage: klemm config import --input <path>");
+  const payload = JSON.parse(await readFile(input, "utf8"));
+  store.saveState(payload.state ?? payload);
+  if (payload.profiles) {
+    const profilesPath = flags.profiles ?? join(KLEMM_DATA_DIR, "profiles", "default-profiles.json");
+    await mkdir(dirname(profilesPath), { recursive: true });
+    await writeFile(profilesPath, `${JSON.stringify(payload.profiles, null, 2)}\n`, "utf8");
+  }
+  console.log(`Config imported: ${input}`);
+}
+
+async function uninstallFromCli(args) {
+  const flags = parseFlags(args);
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const targets = [
+    join(dataDir, "com.klemm.daemon.plist"),
+    join(dataDir, "codex-integration"),
+    join(dataDir, "profiles"),
+    join(dataDir, "klemm.pid"),
+  ];
+  if (flags.dryRun) {
+    console.log("Klemm uninstall dry run");
+    for (const target of targets) console.log(`Would remove: ${target}`);
+    return;
+  }
+  for (const target of targets) {
+    await rm(target, { recursive: true, force: true });
+  }
+  console.log("Klemm uninstalled");
+}
+
 function buildMcpClientConfig({ client, dataDir } = {}) {
   const serverPath = join(dirname(new URL(import.meta.url).pathname), "klemm-mcp-server.js");
   const base = {
@@ -2267,6 +2520,19 @@ function isProcessRunning(pid) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function probeDaemonHealth(url = process.env.KLEMM_DAEMON_URL) {
+  const target = url ?? `http://127.0.0.1:${process.env.KLEMM_PORT ?? 8765}`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 250);
+    const response = await fetch(`${String(target).replace(/\/$/, "")}/api/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+    return { ok: response.ok, url: target };
+  } catch (error) {
+    return { ok: false, url: target, error: error.message };
   }
 }
 
@@ -2446,8 +2712,10 @@ function printHelp() {
 Klemm CLI
 
 Commands:
+  klemm install [--data-dir path] [--policy-pack coding-afk] [--agents codex,claude,shell]
   klemm setup [--data-dir path] [--codex-dir path] [--codex-history path] [--never "..."] [--dry-run-launchctl]
   klemm status
+  klemm version
   klemm codex hub --goal "..." [--id mission-codex]
   klemm codex event --mission mission-id --type command_planned --summary "..." --action-id decision-id --action-type command --target "npm test"
   klemm codex context --mission mission-id
@@ -2479,6 +2747,7 @@ Commands:
   klemm sync run [--id source-id] [--due]
   klemm sync status
   klemm onboard --stdin
+  klemm onboard v2 --stdin
   klemm debrief [--mission mission-id]
   klemm tui [--mission mission-id] [--view overview|memory|queue|agents|policies|model|logs|trust] [--decision decision-id] [--interactive]
   klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
@@ -2493,6 +2762,11 @@ Commands:
   klemm helper launch-agent [--program /usr/local/bin/klemm] [--data-dir path]
   klemm mcp stdio
   klemm install mcp --client codex|claude-desktop|generic [--output path]
+  klemm completion zsh
+  klemm profiles template [--agent codex]
+  klemm config export --output path
+  klemm config import --input path
+  klemm uninstall [--data-dir path] [--dry-run]
   klemm os snapshot [--mission mission-id] [--process-file fixture.txt]
   klemm os status [--mission mission-id]
   klemm os permissions
