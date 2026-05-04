@@ -25,6 +25,11 @@ npm run klemm -- mission start --id mission-codex --hub codex --goal "Build Klem
 npm run klemm -- mission current
 npm run klemm -- mission list
 npm run klemm -- mission finish mission-codex "work complete"
+npm run klemm -- goal start --id goal-importer --text "Refactor importer tests" --success "focused and full tests pass" --budget-turns 6 --watch-path src --watch-path test
+npm run klemm -- goal attach --id goal-importer --agent agent-claude-importer --kind claude_agent --command "claude"
+npm run klemm -- goal tick --id goal-importer --agent agent-claude-importer --summary "Updated importer test coverage" --changed-file test/importer.test.js --evidence "focused suite passed"
+npm run klemm -- goal status --id goal-importer
+npm run klemm -- goal debrief --id goal-importer
 npm run klemm -- agent register --id agent-codex --mission mission-codex --name Codex --kind coding_agent
 npm run klemm -- event record --mission mission-codex --agent agent-codex --type command_planned --summary "Codex plans a test run" --action-id decision-tests --action-type command --target "npm test"
 npm run klemm -- propose --id decision-push --mission mission-codex --actor Codex --type git_push --target "origin main" --external publishes_code
@@ -55,6 +60,7 @@ npm run klemm -- debrief --mission mission-codex
 npm run klemm -- run codex --mission mission-codex --dry-run -- --ask-for-approval on-request
 npm run klemm -- run localcodex --profile-file ./klemm-profiles.json --capture
 npm run klemm -- run shell --mission mission-codex -- node -e "console.log('safe local work')"
+npm run klemm -- run shell --goal goal-importer --dry-run -- node -e "console.log('goal-scoped work')"
 npm run klemm -- supervise --watch --intercept-output --mission mission-codex -- npm test
 npm run klemm -- monitor status --mission mission-codex
 npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
@@ -122,6 +128,7 @@ npm run klemm -- run codex --mission mission-codex --dry-run -- --ask-for-approv
 npm run klemm -- run claude --mission mission-codex --dry-run -- --dangerously-skip-permissions false
 npm run klemm -- run localcodex --profile-file ./klemm-profiles.json --capture
 npm run klemm -- run shell --mission mission-codex -- node -e "console.log('safe local work')"
+npm run klemm -- run shell --goal goal-importer --dry-run -- node -e "console.log('goal-scoped work')"
 npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe local work')"
 ```
 
@@ -130,6 +137,23 @@ npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe
 `klemm supervise` remains the lower-level process wrapper for direct commands. Both surfaces classify commands before launch. High-risk commands are queued before execution. Safe rewrites can replace a broad reversible command with a narrower command.
 
 `klemm codex wrap` is the dogfood wrapper installed as `klemm-codex`. It starts a Codex hub mission, registers Codex, creates a `codex-session-*` contract, injects `KLEMM_MISSION_ID`, `KLEMM_AGENT_ID`, and Codex helper commands into the child environment, reports session start/plan/session finish/debrief envelopes, preflights the wrapped command through Klemm authority, captures allowed work through supervised execution, and queues risky launches before execution.
+
+## Klemm Goals
+
+Klemm Goals are the cross-agent version of Codex `/goal`: a durable objective that non-Codex agents can attach to, update, and be judged against while Klemm remains the authority layer. A goal creates a backing mission lease, records attached Codex/Claude/Cursor/shell/MCP agents, stores progress ticks, tracks evidence, and raises review hints when the work drifts into risky or out-of-scope territory.
+
+```bash
+npm run klemm -- goal start --id goal-importer --text "Refactor importer tests" --success "focused and full tests pass" --budget-turns 6 --watch-path src --watch-path test
+npm run klemm -- goal attach --id goal-importer --agent agent-claude-importer --kind claude_agent --command "claude"
+npm run klemm -- run shell --goal goal-importer --dry-run -- node -e "console.log('goal-scoped work')"
+npm run klemm -- goal tick --id goal-importer --agent agent-claude-importer --summary "Updated importer test coverage" --changed-file test/importer.test.js --evidence "focused suite passed"
+npm run klemm -- goal status --id goal-importer
+npm run klemm -- trust timeline --goal goal-importer
+npm run klemm -- goal complete --id goal-importer --evidence "focused and full tests pass"
+npm run klemm -- goal debrief --id goal-importer
+```
+
+Use goals when Codex is not the only active surface: Claude Code hooks, Cursor, shell agents, browser agents, or MCP agents can all report into the same objective. `goal tick` is the compact checkpoint surface: it says what changed, which agent acted, what evidence exists, and whether Klemm thinks the work is still aligned. Risk hints are recorded into observation and trust timelines so a later debrief can answer what happened and why.
 
 ## Continuous Agent Monitor
 

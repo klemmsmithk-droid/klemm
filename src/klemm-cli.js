@@ -124,6 +124,16 @@ async function main() {
     if (command === "mission" && args[1] === "list") return listMissionsFromCli();
     if (command === "mission" && args[1] === "current") return printCurrentMissionFromCli();
     if (command === "mission" && args[1] === "finish") return finishMissionFromCli(args.slice(2));
+    if (command === "goal" && args[1] === "start") return startGoalFromCli(args.slice(2));
+    if (command === "goal" && args[1] === "attach") return attachGoalFromCli(args.slice(2));
+    if (command === "goal" && args[1] === "tick") return tickGoalFromCli(args.slice(2));
+    if (command === "goal" && args[1] === "status") return statusGoalFromCli(args.slice(2));
+    if (command === "goal" && args[1] === "pause") return setGoalStatusFromCli(args.slice(2), "paused");
+    if (command === "goal" && args[1] === "resume") return setGoalStatusFromCli(args.slice(2), "active");
+    if (command === "goal" && args[1] === "complete") return completeGoalFromCli(args.slice(2));
+    if (command === "goal" && args[1] === "clear") return setGoalStatusFromCli(args.slice(2), "cleared");
+    if (command === "goal" && args[1] === "debrief") return debriefGoalFromCli(args.slice(2));
+    if (command === "goal" && (args[1] === "list" || !args[1])) return listGoalsFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
     if (command === "agents") return printAgents();
@@ -929,6 +939,12 @@ function trueScoreFromCli(args) {
 function buildTrueFinalProductScore(state) {
   const coverage = buildUserModelCoverage(state);
   const gates = [
+    {
+      id: "cross_agent_goals",
+      weight: 8,
+      pass: (state.goals ?? []).some((goal) => (goal.attachedAgents ?? []).length > 0 && (goal.ticks ?? []).length > 0),
+      detail: `goals=${(state.goals ?? []).length}`,
+    },
     {
       id: "dogfood_daily_loop",
       weight: 8,
@@ -1919,8 +1935,9 @@ function trustWhyFromCli(args) {
 
 function trustTimelineFromCli(args) {
   const flags = parseFlags(args);
-  const missionId = flags.mission;
   const state = store.getState();
+  const goal = flags.goal ? findGoal(state, flags.goal) : null;
+  const missionId = goal?.missionId ?? flags.mission;
   const events = (state.observationEvents ?? []).filter((event) => !missionId || event.missionId === missionId);
   const decisions = (state.decisions ?? []).filter((decision) => !missionId || decision.missionId === missionId);
   const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
@@ -1931,6 +1948,7 @@ function trustTimelineFromCli(args) {
     ...activities.map((activity) => ({ at: activity.createdAt, kind: `activity_${activity.type}`, text: activity.summary ?? activity.target ?? "" })),
   ].sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? ""))).slice(0, 20);
   console.log("Trust timeline");
+  if (goal) console.log(`Goal: ${goal.id}`);
   console.log(`Mission: ${missionId ?? "all"}`);
   console.log(`Observer loops: ${loops.length}`);
   console.log("What Klemm thinks changed:");
@@ -2554,6 +2572,329 @@ function finishMissionLocal(missionId, note = "") {
     };
   });
   return finished;
+}
+
+function startGoalFromCli(args) {
+  const flags = parseFlags(args);
+  const id = flags.id ?? `goal-${Date.now()}`;
+  const objective = flags.text ?? flags.objective ?? args.filter((item) => !item.startsWith("--")).join(" ");
+  if (!objective) throw new Error("Usage: klemm goal start --id <goal-id> --text <objective>");
+  const now = new Date().toISOString();
+  const missionId = flags.mission ?? `mission-${id}`;
+  const watchPaths = collectRepeatedFlag(args, "--watch-path");
+  const goal = {
+    id,
+    objective,
+    successCriteria: flags.success ?? "",
+    missionId,
+    status: "active",
+    budgetTurns: Number(flags.budgetTurns ?? 8),
+    watchPaths,
+    attachedAgents: [],
+    ticks: [],
+    evidence: [],
+    riskHints: [],
+    createdAt: now,
+  };
+  const next = store.update((state) => {
+    const missionState = startMission(state, {
+      id: missionId,
+      hub: "klemm_goal",
+      goal: objective,
+      blockedActions: ["external_send", "credential_change", "oauth_scope_change", "git_push", "delete_data", "financial_action", "legal_action", "reputation_action", "deployment"],
+      escalationChannel: "klemm_goal_queue",
+      now,
+    });
+    return {
+      ...missionState,
+      goals: [goal, ...(missionState.goals ?? []).filter((item) => item.id !== id)],
+      observationEvents: [
+        {
+          id: `observation-event-${Date.now()}-goal-start`,
+          type: "goal_started",
+          missionId,
+          goalId: id,
+          summary: objective,
+          createdAt: now,
+        },
+        ...(missionState.observationEvents ?? []),
+      ],
+    };
+  });
+  const saved = next.goals.find((item) => item.id === id);
+  console.log(`Klemm goal started: ${saved.id}`);
+  console.log(`Objective: ${saved.objective}`);
+  console.log(`Success: ${saved.successCriteria || "not specified"}`);
+  console.log(`Mission lease: ${saved.missionId}`);
+  console.log(`Status: ${saved.status}`);
+}
+
+function attachGoalFromCli(args) {
+  const flags = parseFlags(args);
+  const goalId = flags.id ?? flags.goal ?? args[0];
+  if (!goalId || !flags.agent) throw new Error("Usage: klemm goal attach --id <goal-id> --agent <agent-id> [--command command]");
+  const now = new Date().toISOString();
+  let attached;
+  const next = store.update((state) => {
+    const goal = findGoal(state, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const withAgent = registerAgent(state, {
+      id: flags.agent,
+      missionId: goal.missionId,
+      name: flags.name ?? flags.agent,
+      kind: flags.kind ?? "agent",
+      command: flags.command ?? "",
+      now,
+    });
+    const agentRecord = withAgent.agents.find((item) => item.id === flags.agent);
+    attached = {
+      agentId: flags.agent,
+      kind: flags.kind ?? agentRecord?.kind ?? "agent",
+      command: flags.command ?? "",
+      attachedAt: now,
+    };
+    return {
+      ...withAgent,
+      goals: (withAgent.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              attachedAgents: [
+                attached,
+                ...(item.attachedAgents ?? []).filter((agent) => agent.agentId !== flags.agent),
+              ],
+            }
+          : item,
+      ),
+      observationEvents: [
+        {
+          id: `observation-event-${Date.now()}-goal-agent`,
+          type: "goal_agent_attached",
+          missionId: goal.missionId,
+          goalId: goal.id,
+          agentId: flags.agent,
+          summary: `${flags.agent} attached to ${goal.id}`,
+          createdAt: now,
+        },
+        ...(withAgent.observationEvents ?? []),
+      ],
+    };
+  });
+  const goal = next.goals.find((item) => item.id === goalId);
+  console.log(`Agent attached to goal: ${attached.agentId}`);
+  console.log(`Goal: ${goal.id}`);
+  console.log(`Mission: ${goal.missionId}`);
+  console.log(`Command: ${attached.command || "none"}`);
+}
+
+function tickGoalFromCli(args) {
+  const flags = parseFlags(args);
+  const goalId = flags.id ?? flags.goal ?? args[0];
+  if (!goalId) throw new Error("Usage: klemm goal tick --id <goal-id> --summary <summary>");
+  const now = new Date().toISOString();
+  const changedFiles = collectRepeatedFlag(args, "--changed-file");
+  let savedTick;
+  const next = store.update((state) => {
+    const goal = findGoal(state, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    const assessment = assessGoalTick(goal, {
+      summary: flags.summary,
+      agentOutput: flags.agentOutput,
+      changedFiles,
+    });
+    const tick = {
+      id: `goal-tick-${Date.now()}`,
+      at: now,
+      agentId: flags.agent ?? "unknown_agent",
+      summary: flags.summary ?? "Goal tick recorded.",
+      changedFiles,
+      evidence: flags.evidence ? [flags.evidence] : [],
+      alignment: assessment.alignment,
+      riskHints: assessment.riskHints,
+    };
+    savedTick = tick;
+    const events = [
+      {
+        id: `observation-event-${Date.now()}-goal-tick`,
+        type: "goal_tick",
+        missionId: goal.missionId,
+        goalId: goal.id,
+        agentId: tick.agentId,
+        summary: tick.summary,
+        createdAt: now,
+      },
+      ...assessment.riskHints.map((hint, index) => ({
+        id: `observation-event-${Date.now()}-goal-risk-${index}`,
+        type: "risk_hint",
+        missionId: goal.missionId,
+        goalId: goal.id,
+        agentId: tick.agentId,
+        summary: hint,
+        createdAt: now,
+      })),
+    ];
+    const withActivity = recordAgentActivity(state, {
+      missionId: goal.missionId,
+      agentId: tick.agentId,
+      type: "goal_tick",
+      summary: tick.summary,
+      target: changedFiles.join(","),
+      evidence: { goalId: goal.id, riskHints: tick.riskHints, evidence: tick.evidence },
+      now,
+    });
+    return {
+      ...withActivity,
+      goals: (withActivity.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              ticks: [tick, ...(item.ticks ?? [])],
+              evidence: [...tick.evidence, ...(item.evidence ?? [])],
+              riskHints: [...assessment.riskHints, ...(item.riskHints ?? [])],
+              lastTickAt: now,
+              latestAlignment: assessment.alignment,
+            }
+          : item,
+      ),
+      observationEvents: [...events, ...(withActivity.observationEvents ?? [])],
+    };
+  });
+  const goal = next.goals.find((item) => item.id === goalId);
+  console.log(`Goal tick recorded: ${savedTick.id}`);
+  console.log(`Goal: ${goal.id}`);
+  console.log(`alignment=${savedTick.alignment}`);
+  console.log(`progress=${(goal.ticks ?? []).length}/${goal.budgetTurns}`);
+  if (savedTick.riskHints.length) console.log(`risk_hint=${savedTick.riskHints.join("; ")}`);
+}
+
+function statusGoalFromCli(args) {
+  const flags = parseFlags(args);
+  const goal = findGoal(store.getState(), flags.id ?? flags.goal ?? args[0]);
+  if (!goal) throw new Error("Usage: klemm goal status --id <goal-id>");
+  console.log("Klemm goal status");
+  console.log(`Goal: ${goal.id}`);
+  console.log(`Status: ${goal.status}`);
+  console.log(`Objective: ${goal.objective}`);
+  console.log(`Success: ${goal.successCriteria || "not specified"}`);
+  console.log(`Mission: ${goal.missionId}`);
+  console.log(`Attached agents: ${(goal.attachedAgents ?? []).length}`);
+  console.log(`Ticks: ${(goal.ticks ?? []).length}`);
+  console.log(`Latest alignment: ${goal.latestAlignment ?? goal.ticks?.[0]?.alignment ?? "none"}`);
+  console.log(`Evidence: ${(goal.evidence ?? []).length}`);
+  console.log(`Next: ${goal.status === "active" ? `klemm goal tick --id ${goal.id} --summary "..."` : `klemm goal resume --id ${goal.id}`}`);
+}
+
+function listGoalsFromCli() {
+  const goals = store.getState().goals ?? [];
+  console.log("Klemm goals");
+  if (goals.length === 0) {
+    console.log("- none");
+    return;
+  }
+  for (const goal of goals) console.log(`- ${goal.id} ${goal.status} mission=${goal.missionId}: ${goal.objective}`);
+}
+
+function setGoalStatusFromCli(args, status) {
+  const flags = parseFlags(args);
+  const goalId = flags.id ?? flags.goal ?? args[0];
+  if (!goalId) throw new Error(`Usage: klemm goal ${status} --id <goal-id>`);
+  const now = new Date().toISOString();
+  const next = store.update((state) => {
+    const goal = findGoal(state, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    return {
+      ...state,
+      goals: (state.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              status,
+              [`${status}At`]: now,
+              pauseReason: status === "paused" ? flags.reason ?? "" : item.pauseReason,
+            }
+          : item,
+      ),
+      observationEvents: [
+        {
+          id: `observation-event-${Date.now()}-goal-${status}`,
+          type: `goal_${status}`,
+          missionId: goal.missionId,
+          goalId: goal.id,
+          summary: flags.reason ?? status,
+          createdAt: now,
+        },
+        ...(state.observationEvents ?? []),
+      ],
+    };
+  });
+  const goal = next.goals.find((item) => item.id === goalId);
+  const label = status === "active" ? "resumed" : status;
+  console.log(`Goal ${label}: ${goal.id}`);
+  console.log(`Status: ${goal.status}`);
+  if (flags.reason) console.log(`Reason: ${flags.reason}`);
+}
+
+function completeGoalFromCli(args) {
+  const flags = parseFlags(args);
+  const goalId = flags.id ?? flags.goal ?? args[0];
+  if (!goalId) throw new Error("Usage: klemm goal complete --id <goal-id> --evidence <evidence>");
+  const now = new Date().toISOString();
+  const next = store.update((state) => {
+    const goal = findGoal(state, goalId);
+    if (!goal) throw new Error(`Goal not found: ${goalId}`);
+    return {
+      ...state,
+      goals: (state.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              status: "completed",
+              completedAt: now,
+              completionEvidence: flags.evidence ?? "",
+              evidence: [flags.evidence ?? "completed", ...(item.evidence ?? [])],
+            }
+          : item,
+      ),
+      observationEvents: [
+        {
+          id: `observation-event-${Date.now()}-goal-completed`,
+          type: "goal_completed",
+          missionId: goal.missionId,
+          goalId: goal.id,
+          summary: flags.evidence ?? "completed",
+          createdAt: now,
+        },
+        ...(state.observationEvents ?? []),
+      ],
+    };
+  });
+  const goal = next.goals.find((item) => item.id === goalId);
+  console.log(`Goal completed: ${goal.id}`);
+  console.log(`Evidence: ${goal.completionEvidence || "none"}`);
+}
+
+function debriefGoalFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const goal = findGoal(state, flags.id ?? flags.goal ?? args[0]);
+  if (!goal) throw new Error("Usage: klemm goal debrief --id <goal-id>");
+  const decisions = (state.decisions ?? []).filter((decision) => decision.missionId === goal.missionId);
+  const activities = (state.agentActivities ?? []).filter((activity) => activity.missionId === goal.missionId);
+  console.log("Klemm goal debrief");
+  console.log(`Goal: ${goal.id}`);
+  console.log(`Status: ${goal.status}`);
+  console.log(`Objective: ${goal.objective}`);
+  console.log(`Success: ${goal.successCriteria || "not specified"}`);
+  console.log(`Mission: ${goal.missionId}`);
+  console.log(`Ticks: ${(goal.ticks ?? []).length}`);
+  console.log(`Decisions: ${decisions.length}`);
+  console.log(`Activities: ${activities.length}`);
+  console.log("Evidence:");
+  if ((goal.evidence ?? []).length === 0) console.log("- none");
+  for (const item of (goal.evidence ?? []).slice(0, 8)) console.log(`- ${redactSensitiveText(item)}`);
+  console.log("Risk hints:");
+  if ((goal.riskHints ?? []).length === 0) console.log("- none");
+  for (const hint of (goal.riskHints ?? []).slice(0, 8)) console.log(`- ${redactSensitiveText(hint)}`);
 }
 
 function registerAgentFromCli(args) {
@@ -3993,8 +4334,10 @@ async function runRuntimeFromCli(args) {
   const flags = parseFlags(flagArgs);
   const profile = await loadRuntimeProfile(profileName, flags.profileFile);
   if (!profile) throw new Error(`Usage: klemm run <${Object.keys(AGENT_RUNTIME_PROFILES).join("|")}> [--profile-file path] [--mission <id>] [--dry-run] -- [args...]`);
-  const missionId = flags.mission ?? profile.defaultMission?.id;
-  if (!flags.mission && profile.defaultMission) {
+  const goal = flags.goal ? findGoal(store.getState(), flags.goal) : null;
+  if (flags.goal && !goal) throw new Error(`Goal not found: ${flags.goal}`);
+  const missionId = flags.mission ?? goal?.missionId ?? profile.defaultMission?.id;
+  if (!flags.mission && !goal && profile.defaultMission) {
     store.update((state) =>
       startMission(state, {
         id: profile.defaultMission.id,
@@ -4032,6 +4375,28 @@ async function runRuntimeFromCli(args) {
     }),
   );
   const agent = withAgent.agents[0];
+  if (goal) {
+    store.update((state) => ({
+      ...state,
+      goals: (state.goals ?? []).map((item) =>
+        item.id === goal.id
+          ? {
+              ...item,
+              attachedAgents: [
+                {
+                  agentId: agent.id,
+                  kind: profile.kind,
+                  command: command.join(" "),
+                  attachedAt: new Date().toISOString(),
+                  source: "runtime",
+                },
+                ...(item.attachedAgents ?? []).filter((attached) => attached.agentId !== agent.id),
+              ],
+            }
+          : item,
+      ),
+    }));
+  }
   const withDecision = store.update((state) =>
     proposeAction(
       state,
@@ -4045,6 +4410,10 @@ async function runRuntimeFromCli(args) {
   const decision = withDecision.decisions[0];
 
   console.log(`Agent runtime profile: ${profileName}`);
+  if (goal) {
+    console.log(`Goal: ${goal.id}`);
+    console.log(`Mission: ${missionId}`);
+  }
   if (flags.profileFile) console.log(`Runtime profile loaded: ${profileName}`);
   console.log(`Agent registered: ${agent.id}`);
   console.log(`Command: ${command.join(" ")}`);
@@ -4939,6 +5308,32 @@ function findObserverLoop(state, idOrMission) {
   return loops.find((loop) => loop.id === idOrMission || loop.missionId === idOrMission) ?? null;
 }
 
+function findGoal(state, idOrMission) {
+  const goals = state.goals ?? [];
+  if (!idOrMission) return goals.find((goal) => goal.status === "active") ?? goals[0] ?? null;
+  return goals.find((goal) => goal.id === idOrMission || goal.missionId === idOrMission) ?? null;
+}
+
+function assessGoalTick(goal, { summary = "", agentOutput = "", changedFiles = [] } = {}) {
+  const riskHints = [];
+  const text = `${summary} ${agentOutput}`.toLowerCase();
+  if (/\bdeploy|production|publish|send|credential|secret|token|oauth|delete|push\b/.test(text)) {
+    riskHints.push("goal work mentions a risky or external action");
+  }
+  const watchPaths = goal.watchPaths ?? [];
+  if (watchPaths.length > 0) {
+    for (const file of changedFiles) {
+      const normalized = String(file);
+      const inside = watchPaths.some((path) => normalized === path || normalized.startsWith(`${path.replace(/\/$/, "")}/`) || normalized.includes(`/${path.replace(/^\.\//, "").replace(/\/$/, "")}/`));
+      if (!inside) riskHints.push(`changed file outside goal watch paths: ${normalized}`);
+    }
+  }
+  return {
+    alignment: riskHints.length ? "needs_review" : "on_track",
+    riskHints,
+  };
+}
+
 function observerLoopHealth(loop, { staleAfterMs = 30_000 } = {}) {
   if (loop.status !== "running") return "stopped";
   const timestamp = Date.parse(loop.lastTickAt ?? loop.startedAt ?? 0);
@@ -5118,6 +5513,10 @@ Commands:
   klemm mission current
   klemm mission list
   klemm mission finish <mission-id> [note]
+  klemm goal start --id goal-id --text "objective" [--success "done when..."] [--budget-turns 8] [--watch-path src]
+  klemm goal attach --id goal-id --agent agent-id [--kind claude_agent] [--command "claude"]
+  klemm goal tick --id goal-id --summary "progress" [--agent agent-id] [--changed-file path] [--evidence "tests passed"]
+  klemm goal status|pause|resume|complete|clear|debrief --id goal-id
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
   klemm event record --mission mission-id --agent agent-codex --type command_planned --summary "..."
   klemm agents
@@ -5167,7 +5566,7 @@ Commands:
   klemm onboard v2 --stdin
   klemm debrief [--mission mission-id]
   klemm tui [--mission mission-id] [--view overview|memory|workbench|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
-  klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
+  klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--goal goal-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
   klemm supervise [--mission mission-id] [--capture] [--record-tree] [--timeout-ms 60000] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs [--details]
   klemm monitor status [--mission mission-id]
