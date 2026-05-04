@@ -74,6 +74,33 @@ const AGENT_RUNTIME_PROFILES = {
   },
 };
 
+const POLICY_PACKS = {
+  "coding-afk": [
+    { id: "git-push-review", name: "Review git pushes while AFK", actionTypes: ["git_push"], externalities: ["git_push"], severity: "high" },
+    { id: "deployment-review", name: "Review deployments while AFK", actionTypes: ["deployment"], externalities: ["deployment"], severity: "high" },
+    { id: "credential-review", name: "Review credential changes while AFK", actionTypes: ["credential_change", "oauth_scope_change"], severity: "critical" },
+  ],
+  "finance-accounting": [
+    { id: "financial-action-review", name: "Review financial actions", actionTypes: ["financial_action"], severity: "critical" },
+    { id: "accounting-write-review", name: "Review accounting writes", actionTypes: ["quickbooks_write", "xero_write", "stripe_write"], severity: "high" },
+  ],
+  "email-calendar": [
+    { id: "external-send-review", name: "Review outbound messages", actionTypes: ["external_send"], severity: "high" },
+    { id: "calendar-change-review", name: "Review calendar changes", actionTypes: ["calendar_change"], severity: "medium" },
+  ],
+  "browser-research": [
+    { id: "purchase-review", name: "Review purchases and checkouts", actionTypes: ["financial_action", "purchase"], severity: "high" },
+    { id: "form-submit-review", name: "Review external form submissions", actionTypes: ["external_send"], targetIncludes: ["form", "submit"], severity: "medium" },
+  ],
+  "strict-no-external": [
+    { id: "no-external-send", name: "Strict no external sends", actionTypes: ["external_send"], severity: "critical" },
+    { id: "no-git-push", name: "Strict no git pushes", actionTypes: ["git_push"], severity: "critical" },
+    { id: "no-deployments", name: "Strict no deployments", actionTypes: ["deployment"], severity: "critical" },
+    { id: "no-financial-actions", name: "Strict no financial actions", actionTypes: ["financial_action"], severity: "critical" },
+    { id: "no-credential-changes", name: "Strict no credential changes", actionTypes: ["credential_change", "oauth_scope_change"], severity: "critical" },
+  ],
+};
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] ?? "status";
@@ -87,6 +114,7 @@ async function main() {
     if (command === "codex" && args[1] === "dogfood") return startCodexDogfoodFromCli(args.slice(2));
     if (command === "codex" && args[1] === "report") return recordCodexAdapterReportFromCli(args.slice(2));
     if (command === "codex" && args[1] === "run") return await runCodexWatchedCommandFromCli(args.slice(2));
+    if (command === "codex" && args[1] === "wrap") return await wrapCodexSessionFromCli(args.slice(2));
     if (command === "codex" && args[1] === "install") return await installCodexIntegrationFromCli(args.slice(2));
     if (command === "setup") return await setupKlemmFromCli(args.slice(1));
     if (command === "mission" && args[1] === "start") return startMissionFromCli(args.slice(2));
@@ -94,6 +122,7 @@ async function main() {
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
     if (command === "agents") return printAgents();
     if (command === "propose") return proposeFromCli(args.slice(1));
+    if (command === "queue" && args[1] === "inspect") return printQueueDecisionFromCli(args.slice(2));
     if (command === "queue") return printQueue();
     if (command === "approve") return recordQueueOutcome(args.slice(1), "approved");
     if (command === "deny") return recordQueueOutcome(args.slice(1), "denied");
@@ -123,6 +152,7 @@ async function main() {
     if (command === "monitor" && args[1] === "evaluate") return evaluateMonitorFromCli(args.slice(2));
     if (command === "policy" && args[1] === "add") return addPolicyFromCli(args.slice(2));
     if (command === "policy" && args[1] === "simulate") return simulatePolicyFromCli(args.slice(2));
+    if (command === "policy" && args[1] === "pack") return policyPackFromCli(args.slice(2));
     if (command === "adapter" && args[1] === "token" && args[2] === "add") return addAdapterTokenFromCli(args.slice(3));
     if (command === "helper" && args[1] === "launch-agent") return renderLaunchAgentFromCli(args.slice(2));
     if (command === "mcp" && args[1] === "stdio") return printMcpCommand();
@@ -192,6 +222,78 @@ function startCodexDogfoodFromCli(args) {
   console.log(`Next command: klemm supervise --watch-loop --mission ${mission.id} -- <command>`);
 }
 
+async function wrapCodexSessionFromCli(args) {
+  const separator = args.indexOf("--");
+  const flagArgs = separator >= 0 ? args.slice(0, separator) : args;
+  const command = separator >= 0 ? args.slice(separator + 1) : [];
+  const flags = parseFlags(flagArgs);
+  const protocolVersion = flags.protocolVersion ? Number(flags.protocolVersion) : 1;
+  const missionState = store.update((state) =>
+    startCodexHub(state, {
+      id: flags.id,
+      goal: flags.goal ?? "Wrapped Codex session supervised by Klemm.",
+      durationMinutes: flags.duration ? Number(flags.duration) : undefined,
+    }),
+  );
+  const mission = missionState.missions[0];
+  console.log(`Codex wrapper session started: ${mission.id}`);
+
+  const plan = executeAdapterEnvelopeTool({
+    protocolVersion,
+    missionId: mission.id,
+    agentId: flags.agent ?? "agent-codex",
+    adapterClientId: flags.adapterClient,
+    adapterToken: flags.adapterToken,
+    event: "plan",
+    summary: flags.plan ?? `Wrapped Codex plan for ${mission.goal}`,
+    plan: flags.plan ?? "",
+  }).result;
+  console.log(`Plan reported: ${plan.accepted === false ? "rejected" : "accepted"}`);
+  if (plan.accepted === false) {
+    console.log(`Error: ${plan.error}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (command.length > 0) {
+    const guarded = store.update((state) =>
+      proposeAction(state, buildCommandProposal(command, {
+        missionId: mission.id,
+        actor: flags.agent ?? "agent-codex",
+        suggestedRewrite: flags.rewriteTo,
+      })),
+    );
+    const decision = guarded.decisions[0];
+    console.log(`Guarded command decision: ${decision.decision}`);
+    if (decision.decision === "allow" && !flags.dryRun) {
+      await superviseFromCli(["--mission", mission.id, "--actor", flags.agent ?? "agent-codex", "--watch-loop", "--intercept-output", "--", ...command]);
+    }
+  }
+
+  if (flags.dryRun) {
+    console.log("Dry run: Codex launch skipped");
+  } else if (command.length === 0) {
+    await superviseFromCli(["--mission", mission.id, "--actor", flags.agent ?? "agent-codex", "--watch-loop", "--intercept-output", "--", "codex"]);
+  }
+
+  const debriefText = summarizeDebrief(store.getState(), { missionId: mission.id });
+  const debrief = executeAdapterEnvelopeTool({
+    protocolVersion,
+    missionId: mission.id,
+    agentId: flags.agent ?? "agent-codex",
+    adapterClientId: flags.adapterClient,
+    adapterToken: flags.adapterToken,
+    event: "debrief",
+    summary: "Wrapped Codex session debrief.",
+    debrief: debriefText,
+  }).result;
+  console.log(`Debrief reported: ${debrief.accepted === false ? "rejected" : "accepted"}`);
+  if (debrief.accepted === false) {
+    console.log(`Error: ${debrief.error}`);
+    process.exitCode = 1;
+  }
+}
+
 async function installCodexIntegrationFromCli(args) {
   const flags = parseFlags(args);
   const outputDir = flags.outputDir ?? join(KLEMM_DATA_DIR, "codex-integration");
@@ -214,7 +316,7 @@ async function installCodexIntegrationFromCli(args) {
     "#!/usr/bin/env bash",
     "set -euo pipefail",
     `export KLEMM_DATA_DIR="${dataDir.replaceAll('"', '\\"')}"`,
-    `exec "${process.execPath}" --no-warnings "${new URL(import.meta.url).pathname}" codex run "$@"`,
+    `exec "${process.execPath}" --no-warnings "${new URL(import.meta.url).pathname}" codex wrap "$@"`,
     "",
   ].join("\n");
   const wrapperPath = join(binDir, "klemm-codex");
@@ -844,6 +946,15 @@ function printQueue() {
   }
 }
 
+function printQueueDecisionFromCli(args) {
+  const [decisionId] = args;
+  if (!decisionId) throw new Error("Usage: klemm queue inspect <decision-id>");
+  const state = store.getState();
+  const decision = state.decisions.find((item) => item.id === decisionId);
+  if (!decision) throw new Error(`Decision not found: ${decisionId}`);
+  console.log(renderDecisionDetail(decision, state));
+}
+
 function recordQueueOutcome(args, outcome) {
   const [decisionId, ...noteParts] = args;
   if (!decisionId) throw new Error(`Usage: klemm ${outcome === "denied" ? "deny" : outcome} <decision-id> [note]`);
@@ -1348,6 +1459,10 @@ async function printTui(args) {
       console.log(buildUserModelSummary(store.getState()).text);
       continue;
     }
+    if (command === "inspect") {
+      console.log(renderDecisionDetail(store.getState().decisions.find((item) => item.id === subcommand), store.getState()));
+      continue;
+    }
     if (command === "approve" || command === "deny" || command === "rewrite") {
       recordQueueOutcome([subcommand, id, ...noteParts].filter(Boolean), command === "deny" ? "denied" : command === "approve" ? "approved" : "rewritten");
       continue;
@@ -1390,7 +1505,7 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
     return [
       ...header,
       "Policies",
-      ...((state.policies ?? []).map((policy) => `- ${policy.id} ${policy.effect} ${policy.name}`)),
+      ...((state.policies ?? []).map((policy) => `- ${policy.id} ${policy.effect} ${policy.name ?? policy.text ?? policy.source ?? ""}`)),
     ].join("\n");
   }
   if (normalized === "model") return [...header, buildUserModelSummary(state).text].join("\n");
@@ -1399,26 +1514,34 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
   }
   if (normalized === "trust" || normalized === "decision") {
     const decision = state.decisions.find((item) => item.id === decisionId) ?? state.decisions[0];
-    return [...header, renderDecisionDetail(decision)].join("\n");
+    return [...header, renderDecisionDetail(decision, state)].join("\n");
   }
   return [...header, `Unknown view: ${view}`].join("\n");
 }
 
-function renderDecisionDetail(decision) {
+function renderDecisionDetail(decision, state = store.getState()) {
   if (!decision) return "Decision Detail\n- none";
+  const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
+  const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
+  const suggestedRewrite = decision.rewrite ?? decision.proposal?.suggestedRewrite;
   return [
     "Decision Detail",
     `${decision.id} ${decision.decision} ${decision.riskLevel} score=${decision.riskScore ?? "n/a"}`,
     `Actor: ${decision.actor}`,
     `Action: ${decision.actionType} ${decision.target}`,
     `Reason: ${decision.reason}`,
+    `Suggested rewrite: ${suggestedRewrite || "none"}`,
     "Risk factors:",
     ...((decision.riskFactors ?? []).length
       ? decision.riskFactors.map((factor) => `- ${factor.id}: ${factor.label ?? factor.reason ?? factor.weight ?? ""}`)
       : ["- none"]),
     "Matched policies:",
     ...((decision.matchedPolicies ?? []).length
-      ? decision.matchedPolicies.map((policy) => `- ${policy.id}: ${policy.name}`)
+      ? decision.matchedPolicies.map((policy) => `- ${policy.id}: ${policy.name ?? policy.text ?? policy.source ?? ""}`)
+      : ["- none"]),
+    "Source memories:",
+    ...(sourceMemories.length
+      ? sourceMemories.map((memory) => `- ${memory.id} ${memory.status}: ${memory.text}`)
       : ["- none"]),
     "Explanation:",
     decision.explanation?.summary ?? decision.reason ?? "No explanation recorded.",
@@ -1495,14 +1618,38 @@ async function superviseFromCli(args) {
 
 async function runRuntimeFromCli(args) {
   const profileName = args[0];
-  const profile = AGENT_RUNTIME_PROFILES[profileName];
-  if (!profile) throw new Error(`Usage: klemm run <${Object.keys(AGENT_RUNTIME_PROFILES).join("|")}> [--mission <id>] [--dry-run] -- [args...]`);
-
   const rest = args.slice(1);
   const separator = rest.indexOf("--");
   const flagArgs = separator >= 0 ? rest.slice(0, separator) : rest;
   const runtimeArgs = separator >= 0 ? rest.slice(separator + 1) : [];
   const flags = parseFlags(flagArgs);
+  const profile = await loadRuntimeProfile(profileName, flags.profileFile);
+  if (!profile) throw new Error(`Usage: klemm run <${Object.keys(AGENT_RUNTIME_PROFILES).join("|")}> [--profile-file path] [--mission <id>] [--dry-run] -- [args...]`);
+  const missionId = flags.mission ?? profile.defaultMission?.id;
+  if (!flags.mission && profile.defaultMission) {
+    store.update((state) =>
+      startMission(state, {
+        id: profile.defaultMission.id,
+        hub: profile.defaultMission.hub ?? profileName,
+        goal: profile.defaultMission.goal,
+        allowedActions: profile.defaultMission.allowedActions,
+        blockedActions: [...new Set([...(profile.defaultMission.blockedActions ?? []), ...(profile.authority?.blockedActions ?? [])])],
+        rewriteAllowed: profile.defaultMission.rewriteAllowed,
+        escalationChannel: profile.defaultMission.escalationChannel,
+      }),
+    );
+    console.log(`Default mission started: ${profile.defaultMission.id}`);
+  }
+  if (profile.adapterClientId && profile.adapterToken) {
+    store.update((state) =>
+      addAdapterClient(state, {
+        id: profile.adapterClientId,
+        token: profile.adapterToken,
+        protocolVersions: profile.protocolVersions ?? [profile.protocolVersion ?? 1],
+      }),
+    );
+    console.log(`Adapter client ensured: ${profile.adapterClientId}`);
+  }
   const command = profile.command.length > 0 ? [...profile.command, ...runtimeArgs] : runtimeArgs;
   if (command.length === 0) throw new Error(`Usage: klemm run ${profileName} [--mission <id>] -- <command> [args...]`);
 
@@ -1510,7 +1657,7 @@ async function runRuntimeFromCli(args) {
   const withAgent = store.update((state) =>
     registerAgent(state, {
       id: flags.agentId ?? profile.agentId,
-      missionId: flags.mission,
+      missionId,
       name: flags.name ?? profile.name,
       kind: profile.kind,
       command: command.join(" "),
@@ -1521,7 +1668,7 @@ async function runRuntimeFromCli(args) {
     proposeAction(
       state,
       buildCommandProposal(command, {
-        missionId: flags.mission,
+        missionId,
         actor: agent.id,
         suggestedRewrite: flags.rewriteTo,
       }),
@@ -1530,6 +1677,7 @@ async function runRuntimeFromCli(args) {
   const decision = withDecision.decisions[0];
 
   console.log(`Agent runtime profile: ${profileName}`);
+  if (flags.profileFile) console.log(`Runtime profile loaded: ${profileName}`);
   console.log(`Agent registered: ${agent.id}`);
   console.log(`Command: ${command.join(" ")}`);
 
@@ -1556,10 +1704,37 @@ async function runRuntimeFromCli(args) {
     capture: flags.capture,
     recordTree: flags.recordTree,
     timeoutMs: flags.timeoutMs,
+    env: buildRuntimeEnv(profile),
   });
-  if (flags.capture) persistCapturedRun(flags, commandToRun.join(" "), result, commandCwd);
+  if (flags.capture) persistCapturedRun({ ...flags, mission: missionId }, commandToRun.join(" "), result, commandCwd);
   console.log(`Klemm runtime exit: ${result.status}`);
   process.exitCode = result.status;
+}
+
+async function loadRuntimeProfile(profileName, profileFile) {
+  let profiles = { ...AGENT_RUNTIME_PROFILES };
+  if (profileFile) {
+    const parsed = JSON.parse(await readFile(profileFile, "utf8"));
+    for (const [name, profile] of Object.entries(parsed.profiles ?? {})) {
+      const base = profiles[profile.extends] ?? {};
+      profiles[name] = {
+        ...base,
+        ...profile,
+        command: profile.command ?? base.command ?? [],
+      };
+    }
+  }
+  return profiles[profileName];
+}
+
+function buildRuntimeEnv(profile = {}) {
+  return {
+    ...process.env,
+    ...(profile.env ?? {}),
+    ...(profile.adapterClientId ? { KLEMM_ADAPTER_CLIENT_ID: profile.adapterClientId } : {}),
+    ...(profile.adapterToken ? { KLEMM_ADAPTER_TOKEN: profile.adapterToken } : {}),
+    ...(profile.protocolVersion ? { KLEMM_PROTOCOL_VERSION: String(profile.protocolVersion) } : {}),
+  };
 }
 
 async function runSupervisedProcess(command, {
@@ -1569,6 +1744,7 @@ async function runSupervisedProcess(command, {
   watchIntervalMs = 1000,
   recordTree = false,
   timeoutMs,
+  env = process.env,
   onLiveOutput = null,
 } = {}) {
   const startedAt = new Date().toISOString();
@@ -1577,7 +1753,7 @@ async function runSupervisedProcess(command, {
   const output = await new Promise((resolve, reject) => {
     const child = spawn(command[0], command.slice(1), {
       cwd,
-      env: process.env,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let heartbeat;
@@ -1927,6 +2103,42 @@ function addPolicyFromCli(args) {
   console.log(`Severity: ${policy.severity}`);
 }
 
+function policyPackFromCli(args) {
+  const action = args[0] ?? "list";
+  if (action === "list") {
+    console.log("Policy packs");
+    for (const [name, policies] of Object.entries(POLICY_PACKS)) {
+      console.log(`- ${name} (${policies.length} policies)`);
+    }
+    return;
+  }
+  if (action !== "apply") throw new Error("Usage: klemm policy pack list|apply <pack-name>");
+  const packName = args[1];
+  const flags = parseFlags(args.slice(2));
+  const pack = POLICY_PACKS[packName];
+  if (!pack) throw new Error(`Unknown policy pack: ${packName}`);
+  let next = store.getState();
+  for (const policy of pack) {
+    next = addStructuredPolicy(next, {
+      id: `${packName}-${policy.id}`,
+      name: policy.name,
+      effect: policy.effect ?? "queue",
+      severity: policy.severity ?? "medium",
+      source: "policy_pack",
+      sourceRef: packName,
+      condition: {
+        actionTypes: policy.actionTypes,
+        targetIncludes: policy.targetIncludes,
+        externalities: policy.externalities,
+      },
+    });
+  }
+  store.saveState(next);
+  console.log(`Policy pack applied: ${packName}`);
+  console.log(`Policies added: ${pack.length}`);
+  if (flags.mission) console.log(`Mission hint: ${flags.mission}`);
+}
+
 function simulatePolicyFromCli(args) {
   const flags = parseFlags(args);
   const simulation = simulatePolicyDecision(store.getState(), {
@@ -2243,6 +2455,7 @@ Commands:
   klemm codex dogfood --id mission-id --goal "..." --plan "..."
   klemm codex report --mission mission-id --type tool_call --tool shell --command "npm test"
   klemm codex run --mission mission-id -- <command> [args...]
+  klemm codex wrap --id mission-id --goal "..." [--adapter-client id] [--adapter-token token] [--dry-run] -- <command> [args...]
   klemm codex install --output-dir path [--data-dir path]
   klemm mission start --hub codex --goal "..." [--allow a,b] [--block x,y] [--rewrite]
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
@@ -2250,6 +2463,7 @@ Commands:
   klemm agents
   klemm propose --mission mission-id --actor Codex --type git_push --target "origin main"
   klemm queue
+  klemm queue inspect <decision-id>
   klemm approve|deny|rewrite <decision-id> [note]
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json
@@ -2267,12 +2481,13 @@ Commands:
   klemm onboard --stdin
   klemm debrief [--mission mission-id]
   klemm tui [--mission mission-id] [--view overview|memory|queue|agents|policies|model|logs|trust] [--decision decision-id] [--interactive]
-  klemm run codex|claude|shell [--mission mission-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
+  klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
   klemm supervise [--mission mission-id] [--capture] [--record-tree] [--timeout-ms 60000] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs [--details]
   klemm monitor status [--mission mission-id]
   klemm monitor evaluate [--mission mission-id] [--agent agent-id]
   klemm policy add --id policy-id --name "..." --action-types deployment --target-includes prod
+  klemm policy pack list|apply <coding-afk|finance-accounting|email-calendar|browser-research|strict-no-external>
   klemm policy simulate --mission mission-id --type deployment --target "deploy prod" --external deployment
   klemm adapter token add --id codex-local --token token --versions 1,2
   klemm helper launch-agent [--program /usr/local/bin/klemm] [--data-dir path]

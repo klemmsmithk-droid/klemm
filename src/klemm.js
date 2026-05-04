@@ -1820,13 +1820,13 @@ function normalizeEventType(type) {
 
 function normalizeAdapterEventType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
-  const known = new Set(["plan", "tool_call", "diff", "uncertainty", "subagent", "activity"]);
+  const known = new Set(["plan", "tool_call", "diff", "uncertainty", "subagent", "debrief", "activity"]);
   return known.has(value) ? value : "activity";
 }
 
 function normalizeActivityType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
-  const known = new Set(["command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "activity"]);
+  const known = new Set(["command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "debrief", "activity"]);
   return known.has(value) ? value : "activity";
 }
 
@@ -1930,6 +1930,7 @@ function findPolicyMatches(state, proposal) {
       effect: policy.effect,
       severity: policy.severity,
       condition: policy.condition,
+      sourceMemoryId: policy.sourceMemoryId,
     }));
   return [...memoryPolicies, ...structuredPolicies];
 }

@@ -43,6 +43,7 @@ klemm codex report --adapter-client codex-local --adapter-token <token> --protoc
 ```
 
 Rejected adapter tokens or unsupported protocol versions must stop the agent from assuming Klemm recorded the activity.
+For embedded adapters, use `src/klemm-adapter-sdk.js` with HTTP or MCP transport so envelopes are actually delivered. Prefer retry plus protocol negotiation for HTTP daemon calls.
 
 Prefer the Codex adapter wrappers when running as Codex:
 
@@ -53,20 +54,22 @@ klemm codex debrief --mission <mission-id>
 klemm codex dogfood --id <mission-id> --goal "<goal>" --plan "<plan>"
 klemm codex report --mission <mission-id> --type tool_call --tool shell --command "npm test"
 klemm codex run --mission <mission-id> -- npm test
+klemm codex wrap --id <mission-id> --goal "<goal>" --adapter-client codex-local --adapter-token <token> --protocol-version 2 --dry-run -- git push origin main
 klemm codex install --output-dir ./codex-klemm --data-dir ./data
 ```
 
-Use `klemm codex dogfood` when starting a real `/klemm` session. Use `klemm codex report` for plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` so commands flow through supervised watch-loop monitoring with `agent-codex` as the actor.
+Use `klemm codex dogfood` when starting a real `/klemm` session. Use `klemm codex report` for plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` so commands flow through supervised watch-loop monitoring with `agent-codex` as the actor. Use `klemm codex wrap` or the installed `klemm-codex` wrapper for end-to-end dogfooding: mission start, Codex registration, plan report, guarded command preflight, supervised execution when allowed, and final debrief report.
 Use `klemm codex install` to write the skill, MCP config, and wrapper bundle for a Codex environment.
 
 When launching agent runtimes through Klemm, use the named wrapper:
 
 ```text
 klemm run codex --mission <mission-id> --dry-run -- --ask-for-approval on-request
+klemm run localcodex --profile-file ./klemm-profiles.json --capture
 klemm run shell --mission <mission-id> -- npm test
 ```
 
-`klemm run` registers the agent profile, normalizes the launch command, and blocks or queues risky launches before execution.
+`klemm run` registers the agent profile, normalizes the launch command, and blocks or queues risky launches before execution. Runtime profile files can extend built-ins, define default missions, add per-agent authority boundaries, inject environment variables, and ensure adapter tokens are available to the launched process.
 
 Always ask Klemm before:
 
@@ -114,6 +117,7 @@ Use:
 
 ```text
 klemm debrief --mission <mission-id>
+klemm queue inspect <decision-id>
 klemm tui --mission <mission-id>
 klemm tui --mission <mission-id> --view trust --decision <decision-id>
 ```
@@ -151,6 +155,8 @@ Structured policies and memory-source imports are available through:
 ```text
 add_structured_policy
 simulate_policy_decision
+klemm policy pack list
+klemm policy pack apply coding-afk
 import_memory_source
 import_context_source
 promote_memory_policy

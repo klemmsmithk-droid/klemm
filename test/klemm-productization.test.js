@@ -147,7 +147,7 @@ test("Codex installer writes skill, MCP config, wrapper, and context includes us
   assert.match(installed.stdout, /Codex integration installed:/);
   assert.match(await readFile(join(installDir, "skills", "klemm", "SKILL.md"), "utf8"), /klemm codex context/);
   assert.match(await readFile(join(installDir, "mcp.json"), "utf8"), /klemm-mcp-server/);
-  assert.match(await readFile(join(installDir, "bin", "klemm-codex"), "utf8"), /codex run/);
+  assert.match(await readFile(join(installDir, "bin", "klemm-codex"), "utf8"), /codex wrap/);
 
   const context = await runKlemm(["codex", "context", "--mission", "mission-codex-install"], { env });
   assert.equal(context.status, 0, context.stderr);

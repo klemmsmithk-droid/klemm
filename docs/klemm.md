@@ -17,12 +17,14 @@ npm run klemm -- codex debrief --mission mission-codex
 npm run klemm -- codex dogfood --id mission-codex --goal "Dogfood Codex supervision" --plan "Report plan, run watched tests, debrief."
 npm run klemm -- codex report --mission mission-codex --type tool_call --tool shell --command "npm test"
 npm run klemm -- codex run --mission mission-codex -- npm test
+npm run klemm -- codex wrap --id mission-codex --goal "Wrapped Codex supervision" --adapter-client codex-local --adapter-token "$KLEMM_ADAPTER_TOKEN" --protocol-version 2 --dry-run -- git push origin main
 npm run klemm -- codex install --output-dir ./codex-klemm --data-dir ./data
 npm run klemm -- mission start --id mission-codex --hub codex --goal "Build Klemm while Kyle is AFK" --allow read_files,edit_local_code,run_tests --block git_push,external_send,credential_change,oauth_scope_change --rewrite
 npm run klemm -- agent register --id agent-codex --mission mission-codex --name Codex --kind coding_agent
 npm run klemm -- event record --mission mission-codex --agent agent-codex --type command_planned --summary "Codex plans a test run" --action-id decision-tests --action-type command --target "npm test"
 npm run klemm -- propose --id decision-push --mission mission-codex --actor Codex --type git_push --target "origin main" --external publishes_code
 npm run klemm -- queue
+npm run klemm -- queue inspect decision-push
 npm run klemm -- deny decision-push "Review before publishing"
 npm run klemm -- memory ingest-export --source chatgpt_export --file export.json
 npm run klemm -- context import --provider chatgpt --file export.json
@@ -40,10 +42,13 @@ npm run klemm -- tui --mission mission-codex --view trust --decision decision-pu
 npm run klemm -- tui --interactive --mission mission-codex
 npm run klemm -- debrief --mission mission-codex
 npm run klemm -- run codex --mission mission-codex --dry-run -- --ask-for-approval on-request
+npm run klemm -- run localcodex --profile-file ./klemm-profiles.json --capture
 npm run klemm -- run shell --mission mission-codex -- node -e "console.log('safe local work')"
 npm run klemm -- supervise --watch --intercept-output --mission mission-codex -- npm test
 npm run klemm -- monitor status --mission mission-codex
 npm run klemm -- monitor evaluate --mission mission-codex --agent agent-codex
+npm run klemm -- policy pack list
+npm run klemm -- policy pack apply coding-afk
 npm run klemm -- policy simulate --mission mission-codex --type deployment --target "deploy prod" --external deployment
 npm run klemm -- adapter token add --id codex-local --token "$KLEMM_ADAPTER_TOKEN" --versions 1,2
 npm run klemm -- supervise --capture --record-tree --timeout-ms 60000 --mission mission-codex -- npm test
@@ -98,13 +103,16 @@ npm run klemm -- onboard --stdin
 ```bash
 npm run klemm -- run codex --mission mission-codex --dry-run -- --ask-for-approval on-request
 npm run klemm -- run claude --mission mission-codex --dry-run -- --dangerously-skip-permissions false
+npm run klemm -- run localcodex --profile-file ./klemm-profiles.json --capture
 npm run klemm -- run shell --mission mission-codex -- node -e "console.log('safe local work')"
 npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe local work')"
 ```
 
-`klemm run` is the named agent runtime wrapper. It registers Codex, Claude, or shell profiles as supervised agents, normalizes the launch command into an authority proposal, blocks or queues risky launches before execution, and can run in `--dry-run` mode for adapter dogfooding.
+`klemm run` is the named agent runtime wrapper. It registers Codex, Claude, or shell profiles as supervised agents, normalizes the launch command into an authority proposal, blocks or queues risky launches before execution, and can run in `--dry-run` mode for adapter dogfooding. Runtime Profiles v2 can be loaded from `--profile-file`; profiles can extend built-ins, define a default mission, add authority boundaries, inject environment variables, and register adapter client tokens before launch.
 
 `klemm supervise` remains the lower-level process wrapper for direct commands. Both surfaces classify commands before launch. High-risk commands are queued before execution. Safe rewrites can replace a broad reversible command with a narrower command.
+
+`klemm codex wrap` is the dogfood wrapper installed as `klemm-codex`. It starts a Codex hub mission, registers Codex, reports plan/debrief envelopes, preflights the wrapped command through Klemm authority, and routes allowed work through supervised execution.
 
 ## Continuous Agent Monitor
 
@@ -163,10 +171,10 @@ npm run klemm -- codex report --adapter-client codex-local --adapter-token "$KLE
 
 Authenticated adapter calls receive explicit acceptance, negotiated protocol version, and validation details. Bad tokens or unsupported versions are rejected before activity is recorded.
 
-Embeddable agents can use `src/klemm-adapter-sdk.js` to produce conformant envelopes:
+Embeddable agents can use `src/klemm-adapter-sdk.js` to produce conformant envelopes and send them over HTTP or MCP with retries and protocol negotiation:
 
 ```js
-import { createKlemmAdapterClient } from "./src/klemm-adapter-sdk.js";
+import { createKlemmAdapterClient, createKlemmHttpTransport } from "./src/klemm-adapter-sdk.js";
 
 const klemm = createKlemmAdapterClient({
   adapterClientId: "codex-local",
@@ -174,9 +182,14 @@ const klemm = createKlemmAdapterClient({
   protocolVersion: 2,
   missionId: "mission-codex",
   agentId: "agent-codex",
+  transport: createKlemmHttpTransport({
+    baseUrl: "http://127.0.0.1:8765",
+    retries: 2,
+    negotiateProtocol: true,
+  }),
 });
 
-const envelope = klemm.toolCall({ tool: "shell", command: "npm test", summary: "Run tests" });
+await klemm.send(klemm.toolCall({ tool: "shell", command: "npm test", summary: "Run tests" }));
 ```
 
 ## Policy Engine
@@ -188,9 +201,13 @@ Policy Engine v2 adds action categories, risk scores, risk factors, mission auth
 Structured policies can be added with:
 
 ```bash
+npm run klemm -- policy pack list
+npm run klemm -- policy pack apply coding-afk
 npm run klemm -- policy add --id policy-prod --name "Production deploy approval" --action-types deployment --target-includes prod
 npm run klemm -- policy simulate --mission mission-codex --type deployment --target "deploy prod" --external deployment
 ```
+
+Built-in packs include `coding-afk`, `finance-accounting`, `email-calendar`, `browser-research`, and `strict-no-external`.
 
 ## Daemon
 
@@ -287,9 +304,9 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 
 - `klemm codex hub`: one-command Codex hub dogfooding.
 - `klemm codex event/context/debrief`: stable Codex adapter packet commands.
-- `klemm codex dogfood/report/run`: hardened Codex dogfood adapter flow.
+- `klemm codex dogfood/report/run/wrap`: hardened Codex dogfood adapter flow and end-to-end wrapper.
 - `klemm codex install`: Codex-ready skill, MCP config, and wrapper bundle.
-- `klemm run codex|claude|shell`: named runtime wrapper for supervised agent launches.
+- `klemm run codex|claude|shell`: named runtime wrapper plus profile-file v2 config for supervised agent launches.
 - `klemm event record`: agent event protocol for planned tools, commands, files, external actions, and lifecycle events.
 - `klemm memory ingest-export`: first AI chat export importer, with dedupe and review promotion.
 - `klemm memory import-source/search`: memory source records and search.
@@ -298,6 +315,7 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm memory promote-policy`: turn reviewed memory into structured authority policy.
 - `klemm user model`: agent-usable local profile summary from reviewed and pending memory candidates.
 - `klemm debrief`: inspection-first summary of events, rewrites, queue, and memory candidates.
+- `klemm queue inspect`: decision drilldown with rewrite, source memories, policies, and explanation.
 - `klemm tui --interactive`: lightweight terminal dashboard with approve/deny and memory-review commands.
 - `klemm tui --view`: focused terminal views for memory, queue, agents, policies, model, logs, and trust drilldowns.
 - `klemm supervise --capture`: transcript, exit code, duration, file-change capture, process metadata, and live-intervention details for supervised processes.
@@ -309,7 +327,8 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `npm run mcp`: real stdio MCP server for compatible agent clients.
 - `klemm install mcp`: MCP config generation for Codex, Claude Desktop, and generic clients.
 - `record_adapter_envelope`: normalized adapter protocol entrypoint for plans, tool calls, diffs, uncertainty, and subagents.
-- `klemm policy add`: structured policy v2.
+- `src/klemm-adapter-sdk.js`: embeddable HTTP/MCP adapter transport with retries and protocol negotiation.
+- `klemm policy add/pack`: structured policy v2 plus prebuilt policy packs.
 - `klemm helper launch-agent`: non-privileged macOS LaunchAgent scaffold.
 
 ## Safety Model
