@@ -91,12 +91,14 @@ klemm codex report --mission <mission-id> --type tool_call --tool shell --comman
 klemm codex run --mission <mission-id> -- npm test
 klemm codex wrap --id <mission-id> --goal "<goal>" --adapter-client codex-local --adapter-token <token> --protocol-version 2 --dry-run -- git push origin main
 klemm codex contract status --mission <mission-id>
+klemm codex capture status --mission <mission-id>
 klemm codex install --output-dir ./codex-klemm --data-dir ./data
 ```
 
 Use `klemm codex wrap` or the installed `klemm-codex` wrapper when starting a real `/klemm` session. The wrapper creates a `codex-session-*` contract, injects `KLEMM_MISSION_ID`, `KLEMM_AGENT_ID`, `KLEMM_CODEX_CONTEXT_COMMAND`, `KLEMM_CODEX_RUN_COMMAND`, and `KLEMM_CODEX_DEBRIEF_COMMAND`, reports session start/plan/session finish/debrief, preflights the launch command, captures supervised execution when allowed, and queues risky launches before execution. Use `klemm codex dogfood` only when opening a hub mission without launching a wrapped session. Use `klemm codex report` for additional plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` for commands inside an already-wrapped session so they flow through supervised watch-loop monitoring with `agent-codex` as the actor.
 Use `klemm codex install` to write the skill, MCP config, and wrapper bundle for a Codex environment.
 Use `klemm codex contract status` before claiming a live Codex adapter worked. It must show real session contract evidence across lifecycle, plan, tool/command, diff, proxy question, supervised run, and debrief signals with `Faked evidence: no`.
+Use `klemm codex capture status` during ordinary dogfood sessions to check whether Klemm is quietly watching without adding friction. A healthy real session should show `quiet_watch=yes`, `friction=low`, and captured supervised runs.
 
 Wrapped sessions also inject `KLEMM_PROXY_ASK_COMMAND`, `KLEMM_PROXY_CONTINUE_COMMAND`, and `KLEMM_PROXY_STATUS_COMMAND`. Use those environment commands as the default loop before interrupting Kyle:
 
@@ -226,6 +228,7 @@ klemm supervise --watch-loop --watch-interval-ms 1000 --mission <mission-id> -- 
 ```
 
 Use `--intercept-output` when an agent might try to perform risky actions indirectly. Klemm watches stdout/stderr for attempts such as GitHub pushes, production deploys, credentials/OAuth changes, and destructive deletion, then queues authority and terminates the supervised process. Add `--record-tree` and `--timeout-ms` for durable pid/process metadata and hard runtime ceilings.
+For native helper streams, use `klemm helper stream tick` to refresh live state over time. Status should show heartbeat age, unmanaged session changes, stale warnings, and exact wrap/install recommendations.
 
 Structured policies and memory-source imports are available through:
 
@@ -256,11 +259,15 @@ klemm connectors setup chatgpt --mode export --path ./chatgpt.json --review-requ
 klemm connectors setup claude --mode export --path ./claude.json --review-required
 klemm connectors setup codex --mode local-log --path ./codex.jsonl --review-required
 klemm connectors setup gemini --mode export --path ./gemini.json --api-key-env GEMINI_API_KEY --review-required
+klemm connectors onboard --home "$HOME" --preview
+klemm connectors onboard --home "$HOME" --apply
 klemm connectors list
 klemm connectors import --all
 klemm memory review --group-by-source
+klemm memory review --bulk --group-by-class --source-preview --limit 12
+klemm memory bulk approve --class prompt_intent_pattern --limit 10 --note "reviewed from source preview"
 klemm memory promote-policy <memory-id> --action-types git_push --target-includes github,origin
-klemm user model
+klemm user model --evidence
 klemm sync add --id codex-history --provider codex --path ./codex.jsonl --interval-minutes 30
 klemm sync plan
 klemm sync run --due
@@ -269,6 +276,8 @@ klemm sync status
 
 Treat `klemm user model` as the compact profile that Codex and other agents can safely consume. It is distilled and evidence-linked; raw exports should remain local unless the user explicitly chooses otherwise.
 Treat ChatGPT, Claude, Codex, and Gemini connectors as local context feeders first. They should import exports or local logs into pending reviewed memories; raw imported text is not authority until reviewed or promoted.
+Use connector onboarding before manual setup when possible. It looks for likely ChatGPT, Claude, Codex, and Gemini exports/logs, previews counts, explains what will be imported, and keeps review required before authority.
+Use bulk memory review for large imports. Bulk actions should stay scoped by class/source and should never promote raw imported text directly into authority without review.
 Use `sync add/plan/run/status` for recurring local context imports. Sync checksums sources, skips unchanged inputs, snapshots imports locally, plans due sources from `nextRunAt`, advances scheduled windows, and exposes sync state in `klemm codex context`.
 
 Use daemon lifecycle checks when relying on the local API:

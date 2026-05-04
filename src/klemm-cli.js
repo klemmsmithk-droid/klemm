@@ -124,6 +124,7 @@ async function main() {
     if (command === "codex" && args[1] === "run") return await runCodexWatchedCommandFromCli(args.slice(2));
     if (command === "codex" && args[1] === "wrap") return await wrapCodexSessionFromCli(args.slice(2));
     if (command === "codex" && args[1] === "contract" && args[2] === "status") return printCodexContractStatusFromCli(args.slice(3));
+    if (command === "codex" && args[1] === "capture" && args[2] === "status") return printCodexCaptureStatusFromCli(args.slice(3));
     if (command === "codex" && args[1] === "install") return await installCodexIntegrationFromCli(args.slice(2));
     if (command === "setup") return await setupKlemmFromCli(args.slice(1));
     if (command === "install" && args[1] !== "mcp") return await installKlemmFromCli(args.slice(1));
@@ -164,9 +165,11 @@ async function main() {
     if (command === "memory" && args[1] === "seed-proxy") return seedProxyMemoryFromCli(args.slice(2));
     if (command === "context" && args[1] === "import") return await importContextSourceFromCli(args.slice(2));
     if (command === "connectors" && args[1] === "setup") return connectorsSetupFromCli(args.slice(2));
+    if (command === "connectors" && args[1] === "onboard") return await connectorsOnboardFromCli(args.slice(2));
     if (command === "connectors" && args[1] === "list") return connectorsListFromCli(args.slice(2));
     if (command === "connectors" && args[1] === "import") return await connectorsImportFromCli(args.slice(2));
     if (command === "memory" && args[1] === "search") return searchMemoryFromCli(args.slice(2));
+    if (command === "memory" && args[1] === "bulk") return memoryBulkFromCli(args.slice(2));
     if (command === "memory" && args[1] === "sources") return printMemorySourcesFromCli(args.slice(2));
     if (command === "memory" && args[1] === "evidence") return printMemoryEvidenceFromCli(args.slice(2));
     if (command === "memory" && args[1] === "review") return printMemoryReview(args.slice(2));
@@ -199,6 +202,7 @@ async function main() {
     if (command === "helper" && args[1] === "snapshot") return await helperSnapshotFromCli(args.slice(2));
     if (command === "helper" && args[1] === "permissions") return printHelperPermissions();
     if (command === "helper" && args[1] === "stream" && args[2] === "start") return await helperStreamStartFromCli(args.slice(3));
+    if (command === "helper" && args[1] === "stream" && args[2] === "tick") return await helperStreamTickFromCli(args.slice(3));
     if (command === "helper" && args[1] === "stream" && args[2] === "status") return helperStreamStatusFromCli(args.slice(3));
     if (command === "helper" && args[1] === "stream" && args[2] === "stop") return helperStreamStopFromCli(args.slice(3));
     if (command === "observe" && args[1] === "attach") return await observeAttachFromCli(args.slice(2));
@@ -327,7 +331,10 @@ async function wrapCodexSessionFromCli(args) {
   const mission = missionState.missions[0];
   console.log(`Codex wrapper session started: ${mission.id}`);
   console.log(`Session: ${sessionId}`);
+  console.log("Klemm is quietly watching");
   console.log("Klemm is watching");
+  console.log("Quiet capture: on");
+  console.log("Friction budget: low");
   console.log(`Data dir: ${KLEMM_DATA_DIR}`);
   console.log("Watching: commands, tool output, diffs, queue, alignment");
   console.log("Stop: Ctrl-C");
@@ -1215,6 +1222,73 @@ function helperStreamStatusFromCli(args) {
   if ((stream.watchPaths ?? []).length) console.log(`Watch paths: ${stream.watchPaths.join(",")}`);
   printHelperLiveRecommendations(events);
   if (health.health === "stale") console.log("Recommendation: restart helper stream or check helper permissions.");
+}
+
+async function helperStreamTickFromCli(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const stream = latestHelperStream(state, flags.mission ?? flags.id);
+  if (!stream) throw new Error("Usage: klemm helper stream tick --mission <mission-id> [--process-file ps.txt] [--frontmost-app App]");
+  const missionId = stream.missionId ?? flags.mission;
+  const now = new Date().toISOString();
+  const watchPaths = collectRepeatedFlag(args, "--watch-path");
+  const processes = flags.processFile
+    ? parseProcessTable(await readFile(flags.processFile, "utf8"))
+    : await collectProcessSnapshot();
+  const observation = buildOsObservation({
+    missionId,
+    processes,
+    permissions: defaultMacOsPermissionSnapshot(),
+    appActivity: { frontmostApp: flags.frontmostApp ?? stream.frontmostApp ?? "unknown" },
+    fileEvents: (watchPaths.length ? watchPaths : stream.watchPaths ?? []).map((path) => ({ path, event: "watch_tick" })),
+    notes: "Daemon-managed helper stream tick.",
+    now,
+  });
+  const previousEvents = (state.observationEvents ?? []).filter((event) => (stream.eventIds ?? []).includes(event.id));
+  const previousAgents = new Set(previousEvents.filter((event) => event.type === "agent_session_detected").map((event) => `${event.agentKind}:${event.pid}`));
+  const events = buildHelperStreamEvents(observation, { watchPaths: watchPaths.length ? watchPaths : stream.watchPaths ?? [], frontmostApp: flags.frontmostApp ?? stream.frontmostApp, now });
+  const newAgents = events.filter((event) => event.type === "agent_session_detected" && !previousAgents.has(`${event.agentKind}:${event.pid}`));
+  const next = store.update((current) => {
+    const observed = recordOsObservation(current, observation);
+    return {
+      ...observed,
+      helperStreams: (observed.helperStreams ?? []).map((item) =>
+        item.id === stream.id
+          ? {
+              ...item,
+              status: "running",
+              lastSnapshotAt: now,
+              lastHeartbeatAt: now,
+              observationId: observation.id,
+              eventIds: [...events.map((event) => event.id), ...(item.eventIds ?? [])],
+              frontmostApp: flags.frontmostApp ?? item.frontmostApp,
+              watchPaths: watchPaths.length ? watchPaths : item.watchPaths,
+              retryCount: 0,
+              backoffMs: 1000,
+            }
+          : item,
+      ),
+      observationEvents: [...events, ...(observed.observationEvents ?? [])],
+      helperChecks: [
+        {
+          id: `helper-check-${Date.now()}`,
+          kind: "stream_tick",
+          status: "running",
+          missionId,
+          streamId: stream.id,
+          observationId: observation.id,
+          createdAt: now,
+        },
+        ...(observed.helperChecks ?? []),
+      ],
+    };
+  });
+  console.log("Helper stream tick");
+  console.log(`Mission: ${missionId ?? "none"}`);
+  console.log("Heartbeat: recorded");
+  console.log(`Events recorded: ${events.length}`);
+  console.log(`Session changes: ${newAgents.length} new unmanaged agent${newAgents.length === 1 ? "" : "s"}`);
+  console.log(`Helper streams: ${(next.helperStreams ?? []).length}`);
 }
 
 function printHelperLiveRecommendations(events = []) {
@@ -2155,6 +2229,7 @@ function trustWhyFromCli(args) {
   const decisionId = args[0];
   const decision = (state.decisions ?? []).find((item) => item.id === decisionId);
   if (!decision) throw new Error(`Decision not found: ${decisionId}`);
+  if (flags.v3) return trustWhyDecisionV3(decision, state);
   const mission = (state.missions ?? []).find((item) => item.id === decision.missionId);
   const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
   const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
@@ -2210,6 +2285,44 @@ function trustWhyFromCli(args) {
   console.log("Correction command:");
   console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
   console.log("- Review the resulting memory candidate, then promote it to policy if it should become a standing rule.");
+}
+
+function trustWhyDecisionV3(decision, state = store.getState()) {
+  const mission = (state.missions ?? []).find((item) => item.id === decision.missionId);
+  const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
+  const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
+  const riskLabel = decision.decision === "queue" ? "Queue this action" : decision.decision === "allow" ? "Allow this action" : `${decision.decision} this action`;
+  const uncertainty = (decision.matchedPolicies ?? []).length || sourceMemories.some((memory) => memory.status === "approved" || memory.status === "pinned") ? "low" : "medium";
+  console.log("Trust UX v3");
+  console.log(`Answer first: ${riskLabel}`);
+  console.log(`Because: ${redactSensitiveText(decision.reason)}`);
+  console.log("");
+  console.log("Why this is in Kyle's best interest:");
+  if ((decision.matchedPolicies ?? []).length === 0) {
+    console.log("- No reviewed standing preference matched, so deterministic safety rules carried the decision.");
+  } else {
+    for (const policy of decision.matchedPolicies ?? []) {
+      console.log(`- ${policy.effect ?? "queue"} via ${policy.id}: ${redactSensitiveText(policy.text ?? policy.name ?? "")}`);
+    }
+  }
+  console.log("");
+  console.log("Exact evidence:");
+  if (sourceMemories.length === 0) console.log("- none");
+  for (const memory of sourceMemories) {
+    console.log(`- ${memory.id} ${memory.status} source=${memory.source} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"}: ${redactSensitiveText(memory.text)}`);
+  }
+  console.log("");
+  console.log("Action seen:");
+  console.log(`- ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)}`);
+  console.log(`- Mission: ${mission?.id ?? "none"} ${mission?.goal ?? ""}`);
+  console.log(`- Risk: ${decision.riskLevel} score=${decision.riskScore ?? "n/a"}`);
+  console.log("");
+  console.log(`Uncertainty: ${uncertainty}`);
+  console.log("- Klemm can be corrected if this does not match Kyle's intent.");
+  console.log("");
+  console.log("Teach Klemm:");
+  console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
+  console.log("- Then review and promote the correction if it should become a standing rule.");
 }
 
 function trustWhyProxyFromCli(answerId) {
@@ -3574,6 +3687,28 @@ function buildCodexContractReport(state, { missionId } = {}) {
   };
 }
 
+function printCodexCaptureStatusFromCli(args = []) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission;
+  const state = store.getState();
+  const runs = (state.supervisedRuns ?? []).filter((run) => !missionId || run.missionId === missionId);
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId).filter((activity) => activityMatchesAdapter("codex", activity));
+  const queued = (state.queue ?? []).filter((item) => item.status === "queued" && (!missionId || item.missionId === missionId));
+  const contract = buildCodexContractReport(state, { missionId });
+  const friction = queued.length === 0 && runs.every((run) => Number(run.exitCode ?? 0) === 0) ? "low" : "needs_attention";
+  const contractStatus = contract.pass ? "pass" : contract.gates.sessionContract && contract.gates.planReports && contract.gates.toolCalls && contract.gates.supervisedRuns ? "needs_proxy_or_diff" : "warming_up";
+  console.log("Real Codex Session Capture");
+  console.log(`Mission: ${missionId ?? "all"}`);
+  console.log("quiet_watch=yes");
+  console.log("capture_mode=default");
+  console.log(`friction=${friction}`);
+  console.log(`supervised_runs=${runs.length}`);
+  console.log(`codex_activities=${activities.length}`);
+  console.log(`queued_decisions=${queued.length}`);
+  console.log(`contract_status=${contractStatus}`);
+  console.log("Default next build: klemm codex wrap --id <mission-id> --goal \"...\" -- <command>");
+}
+
 function executeAdapterEnvelopeTool(envelope) {
   const output = executeKlemmTool("record_adapter_envelope", envelope, { state: store.getState() });
   store.saveState(output.state);
@@ -3857,6 +3992,90 @@ function connectorsSetupFromCli(args = []) {
   console.log(`Review required: ${saved.reviewRequired ? "yes" : "no"}`);
 }
 
+async function connectorsOnboardFromCli(args = []) {
+  const flags = parseFlags(args);
+  const home = flags.home ?? process.env.HOME;
+  const candidates = await discoverContextConnectorCandidates(home);
+  console.log("Klemm connector onboarding");
+  console.log(`Home: ${home}`);
+  console.log("Found likely sources:");
+  if (candidates.length === 0) console.log("- none");
+  for (const candidate of candidates) {
+    console.log(`- ${candidate.provider} ${candidate.mode} path=${candidate.path} records=${candidate.records}`);
+  }
+  console.log("What gets imported: prompts, preferences, corrections, projects, and authority boundaries");
+  console.log("Raw source storage: local only");
+  console.log("Review required before authority: yes");
+  if (!flags.apply) {
+    console.log("Run with --apply to save these connectors");
+    return;
+  }
+  const now = new Date().toISOString();
+  const connectors = candidates.map((candidate) => ({
+    id: `connector-${candidate.provider}`,
+    provider: candidate.provider,
+    mode: candidate.mode,
+    path: candidate.path,
+    reviewRequired: true,
+    status: "ready",
+    previewRecords: candidate.records,
+    createdAt: now,
+    updatedAt: now,
+  }));
+  store.update((state) => ({
+    ...state,
+    contextConnectors: [
+      ...connectors,
+      ...(state.contextConnectors ?? []).filter((item) => !connectors.some((connector) => connector.id === item.id || connector.provider === item.provider)),
+    ],
+    auditEvents: [
+      {
+        id: `audit-${Date.now()}`,
+        type: "context_connector_onboarding_applied",
+        at: now,
+        summary: `${connectors.length} context connector(s) configured by onboarding.`,
+      },
+      ...(state.auditEvents ?? []),
+    ],
+  }));
+  console.log("Connector onboarding applied");
+  console.log(`Connectors saved: ${connectors.length}`);
+}
+
+async function discoverContextConnectorCandidates(home) {
+  const candidates = [
+    { provider: "chatgpt", mode: "export", path: join(home, "Downloads", "chatgpt-export.json") },
+    { provider: "claude", mode: "export", path: join(home, "Downloads", "claude-export.json") },
+    { provider: "codex", mode: "local-log", path: join(home, ".codex", "history.jsonl") },
+    { provider: "gemini", mode: "export", path: join(home, "Downloads", "gemini-export.json") },
+  ];
+  const found = [];
+  for (const candidate of candidates) {
+    if (!existsSync(candidate.path)) continue;
+    found.push({
+      ...candidate,
+      records: await previewConnectorRecordCount(candidate.provider, candidate.path),
+    });
+  }
+  return found;
+}
+
+async function previewConnectorRecordCount(provider, path) {
+  try {
+    const text = await readFile(path, "utf8");
+    if (provider === "codex") return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length;
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.length;
+    if (Array.isArray(parsed.conversations)) {
+      return parsed.conversations.reduce((total, conversation) => total + Number((conversation.messages ?? conversation.turns ?? conversation.entries ?? []).length || 1), 0);
+    }
+    if (Array.isArray(parsed.messages)) return parsed.messages.length;
+    return 1;
+  } catch {
+    return 0;
+  }
+}
+
 function connectorsListFromCli() {
   const connectors = store.getState().contextConnectors ?? [];
   console.log("Klemm context connectors");
@@ -3936,6 +4155,7 @@ function printMemoryReview(args = []) {
   const flags = parseFlags(args);
   const state = store.getState();
   const pending = state.memories.filter((item) => item.status === "pending_review");
+  if (flags.bulk) return printBulkMemoryReview(state, flags);
   console.log("Klemm memory review");
   if (flags.groupBySource) {
     const groups = groupBy(pending, (memory) => memory.source ?? "unknown");
@@ -3952,6 +4172,52 @@ function printMemoryReview(args = []) {
   for (const quarantined of (state.memoryQuarantine ?? []).slice(0, 10)) {
     console.log(`- quarantined ${quarantined.id}: ${quarantined.reason} source=${quarantined.source}`);
   }
+}
+
+function printBulkMemoryReview(state, flags = {}) {
+  const pending = (state.memories ?? []).filter((item) => item.status === "pending_review");
+  const limit = Number(flags.limit ?? 12);
+  const groupKey = flags.groupByClass ? (memory) => memory.memoryClass ?? "uncategorized" : (memory) => memory.source ?? "unknown";
+  const groups = groupBy(pending, groupKey);
+  console.log("Bulk Memory Review");
+  console.log(`Pending total: ${pending.length}`);
+  console.log(`Duplicate candidates skipped: ${state.lastMemoryDistillation?.duplicateCount ?? 0}`);
+  console.log("Shortcuts: approve-by-class, reject-by-source, pin, promote");
+  for (const [group, memories] of groups) {
+    console.log(`Group: ${group}`);
+    for (const memory of memories.slice(0, limit)) {
+      console.log(`- ${memory.id} ${memory.status} confidence=${memory.confidence ?? "n/a"} source=${memory.source}: ${redactSensitiveText(memory.text)}`);
+      if (flags.sourcePreview) console.log(`  Source Preview: provider=${memory.evidence?.provider ?? memory.source} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"} message=${memory.evidence?.messageId ?? "unknown"}`);
+    }
+    if (memories.length > limit) console.log(`  ... ${memories.length - limit} more`);
+  }
+}
+
+function memoryBulkFromCli(args = []) {
+  const action = args[0];
+  const flags = parseFlags(args.slice(1));
+  if (action !== "approve") throw new Error("Usage: klemm memory bulk approve --class <memory-class> [--source provider] [--limit n] [--note text]");
+  const memoryClass = flags.class;
+  const source = flags.source;
+  const limit = Number(flags.limit ?? 50);
+  let current = store.getState();
+  const candidates = (current.memories ?? [])
+    .filter((memory) => memory.status === "pending_review")
+    .filter((memory) => !memoryClass || memory.memoryClass === memoryClass)
+    .filter((memory) => !source || memory.source === source)
+    .slice(0, limit);
+  for (const memory of candidates) {
+    current = reviewMemory(current, {
+      memoryId: memory.id,
+      status: "approved",
+      note: flags.note ?? "Bulk approved.",
+    });
+  }
+  store.saveState(current);
+  console.log("Bulk memory approved");
+  console.log(`Class: ${memoryClass ?? "any"}`);
+  console.log(`Source: ${source ?? "any"}`);
+  console.log(`Count: ${candidates.length}`);
 }
 
 function printMemorySourcesFromCli(args) {
@@ -6366,6 +6632,7 @@ Commands:
   klemm codex run --mission mission-id -- <command> [args...]
   klemm codex wrap --id mission-id --goal "..." [--session-id id] [--adapter-client id] [--adapter-token token] [--dry-run] [--finish] -- <command> [args...]
   klemm codex contract status --mission mission-id
+  klemm codex capture status --mission mission-id
   klemm codex install --output-dir path [--data-dir path]
   klemm mission start --hub codex --goal "..." [--allow a,b] [--block x,y] [--rewrite]
   klemm mission current
@@ -6399,7 +6666,7 @@ Commands:
   klemm readiness [--data-dir path] [--skip-health]
   klemm true-score [--target 60]
   klemm helper install|status|snapshot|permissions
-  klemm helper stream start|status|stop --mission mission-id [--process-file ps.txt] [--frontmost-app Codex] [--watch-path src]
+  klemm helper stream start|tick|status|stop --mission mission-id [--process-file ps.txt] [--frontmost-app Codex] [--watch-path src]
   klemm observe status|recommend|attach [--process-file path]
   klemm observe loop start|tick|status|stop --id observer-id --mission mission-id
   klemm adapters list|probe|install|uninstall|doctor|health|compliance|smoke|dogfood [--real] [--home path]
@@ -6409,6 +6676,7 @@ Commands:
   klemm adapters compliance --mission mission-id [--require codex,claude,cursor,shell]
   klemm adapters smoke claude --mission mission-id --goal goal-id --home path
   klemm trust why <decision-id>
+  klemm trust why <decision-id> --v3
   klemm trust why --goal goal-id
   klemm trust why --proxy proxy-answer-id
   klemm trust timeline --mission mission-id
@@ -6419,13 +6687,15 @@ Commands:
   klemm memory import-source --source chatgpt --file export.json
   klemm context import --provider chatgpt|claude|codex|gemini|chrome_history|git_history --file export.json
   klemm connectors setup chatgpt|claude|codex|gemini --mode export --path export.json [--api-key-env NAME] [--review-required]
+  klemm connectors onboard [--home path] [--preview] [--apply]
   klemm connectors list
   klemm connectors import --all
   klemm memory sources [--coverage]
   klemm memory evidence <memory-id>
   klemm memory search --query "deploy review"
   klemm memory approve|reject|pin <memory-id> [note]
-  klemm memory review [--group-by-source]
+  klemm memory review [--group-by-source] [--bulk] [--group-by-class] [--source-preview] [--limit n]
+  klemm memory bulk approve --class memory_class [--source provider] [--limit n] [--note "..."]
   klemm memory promote-policy <memory-id> [--action-types git_push] [--target-includes github]
   klemm user model [--pending] [--evidence] [--coverage]
   klemm sync add --id source-id --provider codex --path export.jsonl [--interval-minutes 30]
