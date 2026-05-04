@@ -27,8 +27,9 @@ Session finish checklist:
 2. Run `klemm codex debrief --mission <mission-id>`.
 3. Inspect unresolved queue items with `klemm queue` and `klemm queue inspect`.
 4. Resolve user decisions with `klemm queue approve|deny|rewrite <decision-id>` when the user gives instructions.
-5. Finish completed missions with `klemm mission finish <mission-id> [note]`.
-6. Leave the user with what was allowed, blocked, queued, rewritten, and still unresolved.
+5. Prefer `klemm dogfood finish --mission <mission-id> --note "<note>"` for dogfood sessions so Klemm refuses unresolved queues, prints the debrief, finishes the mission, and reports final live state.
+6. Run `klemm readiness --skip-health` before claiming a private-alpha dogfood loop is ship-ready.
+7. Leave the user with what was allowed, blocked, queued, rewritten, readiness score, and still unresolved.
 
 Use the Klemm local CLI or MCP-style tools when available:
 
@@ -140,6 +141,8 @@ klemm mission list
 klemm mission finish <mission-id> [note]
 klemm dogfood status --mission <mission-id>
 klemm dogfood debrief --mission <mission-id>
+klemm dogfood finish --mission <mission-id> --note "work complete"
+klemm readiness --skip-health
 klemm tui --mission <mission-id>
 klemm tui --mission <mission-id> --view trust --decision <decision-id>
 ```

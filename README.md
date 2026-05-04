@@ -35,6 +35,8 @@ npm run klemm -- queue deny decision-push "Review before publishing"
 npm run klemm -- queue rewrite decision-push --to "git status --short"
 npm run klemm -- dogfood status --mission mission-codex
 npm run klemm -- dogfood debrief --mission mission-codex
+npm run klemm -- dogfood finish --mission mission-codex --note "work complete"
+npm run klemm -- readiness --data-dir ./data --skip-health
 npm run klemm -- memory ingest-export --source chatgpt_export --file export.json
 npm run klemm -- context import --provider chatgpt --file export.json
 npm run klemm -- context import --provider chrome_history --file "$HOME/Library/Application Support/Google/Chrome/Default/History"
@@ -387,7 +389,7 @@ npm run klemm -- uninstall --dry-run
 
 `klemm status` now reports daemon transport health and whether the local store fallback is available or active.
 
-Commands that have daemon-first coverage print `Transport: daemon` when they use the local HTTP daemon and `Transport: local fallback` when they fall back to the local store. `klemm dogfood status` renders the compact operator loop: mission, queue, recent work, and next commands.
+Commands that have daemon-first coverage print `Transport: daemon` when they use the local HTTP daemon and `Transport: local fallback` when they fall back to the local store. `klemm dogfood status` renders the compact operator loop: mission, queue, recent work, and next commands. `klemm dogfood finish` refuses to close a mission while decisions are still queued unless `--force` is passed, then prints the debrief and final live state. `klemm readiness` is the private-alpha ship gate: install artifacts, wrapper, MCP config, policy pack, supervised session proof, reviewed memory, clean queue, clean missions, doctor health, and audit trail.
 
 ## Codex Skill
 

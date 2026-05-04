@@ -35,6 +35,8 @@ npm run klemm -- queue deny decision-push "Review before publishing"
 npm run klemm -- queue rewrite decision-push --to "git status --short"
 npm run klemm -- dogfood status --mission mission-codex
 npm run klemm -- dogfood debrief --mission mission-codex
+npm run klemm -- dogfood finish --mission mission-codex --note "work complete"
+npm run klemm -- readiness --data-dir ./data --skip-health
 npm run klemm -- memory ingest-export --source chatgpt_export --file export.json
 npm run klemm -- context import --provider chatgpt --file export.json
 npm run klemm -- context import --provider chrome_history --file "$HOME/Library/Application Support/Google/Chrome/Default/History"
@@ -246,7 +248,7 @@ npm run klemm -- doctor --pid-file ./data/klemm.pid --log-file ./data/logs/klemm
 
 `klemm status` reports daemon transport health and whether the local store fallback is available or active.
 
-Commands that have daemon-first coverage print `Transport: daemon` when they use the local HTTP daemon and `Transport: local fallback` when they fall back to the local store. `klemm dogfood status` renders the compact operator loop: mission, queue, recent work, and next commands.
+Commands that have daemon-first coverage print `Transport: daemon` when they use the local HTTP daemon and `Transport: local fallback` when they fall back to the local store. `klemm dogfood status` renders the compact operator loop: mission, queue, recent work, and next commands. `klemm dogfood finish` refuses to close a mission while decisions are still queued unless `--force` is passed, then prints the debrief and final live state. `klemm readiness` is the private-alpha ship gate: install artifacts, wrapper, MCP config, policy pack, supervised session proof, reviewed memory, clean queue, clean missions, doctor health, and audit trail.
 
 ## Packaging
 
@@ -339,6 +341,8 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm onboard v2`: first-run mode/source/watch-path/agent-wrapper onboarding.
 - `klemm codex event/context/debrief`: stable Codex adapter packet commands.
 - `klemm codex dogfood/report/run/wrap`: hardened Codex dogfood adapter flow and end-to-end wrapper.
+- `klemm dogfood finish`: queue-safe dogfood closeout with debrief, mission finish, and final live-state check.
+- `klemm readiness`: private-alpha ship gate for install artifacts, wrapper, MCP config, policy pack, supervised session proof, reviewed memory, clean queue, clean missions, doctor health, and audit trail.
 - `klemm codex install`: Codex-ready skill, MCP config, and wrapper bundle.
 - `klemm run codex|claude|shell`: named runtime wrapper plus profile-file v2 config for supervised agent launches.
 - `klemm event record`: agent event protocol for planned tools, commands, files, external actions, and lifecycle events.

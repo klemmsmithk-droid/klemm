@@ -156,6 +156,8 @@ async function main() {
     if (command === "debrief") return await printDebrief(args.slice(1));
     if (command === "dogfood" && args[1] === "status") return printDogfoodStatus(args.slice(2));
     if (command === "dogfood" && args[1] === "debrief") return await printDebrief(args.slice(2));
+    if (command === "dogfood" && args[1] === "finish") return await finishDogfoodFromCli(args.slice(2));
+    if (command === "readiness") return await printReadinessFromCli(args.slice(1));
     if (command === "tui") return await printTui(args.slice(1));
     if (command === "run") return await runRuntimeFromCli(args.slice(1));
     if (command === "supervise") return await superviseFromCli(args.slice(1));
@@ -702,6 +704,127 @@ async function doctorFromCli(args) {
     if (check.name === "Store") console.log(check.detail);
   }
   process.exitCode = exitCode;
+}
+
+async function printReadinessFromCli(args) {
+  const flags = parseFlags(args);
+  const report = await buildPrivateAlphaReadinessReport(flags);
+  console.log("Klemm private-alpha readiness");
+  console.log(`Score: ${report.score}%`);
+  console.log(`Ship gate: ${report.ready ? "pass" : "fail"}`);
+  for (const gate of report.gates) {
+    console.log(`${gate.id}: ${gate.pass ? "pass" : "fail"} - ${gate.detail}`);
+  }
+  console.log("Next actions:");
+  if (report.nextActions.length === 0) {
+    console.log("- ship private alpha");
+  } else {
+    for (const action of report.nextActions) console.log(`- ${action}`);
+  }
+  process.exitCode = report.ready ? 0 : 1;
+}
+
+async function buildPrivateAlphaReadinessReport(flags = {}) {
+  const dataDir = flags.dataDir ?? KLEMM_DATA_DIR;
+  const state = store.getState();
+  const codexDir = flags.codexDir ?? join(dataDir, "codex-integration");
+  const wrapperPath = join(codexDir, "bin", "klemm-codex");
+  const skillPath = join(codexDir, "skills", "klemm", "SKILL.md");
+  const mcpPath = join(codexDir, "mcp.json");
+  const profilesPath = flags.profiles ?? join(dataDir, "profiles", "default-profiles.json");
+  const plistPath = flags.plist ?? join(dataDir, "com.klemm.daemon.plist");
+  const logFile = flags.logFile ?? join(dataDir, "logs", "klemm-daemon.log");
+  const permission = await permissionCheck("Permissions", dataDir, { maxMode: 0o755 });
+  const health = flags.skipHealth ? { ok: true, detail: "skipped" } : await probeDaemonHealth(flags.url);
+  const wrapperExecutable = await executableFileExists(wrapperPath);
+  const activeMissions = (state.missions ?? []).filter((mission) => mission.status === "active");
+  const queued = (state.queue ?? []).filter((decision) => decision.status === "queued");
+  const activities = state.agentActivities ?? [];
+  const supervisedRuns = state.supervisedRuns ?? [];
+
+  const gates = [
+    {
+      id: "install_artifacts",
+      pass: existsSync(plistPath) && existsSync(profilesPath) && existsSync(skillPath),
+      detail: `plist=${existsSync(plistPath)} profiles=${existsSync(profilesPath)} skill=${existsSync(skillPath)}`,
+      action: `klemm install --data-dir "${dataDir}" --policy-pack coding-afk --agents codex,claude,shell`,
+    },
+    {
+      id: "codex_wrapper",
+      pass: wrapperExecutable,
+      detail: wrapperExecutable ? wrapperPath : `${wrapperPath} missing or not executable`,
+      action: `klemm codex install --output-dir "${codexDir}" --data-dir "${dataDir}"`,
+    },
+    {
+      id: "mcp_config",
+      pass: existsSync(mcpPath),
+      detail: mcpPath,
+      action: `klemm install mcp --client codex --output "${mcpPath}"`,
+    },
+    {
+      id: "policy_pack",
+      pass: (state.policies ?? []).some((policy) => policy.source === "policy_pack" && policy.status === "active"),
+      detail: `${(state.policies ?? []).filter((policy) => policy.source === "policy_pack" && policy.status === "active").length} active policy-pack policies`,
+      action: "klemm policy pack apply coding-afk",
+    },
+    {
+      id: "supervised_session",
+      pass:
+        supervisedRuns.length > 0 &&
+        activities.some((activity) => activity.type === "session_start") &&
+        activities.some((activity) => activity.type === "session_finish") &&
+        activities.some((activity) => activity.type === "debrief"),
+      detail: `runs=${supervisedRuns.length} activities=${activities.length}`,
+      action: `klemm codex wrap --id mission-ready --goal "Readiness proof" --finish -- node -e "console.log('ready')"`,
+    },
+    {
+      id: "memory_review",
+      pass: (state.memories ?? []).some((memory) => memory.status === "approved" || memory.status === "pinned"),
+      detail: `${(state.memories ?? []).filter((memory) => memory.status === "approved" || memory.status === "pinned").length} reviewed memories`,
+      action: "klemm memory review && klemm memory approve <memory-id>",
+    },
+    {
+      id: "queue_clean",
+      pass: queued.length === 0,
+      detail: `${queued.length} queued decisions`,
+      action: "klemm queue",
+    },
+    {
+      id: "mission_clean",
+      pass: activeMissions.length === 0,
+      detail: `${activeMissions.length} active missions`,
+      action: "klemm dogfood finish --mission <mission-id>",
+    },
+    {
+      id: "doctor",
+      pass: permission.status !== "warning" && permission.status !== "missing" && existsSync(logFile) && health.ok,
+      detail: `permissions=${permission.status} logs=${existsSync(logFile) ? "ok" : "missing"} health=${health.ok ? health.detail ?? "ok" : health.error ?? "unavailable"}`,
+      action: `klemm doctor --data-dir "${dataDir}" --repair${flags.skipHealth ? " --skip-health" : ""}`,
+    },
+    {
+      id: "audit_trail",
+      pass: (state.auditEvents ?? []).length > 0 || (state.events ?? []).length > 0,
+      detail: `${(state.auditEvents ?? []).length} audit events, ${(state.events ?? []).length} mission events`,
+      action: "run a supervised mission before shipping",
+    },
+  ];
+  const passed = gates.filter((gate) => gate.pass).length;
+  const score = Math.round((passed / gates.length) * 100);
+  return {
+    score,
+    ready: score === 100,
+    gates,
+    nextActions: gates.filter((gate) => !gate.pass).map((gate) => gate.action),
+  };
+}
+
+async function executableFileExists(path) {
+  try {
+    const info = await stat(path);
+    return info.isFile() && Boolean(info.mode & 0o111);
+  } catch {
+    return false;
+  }
 }
 
 async function installDaemonFromCli(args) {
@@ -1839,6 +1962,32 @@ function printDogfoodStatus(args) {
   console.log(renderKlemmDashboard(store.getState(), { missionId: flags.mission }));
 }
 
+async function finishDogfoodFromCli(args) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? args[0];
+  if (!missionId) throw new Error("Usage: klemm dogfood finish --mission <mission-id> [--note text] [--force]");
+  const state = store.getState();
+  const unresolved = (state.queue ?? []).filter((decision) => decision.status === "queued" && decision.missionId === missionId);
+  if (unresolved.length > 0 && !flags.force) {
+    console.log("Dogfood finish blocked");
+    console.log(`Mission: ${missionId}`);
+    console.log(`Unresolved queue: ${unresolved.length}`);
+    for (const decision of unresolved.slice(0, 5)) {
+      console.log(`- ${decision.id} ${decision.actionType}: klemm queue inspect ${decision.id}`);
+    }
+    process.exitCode = 2;
+    return;
+  }
+
+  console.log(summarizeDebrief(state, { missionId }));
+  const finished = finishMissionLocal(missionId, flags.note ?? "dogfood complete");
+  console.log(`Mission finished: ${finished.id}`);
+  const current = store.getState();
+  const queued = (current.queue ?? []).filter((decision) => decision.status === "queued").length;
+  const active = (current.missions ?? []).filter((mission) => mission.status === "active").length;
+  console.log(`Live state: ${queued === 0 && active === 0 ? "clean" : `active=${active} queued=${queued}`}`);
+}
+
 async function printTui(args) {
   const flags = parseFlags(args);
   console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: flags.view ?? "overview", logFile: flags.logFile, decision: flags.decision }));
@@ -2747,6 +2896,8 @@ _klemm() {
     'status:Show daemon and local store status'
     'install:Install Klemm daemon, Codex wrapper, profiles, and policies'
     'codex wrap:Run a wrapped Codex dogfood session'
+    'dogfood finish:Finish a dogfood mission after queue-safe debrief'
+    'readiness:Score private-alpha ship readiness'
     'queue inspect:Inspect a queued authority decision'
     'policy pack:List or apply built-in policy packs'
     'profiles template:Print a runtime profile template'
@@ -3117,6 +3268,8 @@ Commands:
   klemm approve|deny|rewrite <decision-id> [note]
   klemm dogfood status --mission mission-id
   klemm dogfood debrief --mission mission-id
+  klemm dogfood finish --mission mission-id [--note "work complete"] [--force]
+  klemm readiness [--data-dir path] [--skip-health]
   klemm memory ingest --source chatgpt_export --file export.txt
   klemm memory ingest-export --source chatgpt_export --file export.json
   klemm memory import-source --source chatgpt --file export.json
