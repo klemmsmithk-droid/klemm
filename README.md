@@ -9,7 +9,7 @@ Klemm is not only an MCP tool. The MCP-style tool surface is an adapter; the loc
 ```bash
 npm run klemm -- status
 npm run klemm -- version
-npm run klemm -- install --data-dir ./data --policy-pack coding-afk --agents codex,claude,shell --skip-health
+npm run klemm -- install --data-dir ./data --policy-pack coding-afk --agents codex,claude,shell
 npm run klemm -- setup --data-dir ./data --codex-dir ./codex-klemm --codex-history ./codex.jsonl --never "Never let agents deploy production without approval." --dry-run-launchctl
 npm run klemm -- onboard v2 --stdin
 npm run klemm -- codex hub --id mission-codex --goal "Dogfood Codex supervision"
@@ -102,7 +102,7 @@ npm run klemm -- setup --data-dir "$HOME/Library/Application Support/Klemm" --co
 npm run klemm -- onboard v2 --stdin
 ```
 
-`klemm install` is the primary installer path. It writes the LaunchAgent plist, migrates the local store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profile templates, applies the selected policy pack, and runs doctor. `klemm setup` remains the lower-level setup path for explicit artifact wiring.
+`klemm install` is the primary installer path. It writes the LaunchAgent plist, migrates the local store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profile templates, applies the selected policy pack, runs doctor with daemon health skipped by default, and prints the next commands. Use `--check-health` only when the daemon is already running. `klemm setup` remains the lower-level setup path for explicit artifact wiring.
 
 `klemm onboard v2 --stdin` is the first-run terminal wizard surface. It records the default mode, chat-history source, repo/watch path, agent wrappers to install, and first memory approvals.
 

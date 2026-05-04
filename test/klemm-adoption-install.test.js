@@ -35,7 +35,31 @@ async function runKlemm(args, { env = {}, input = "", timeoutMs = 5000 } = {}) {
   });
 }
 
-test("klemm install writes daemon, skill, MCP, wrapper, profiles, policy pack, and doctor output", async () => {
+async function runExecutable(command, args, { env = {}, input = "", timeoutMs = 5000 } = {}) {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: process.cwd(),
+      env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      resolve({ status: 124, stdout, stderr: `${stderr}\nTimed out: ${command} ${args.join(" ")}` });
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", reject);
+    child.on("close", (status) => {
+      clearTimeout(timeout);
+      resolve({ status, stdout, stderr });
+    });
+    child.stdin.end(input);
+  });
+}
+
+test("klemm install writes artifacts and prints a clean first-run summary", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-install-"));
   const env = { KLEMM_DATA_DIR: dataDir };
 
@@ -47,16 +71,19 @@ test("klemm install writes daemon, skill, MCP, wrapper, profiles, policy pack, a
     "coding-afk",
     "--agents",
     "codex,claude,shell",
-    "--skip-health",
   ], { env });
 
   assert.equal(installed.status, 0, installed.stderr);
-  assert.match(installed.stdout, /Klemm install complete/);
-  assert.match(installed.stdout, /Daemon plist:/);
+  assert.match(installed.stdout, /Klemm is installed/);
+  assert.match(installed.stdout, /Installed:/);
+  assert.match(installed.stdout, /Daemon LaunchAgent:/);
   assert.match(installed.stdout, /Codex wrapper:/);
-  assert.match(installed.stdout, /Default profiles:/);
-  assert.match(installed.stdout, /Policy pack applied: coding-afk/);
-  assert.match(installed.stdout, /Klemm doctor/);
+  assert.match(installed.stdout, /Runtime profiles:/);
+  assert.match(installed.stdout, /Policy pack: coding-afk/);
+  assert.match(installed.stdout, /Next:/);
+  assert.match(installed.stdout, /klemm status/);
+  assert.doesNotMatch(installed.stdout, /Daemon store migrated/);
+  assert.doesNotMatch(installed.stdout, /Klemm doctor/);
 
   assert.match(await readFile(join(dataDir, "com.klemm.daemon.plist"), "utf8"), /com\.klemm\.daemon/);
   assert.match(await readFile(join(dataDir, "codex-integration", "skills", "klemm", "SKILL.md"), "utf8"), /klemm codex wrap/);
@@ -69,6 +96,14 @@ test("klemm install writes daemon, skill, MCP, wrapper, profiles, policy pack, a
 
   const simulated = await runKlemm(["policy", "simulate", "--type", "git_push", "--target", "origin main", "--external", "git_push"], { env });
   assert.match(simulated.stdout, /coding-afk/);
+});
+
+test("direct klemm executable suppresses Node sqlite warning", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-direct-bin-"));
+  const direct = await runExecutable(CLI_PATH, ["version"], { env: { KLEMM_DATA_DIR: dataDir } });
+  assert.equal(direct.status, 0, direct.stderr);
+  assert.match(direct.stdout, /Klemm version:/);
+  assert.doesNotMatch(direct.stderr, /ExperimentalWarning/);
 });
 
 test("onboarding v2 records mode, sources, watch paths, agent wrappers, and approved candidates", async () => {

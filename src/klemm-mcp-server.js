@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --no-warnings
 import { createInterface } from "node:readline";
 
 import { createKlemmStore } from "./klemm-store.js";

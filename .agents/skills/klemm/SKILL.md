@@ -31,12 +31,12 @@ Session finish checklist:
 Use the Klemm local CLI or MCP-style tools when available:
 
 ```text
-klemm install --data-dir ./data --policy-pack coding-afk --agents codex,claude,shell --skip-health
+klemm install --data-dir ./data --policy-pack coding-afk --agents codex,claude,shell
 klemm onboard v2 --stdin
 klemm codex hub --id <mission-id> --goal "<goal>"
 ```
 
-Use `klemm install` for first install: it writes the daemon plist, migrates the store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profiles, applies a policy pack, and runs doctor. Use `klemm onboard v2 --stdin` for first-run mode/source/watch-path/agent-wrapper capture and first memory approvals.
+Use `klemm install` for first install: it writes the daemon plist, migrates the store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profiles, applies a policy pack, runs doctor with daemon health skipped by default, and prints the next commands. Use `--check-health` only when the daemon is already running. Use `klemm onboard v2 --stdin` for first-run mode/source/watch-path/agent-wrapper capture and first memory approvals.
 
 ## Authority Checks
 

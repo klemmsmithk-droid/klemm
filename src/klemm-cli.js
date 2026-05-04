@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --no-warnings
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, openSync } from "node:fs";
@@ -347,15 +347,26 @@ async function installKlemmFromCli(args) {
   const agents = normalizeListFlag(flags.agents || "codex,claude,shell");
   const pidFile = flags.pidFile ?? join(dataDir, "klemm.pid");
   const logFile = flags.logFile ?? join(dataDir, "logs", "klemm-daemon.log");
+  const healthSkipped = !flags.checkHealth;
 
-  console.log("Klemm install");
-  await installDaemonFromCli(["--output", plistPath, "--data-dir", dataDir, "--pid-file", pidFile, "--log-file", logFile]);
-  migrateDaemonStoreFromCli();
-  await installCodexIntegrationFromCli(["--output-dir", codexDir, "--data-dir", dataDir]);
+  await withCapturedConsole(async () => {
+    await installDaemonFromCli(["--output", plistPath, "--data-dir", dataDir, "--pid-file", pidFile, "--log-file", logFile]);
+    migrateDaemonStoreFromCli();
+    await installCodexIntegrationFromCli(["--output-dir", codexDir, "--data-dir", dataDir]);
+  });
   await writeDefaultProfiles(profilesPath, { agents, dataDir });
-  console.log(`Default profiles: ${profilesPath}`);
-  policyPackFromCli(["apply", policyPack]);
-  await doctorFromCli(["--data-dir", dataDir, "--pid-file", pidFile, "--log-file", logFile, ...(flags.skipHealth ? ["--skip-health"] : [])]);
+  await withCapturedConsole(async () => {
+    policyPackFromCli(["apply", policyPack]);
+    await doctorFromCli([
+      "--data-dir",
+      dataDir,
+      "--pid-file",
+      pidFile,
+      "--log-file",
+      logFile,
+      ...(healthSkipped ? ["--skip-health"] : []),
+    ]);
+  });
 
   store.update((state) => ({
     ...state,
@@ -374,9 +385,23 @@ async function installKlemmFromCli(args) {
     ],
   }));
 
-  console.log("Klemm install complete");
-  console.log(`Daemon plist: ${plistPath}`);
-  console.log(`Codex wrapper: ${join(codexDir, "bin", "klemm-codex")}`);
+  const wrapperPath = join(codexDir, "bin", "klemm-codex");
+  console.log("Klemm is installed");
+  console.log("");
+  console.log("Installed:");
+  console.log(`  - Daemon LaunchAgent: ${plistPath}`);
+  console.log(`  - Data directory: ${dataDir}`);
+  console.log(`  - Codex skill: ${join(codexDir, "skills", "klemm", "SKILL.md")}`);
+  console.log(`  - MCP config: ${join(codexDir, "mcp.json")}`);
+  console.log(`  - Codex wrapper: ${wrapperPath}`);
+  console.log(`  - Runtime profiles: ${profilesPath}`);
+  console.log(`  - Policy pack: ${policyPack}`);
+  console.log(`  - Doctor: ${healthSkipped ? "passed with daemon health skipped" : "passed"}`);
+  console.log("");
+  console.log("Next:");
+  console.log(`  1. Start daemon: klemm daemon start --data-dir "${dataDir}" --pid-file "${pidFile}" --log-file "${logFile}"`);
+  console.log("  2. Check status: klemm status");
+  console.log(`  3. Start Codex through Klemm: "${wrapperPath}"`);
 }
 
 async function setupKlemmFromCli(args) {
@@ -1850,6 +1875,20 @@ async function writeDefaultProfiles(profilesPath, { agents = ["codex", "claude",
   return profilesPath;
 }
 
+async function withCapturedConsole(callback) {
+  const originalLog = console.log;
+  const lines = [];
+  console.log = (...values) => {
+    lines.push(values.join(" "));
+  };
+  try {
+    const value = await callback();
+    return { value, lines };
+  } finally {
+    console.log = originalLog;
+  }
+}
+
 function buildProfileTemplate(agent = "codex", { dataDir = KLEMM_DATA_DIR } = {}) {
   const normalized = String(agent ?? "codex").toLowerCase();
   if (normalized === "claude") {
@@ -2712,7 +2751,7 @@ function printHelp() {
 Klemm CLI
 
 Commands:
-  klemm install [--data-dir path] [--policy-pack coding-afk] [--agents codex,claude,shell]
+  klemm install [--data-dir path] [--policy-pack coding-afk] [--agents codex,claude,shell] [--check-health]
   klemm setup [--data-dir path] [--codex-dir path] [--codex-history path] [--never "..."] [--dry-run-launchctl]
   klemm status
   klemm version
