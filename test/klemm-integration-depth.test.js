@@ -150,6 +150,45 @@ test("codex wrapper dogfoods a full session with mission, plan, guarded command,
   assert.match(debrief.stdout, /Queued: 1/);
 });
 
+test("codex wrapper resolves an explicit Codex command when launching default session", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-codex-command-"));
+  const fakeCodexPath = join(dataDir, "fake-codex.js");
+  await writeFile(fakeCodexPath, "console.log('fake codex launched');", "utf8");
+  const env = { KLEMM_DATA_DIR: dataDir, KLEMM_CODEX_COMMAND: `${process.execPath} ${fakeCodexPath}` };
+
+  const wrap = await runKlemm([
+    "codex",
+    "wrap",
+    "--id",
+    "mission-default-codex",
+    "--goal",
+    "Launch default Codex command",
+  ], { env });
+
+  assert.equal(wrap.status, 0, wrap.stderr);
+  assert.match(wrap.stdout, /Codex wrapper session started: mission-default-codex/);
+  assert.match(wrap.stdout, /fake codex launched/);
+  assert.match(wrap.stdout, /Klemm supervised exit: 0/);
+});
+
+test("codex wrapper reports a helpful message when Codex command is missing", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-codex-missing-"));
+  const env = { KLEMM_DATA_DIR: dataDir, KLEMM_CODEX_COMMAND: "missing-codex-binary-for-test" };
+
+  const wrap = await runKlemm([
+    "codex",
+    "wrap",
+    "--id",
+    "mission-missing-codex",
+    "--goal",
+    "Launch missing Codex command",
+  ], { env });
+
+  assert.equal(wrap.status, 127, wrap.stderr);
+  assert.match(wrap.stdout, /Klemm could not find command: missing-codex-binary-for-test/);
+  assert.match(wrap.stdout, /Set KLEMM_CODEX_COMMAND/);
+});
+
 test("runtime profiles v2 load config files, inject env, default missions, and adapter tokens", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-runtime-v2-"));
   const env = { KLEMM_DATA_DIR: dataDir };

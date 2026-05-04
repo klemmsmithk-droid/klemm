@@ -281,7 +281,16 @@ async function wrapCodexSessionFromCli(args) {
   if (flags.dryRun) {
     console.log("Dry run: Codex launch skipped");
   } else if (command.length === 0) {
-    await superviseFromCli(["--mission", mission.id, "--actor", flags.agent ?? "agent-codex", "--watch-loop", "--intercept-output", "--", "codex"]);
+    await superviseFromCli([
+      "--mission",
+      mission.id,
+      "--actor",
+      flags.agent ?? "agent-codex",
+      "--watch-loop",
+      "--intercept-output",
+      "--",
+      ...resolveDefaultCodexCommand(flags),
+    ]);
   }
 
   const debriefText = summarizeDebrief(store.getState(), { missionId: mission.id });
@@ -2016,6 +2025,21 @@ async function runSupervisedProcess(command, {
     child.on("error", (error) => {
       if (heartbeat) clearInterval(heartbeat);
       if (timeout) clearTimeout(timeout);
+      if (error.code === "ENOENT") {
+        const stderr = buildMissingCommandMessage(command[0]);
+        process.stdout.write(`${stderr}\n`);
+        resolve({
+          status: 127,
+          stdout: "",
+          stderr,
+          pid: child.pid,
+          processTree,
+          terminationSignal,
+          timedOut,
+          liveInterventions: [],
+        });
+        return;
+      }
       reject(error);
     });
     child.on("close", (status, signal) => {
@@ -2041,6 +2065,29 @@ async function runSupervisedProcess(command, {
     durationMs: Date.now() - started,
     fileChanges: capture ? diffSnapshots(beforeSnapshot, afterSnapshot) : [],
   };
+}
+
+function resolveDefaultCodexCommand(flags = {}) {
+  if (flags.codexCommand) return splitShellLike(flags.codexCommand);
+  if (process.env.KLEMM_CODEX_COMMAND) return splitShellLike(process.env.KLEMM_CODEX_COMMAND);
+  const appBundleCodex = "/Applications/Codex.app/Contents/Resources/codex";
+  if (existsSync(appBundleCodex)) return [appBundleCodex];
+  return ["codex"];
+}
+
+function buildMissingCommandMessage(commandName) {
+  if (commandName === "codex" || String(commandName).includes("/Codex.app/")) {
+    return [
+      `Klemm could not find command: ${commandName}`,
+      "Set KLEMM_CODEX_COMMAND to your Codex CLI path, or run klemm codex wrap -- <command>.",
+      "Example: export KLEMM_CODEX_COMMAND=\"/Applications/Codex.app/Contents/Resources/codex\"",
+    ].join("\n");
+  }
+  return [
+    `Klemm could not find command: ${commandName}`,
+    "Check that the command exists and is available on PATH, or pass an absolute path.",
+    "Set KLEMM_CODEX_COMMAND for Codex wrapper sessions, or run klemm codex wrap -- <command>.",
+  ].join("\n");
 }
 
 function buildLiveOutputInterceptor(flags) {
