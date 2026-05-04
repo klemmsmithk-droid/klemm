@@ -112,9 +112,22 @@ When launching agent runtimes through Klemm, use the named wrapper:
 klemm run codex --mission <mission-id> --dry-run -- --ask-for-approval on-request
 klemm run localcodex --profile-file ./klemm-profiles.json --capture
 klemm run shell --mission <mission-id> -- npm test
+klemm agent shim --goal <goal-id> --agent agent-shell --capture -- <command>
 ```
 
 `klemm run` registers the agent profile, normalizes the launch command, and blocks or queues risky launches before execution. Runtime profile files can extend built-ins, define default missions, add per-agent authority boundaries, inject environment variables, and ensure adapter tokens are available to the launched process.
+Use `klemm agent shim` for generic terminal agents that do not have a native adapter yet. It injects proxy commands, preflights the launch, captures output, routes "should I proceed?" moments through Klemm proxy, and still queues risky streamed actions.
+
+Adapter enforcement surfaces:
+
+```text
+klemm adapters install --real claude --home "$HOME"
+klemm adapters install --real cursor --home "$HOME"
+klemm adapters doctor --live --mission <mission-id>
+klemm tui --view adapters --mission <mission-id>
+```
+
+Claude hooks and Cursor rules should use proxy/authority/reporting by default: `proxy_ask`, `proxy_continue`, `request_authority`, and `record_adapter_envelope`.
 
 Always ask Klemm before:
 

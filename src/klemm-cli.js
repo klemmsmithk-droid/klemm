@@ -144,6 +144,7 @@ async function main() {
     if (command === "proxy" && args[1] === "status") return proxyStatusFromCli(args.slice(2));
     if (command === "proxy" && args[1] === "review") return proxyReviewFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
+    if (command === "agent" && args[1] === "shim") return await agentShimFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
     if (command === "agents") return printAgents();
     if (command === "propose") return await proposeFromCli(args.slice(1));
@@ -1642,7 +1643,7 @@ function adaptersListFromCli() {
 
 async function adaptersInstallFromCli(args) {
   const flags = parseFlags(args);
-  const names = flags.all ? Object.keys(ADAPTER_CAPABILITIES) : [args[0] ?? flags.adapter ?? "codex"];
+  const names = flags.all ? Object.keys(ADAPTER_CAPABILITIES) : [firstPositionalArg(args) ?? flags.adapter ?? "codex"];
   const outputDir = flags.outputDir ?? join(KLEMM_DATA_DIR, "adapters");
   const registrations = [];
   for (const name of names) {
@@ -1674,7 +1675,7 @@ async function adaptersInstallFromCli(args) {
 
 async function adaptersUninstallFromCli(args) {
   const flags = parseFlags(args);
-  const names = flags.all ? (store.getState().adapterRegistrations ?? []).map((item) => item.id) : [args[0] ?? flags.adapter];
+  const names = flags.all ? (store.getState().adapterRegistrations ?? []).map((item) => item.id) : [firstPositionalArg(args) ?? flags.adapter];
   if (!names[0]) throw new Error("Usage: klemm adapters uninstall <name|--all>");
   for (const name of names) {
     await uninstallRealAdapter(name, flags);
@@ -1739,7 +1740,7 @@ function realAdapterTargets(name, home) {
   const root = home ?? process.env.HOME ?? ".";
   if (name === "codex") return [{ kind: "toml", path: join(root, ".codex", "config.toml") }];
   if (name === "claude") return [{ kind: "json", path: join(root, ".claude", "settings.json") }];
-  if (name === "cursor") return [{ kind: "json", path: join(root, ".cursor", "mcp.json") }];
+  if (name === "cursor") return [{ kind: "json", path: join(root, ".cursor", "mcp.json") }, { kind: "cursor_rule", path: join(root, ".cursor", "rules", "klemm.mdc") }];
   if (name === "shell") return [{ kind: "shell", path: join(root, ".klemm", "shell", "klemm-shell-profile.sh") }];
   return [{ kind: "json", path: join(root, ".klemm", "adapters", `${name}.json`) }];
 }
@@ -1758,17 +1759,32 @@ function renderRealAdapterFile(name, kind, current) {
     return upsertMarkedBlock(current, marker, [
       `export PATH="${join(KLEMM_DATA_DIR, "codex-integration", "bin")}:$PATH"`,
       "alias klemm-codex='klemm codex wrap'",
+      "alias klemm-agent-shim='klemm agent shim'",
+      "export KLEMM_PROXY_ASK_COMMAND='klemm proxy ask'",
+      "export KLEMM_PROXY_CONTINUE_COMMAND='klemm proxy continue'",
       "klemm-supervise() { klemm supervise --watch --capture --record-tree -- \"$@\"; }",
     ].join("\n"));
+  }
+  if (kind === "cursor_rule") {
+    return [
+      "# Klemm adapter enforcement",
+      "",
+      "Before risky tool calls, use Klemm MCP `request_authority` or CLI `klemm propose`.",
+      "Before interrupting Kyle for plan clarification or a proceed/what-next moment, use `proxy_ask`.",
+      "When work is aligned and safe, use `proxy_continue` for the next user-like prompt.",
+      "Report plans, tool calls, diffs, uncertainty, and debriefs with `record_adapter_envelope`.",
+      "Do not push, deploy, publish, edit credentials, send external messages, or change OAuth scopes without a queued Klemm decision.",
+      "",
+    ].join("\n");
   }
   const patch = name === "claude"
     ? {
         hooks: {
-          SessionStart: [{ hooks: [{ type: "command", command: "klemm codex context --mission ${KLEMM_MISSION_ID}" }] }],
-          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm propose --actor claude --type command --target \"$CLAUDE_TOOL_INPUT\"" }] }],
-          PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm codex report --type tool_call --tool Bash" }] }],
-          Stop: [{ hooks: [{ type: "command", command: "klemm codex debrief --mission ${KLEMM_MISSION_ID}" }] }],
-          SessionEnd: [{ hooks: [{ type: "command", command: "klemm dogfood finish --mission ${KLEMM_MISSION_ID}" }] }],
+          SessionStart: [{ hooks: [{ type: "command", command: "klemm codex context --mission ${KLEMM_MISSION_ID}; klemm proxy status --goal ${KLEMM_MISSION_ID}" }] }],
+          PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm propose --actor claude --type command --target \"$CLAUDE_TOOL_INPUT\"; klemm proxy ask --goal ${KLEMM_MISSION_ID} --agent agent-claude --question \"Should Claude proceed with this tool use?\" --context \"$CLAUDE_TOOL_INPUT\"" }] }],
+          PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm codex report --type tool_call --tool Bash; klemm codex report --type activity --summary \"record_adapter_envelope Claude PostToolUse\"" }] }],
+          Stop: [{ hooks: [{ type: "command", command: "klemm proxy continue --goal ${KLEMM_MISSION_ID} --agent agent-claude; klemm codex debrief --mission ${KLEMM_MISSION_ID}" }] }],
+          SessionEnd: [{ hooks: [{ type: "command", command: "klemm codex report --type debrief --summary \"Claude session ended\"; klemm dogfood finish --mission ${KLEMM_MISSION_ID}" }] }],
         },
       }
     : buildMcpClientConfig({ client: "generic", dataDir: KLEMM_DATA_DIR });
@@ -1819,10 +1835,10 @@ async function writeAdapterConfig(name, adapterDir) {
   if (name === "claude") {
     await writeFile(join(adapterDir, "settings.json"), `${JSON.stringify({
       hooks: {
-        SessionStart: [{ hooks: [{ type: "command", command: "klemm codex context --mission ${KLEMM_MISSION_ID}" }] }],
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm propose --actor claude --type command --target \"$CLAUDE_TOOL_INPUT\"" }] }],
-        PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm codex report --type tool_call --tool Bash" }] }],
-        Stop: [{ hooks: [{ type: "command", command: "klemm codex debrief --mission ${KLEMM_MISSION_ID}" }] }],
+        SessionStart: [{ hooks: [{ type: "command", command: "klemm codex context --mission ${KLEMM_MISSION_ID}; klemm proxy status --goal ${KLEMM_MISSION_ID}" }] }],
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm propose --actor claude --type command --target \"$CLAUDE_TOOL_INPUT\"; klemm proxy ask --goal ${KLEMM_MISSION_ID} --agent agent-claude --question \"Should Claude proceed with this tool use?\" --context \"$CLAUDE_TOOL_INPUT\"" }] }],
+        PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "klemm codex report --type tool_call --tool Bash; klemm codex report --type activity --summary \"record_adapter_envelope Claude PostToolUse\"" }] }],
+        Stop: [{ hooks: [{ type: "command", command: "klemm proxy continue --goal ${KLEMM_MISSION_ID} --agent agent-claude; klemm codex debrief --mission ${KLEMM_MISSION_ID}" }] }],
         SessionEnd: [{ hooks: [{ type: "command", command: "klemm dogfood finish --mission ${KLEMM_MISSION_ID}" }] }],
       },
     }, null, 2)}\n`, "utf8");
@@ -1830,7 +1846,13 @@ async function writeAdapterConfig(name, adapterDir) {
   }
   if (name === "cursor") {
     await writeFile(join(adapterDir, "mcp.json"), `${JSON.stringify(buildMcpClientConfig({ client: "generic", dataDir: KLEMM_DATA_DIR }), null, 2)}\n`, "utf8");
-    await writeFile(join(adapterDir, "klemm.mdc"), "Use Klemm MCP tools for authority, memory context, and debriefs before risky agent actions.\n", "utf8");
+    await writeFile(join(adapterDir, "klemm.mdc"), [
+      "Use Klemm MCP tools for authority, memory context, and debriefs before risky agent actions.",
+      "Use proxy_ask before asking Kyle a clarification question.",
+      "Use request_authority before risky tool calls.",
+      "Use record_adapter_envelope for plans, tool calls, diffs, and debriefs.",
+      "",
+    ].join("\n"), "utf8");
     return;
   }
   if (name === "codex") {
@@ -1860,6 +1882,7 @@ function adaptersDoctorFromCli(args = []) {
   const home = flags.home ?? process.env.HOME;
   const registrations = store.getState().adapterRegistrations ?? [];
   console.log("Klemm adapters doctor");
+  if (flags.live) return printLiveAdaptersDoctor({ home, missionId: flags.mission, registrations });
   for (const name of ["codex", "claude", "cursor", "shell", "browser", "mcp"]) {
     const registration = registrations.find((item) => item.id === name);
     if (registration?.mode === "real") {
@@ -1869,6 +1892,30 @@ function adaptersDoctorFromCli(args = []) {
       console.log(`${name}: ${registration ? "installed" : "missing"}`);
     }
   }
+}
+
+function printLiveAdaptersDoctor({ home, missionId, registrations }) {
+  const state = store.getState();
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  for (const name of ["codex", "claude", "cursor"]) {
+    const targets = realAdapterTargets(name, home);
+    const installed = targets.every((target) => existsSync(target.path));
+    const live = activities.some((activity) => activityMatchesAdapter(name, activity));
+    if (name === "codex" && installed && live) {
+      console.log("codex: installed and reporting");
+    } else if (name === "claude" && installed && !live) {
+      console.log("claude: hooks installed but not seen live");
+    } else if (name === "cursor" && !installed) {
+      console.log("cursor: MCP config missing");
+    } else {
+      console.log(`${name}: ${installed ? "installed" : "missing"}${live ? " and reporting" : ""}`);
+    }
+  }
+  const shellInstalled = realAdapterTargets("shell", home).some((target) => existsSync(target.path));
+  console.log(`shell: ${shellInstalled ? "profile installed" : "shim available"}`);
+  console.log(`Mission: ${missionId ?? "all"}`);
+  console.log(`Live activities: ${activities.length}`);
+  console.log(`Registrations: ${registrations.length}`);
 }
 
 function adaptersHealthFromCli(args = []) {
@@ -3072,6 +3119,91 @@ function proxyReviewFromCli(args) {
   store.saveState(next.state);
   console.log(`Proxy reviewed: ${next.result.review.proxyAnswerId}`);
   console.log(`Status: ${next.result.review.status}`);
+}
+
+async function agentShimFromCli(args) {
+  const separator = args.indexOf("--");
+  const flagArgs = separator >= 0 ? args.slice(0, separator) : [];
+  const command = separator >= 0 ? args.slice(separator + 1) : [];
+  const flags = parseFlags(flagArgs);
+  if (command.length === 0) throw new Error("Usage: klemm agent shim [--goal goal-id] [--mission mission-id] [--agent agent-id] -- <command>");
+  const goal = flags.goal ? findGoal(store.getState(), flags.goal) : null;
+  if (flags.goal && !goal) throw new Error(`Goal not found: ${flags.goal}`);
+  const missionId = flags.mission ?? goal?.missionId;
+  const goalId = goal?.id ?? flags.goal ?? missionId;
+  const agentId = flags.agent ?? flags.agentId ?? "agent-shell";
+  const target = command.join(" ");
+  const proxyAskCommand = `klemm proxy ask --goal ${goalId} --agent ${agentId}`;
+  const proxyContinueCommand = `klemm proxy continue --goal ${goalId} --agent ${agentId}`;
+  const shimEnv = {
+    KLEMM_MISSION_ID: missionId ?? "",
+    KLEMM_AGENT_ID: agentId,
+    KLEMM_PROXY_ASK_COMMAND: proxyAskCommand,
+    KLEMM_PROXY_CONTINUE_COMMAND: proxyContinueCommand,
+    KLEMM_PROXY_STATUS_COMMAND: `klemm proxy status --goal ${goalId}`,
+  };
+  console.log("Klemm agent shim");
+  console.log(`Agent: ${agentId}`);
+  console.log(`Mission: ${missionId ?? "none"}`);
+  console.log(`KLEMM_PROXY_ASK_COMMAND=${proxyAskCommand}`);
+  console.log(`KLEMM_PROXY_CONTINUE_COMMAND=${proxyContinueCommand}`);
+
+  const proposalState = store.update((state) => proposeAction(state, buildCommandProposal(command, {
+    missionId,
+    actor: agentId,
+    suggestedRewrite: flags.rewriteTo,
+  })));
+  const decision = proposalState.decisions[0];
+  if (decision.decision !== "allow") {
+    console.log("Klemm blocked shim command before launch");
+    printDecision(decision);
+    process.exitCode = decision.decision === "queue" ? 2 : 1;
+    return;
+  }
+
+  await withTemporaryEnv(shimEnv, async () => {
+    const result = await runSupervisedProcess(command, {
+      cwd: flags.cwd ?? process.cwd(),
+      capture: flags.capture,
+      watchLoop: flags.watchLoop,
+      watchIntervalMs: flags.watchIntervalMs,
+      recordTree: flags.recordTree ?? true,
+      timeoutMs: flags.timeoutMs,
+      env: { ...process.env, ...shimEnv },
+      onLiveOutput: buildAgentShimOutputInterceptor({ missionId, goalId, agentId }),
+    });
+    if (flags.capture) persistCapturedRun({ ...flags, mission: missionId, actor: agentId }, target, result, flags.cwd ?? process.cwd());
+    recordAndPrintAlignment({ ...flags, mission: missionId, actor: agentId }, { actor: agentId, command: target, result });
+    console.log(`Klemm supervised exit: ${result.status}`);
+    process.exitCode = result.status;
+  });
+}
+
+function buildAgentShimOutputInterceptor({ missionId, goalId, agentId }) {
+  let askedProxy = false;
+  return ({ text, transcript }) => {
+    const riskyProposal = buildLiveOutputProposal(text, transcript, { missionId, actor: agentId });
+    if (riskyProposal) {
+      const next = store.update((state) => proposeAction(state, riskyProposal));
+      return {
+        decision: next.decisions[0],
+        matchedText: oneLine(text),
+      };
+    }
+    if (!askedProxy && /\bshould i proceed\b|\bwhat'?s next\b|\bshould i continue\b|\bcontinue\?\b/i.test(text)) {
+      askedProxy = true;
+      const next = store.update((state) => askProxy(state, {
+        goalId,
+        missionId,
+        agentId,
+        question: oneLine(text),
+        context: "Detected by Klemm agent shim from supervised output.",
+      }));
+      const answer = next.proxyAnswers[0];
+      console.log(`Proxy question routed: ${answer.id} confidence=${answer.confidence} continue=${answer.shouldContinue ? "yes" : "no"}`);
+    }
+    return null;
+  };
 }
 
 function seedProxyMemoryFromCli(args) {
@@ -4283,6 +4415,7 @@ function renderTuiView(state, { missionId, view = "overview", logFile, decision:
   }
   if (normalized === "goals") return [...header, renderGoalsTui(state)].join("\n");
   if (normalized === "proxy") return [...header, renderProxyTui(state, { missionId })].join("\n");
+  if (normalized === "adapters") return [...header, renderAdapterTimelineTui(state, { missionId })].join("\n");
   if (normalized === "policies") {
     return [
       ...header,
@@ -4365,6 +4498,31 @@ function renderProxyReviewInbox(state, status = getProxyStatus(state)) {
   for (const review of reviews.slice(0, 8)) {
     lines.push(`- ${review.proxyAnswerId} ${review.status}: ${redactSensitiveText(review.note)}`);
   }
+  return lines.join("\n");
+}
+
+function renderAdapterTimelineTui(state, { missionId } = {}) {
+  const questions = (state.proxyQuestions ?? []).filter((item) => !missionId || item.missionId === missionId);
+  const answers = (state.proxyAnswers ?? []).filter((item) => !missionId || item.missionId === missionId);
+  const continuations = (state.proxyContinuations ?? []).filter((item) => !missionId || item.missionId === missionId);
+  const decisions = (state.decisions ?? []).filter((item) => !missionId || item.missionId === missionId);
+  const activities = (state.agentActivities ?? []).filter((item) => !missionId || item.missionId === missionId);
+  const rows = [
+    ...questions.map((item) => ({ at: item.createdAt, kind: "proxy_question", text: `${item.agentId}: ${item.question}` })),
+    ...answers.map((item) => ({ at: item.createdAt, kind: "proxy_answer", text: `${item.confidence} continue=${item.shouldContinue ? "yes" : "no"} ${item.answer}` })),
+    ...continuations.map((item) => ({ at: item.createdAt, kind: "proxy_continuation", text: item.nextPrompt })),
+    ...decisions.map((item) => ({ at: item.createdAt, kind: `decision_${item.decision}`, text: `${item.actor} ${item.actionType} ${item.target}` })),
+    ...activities.map((item) => ({ at: item.createdAt, kind: `activity_${item.type}`, text: `${item.agentId}: ${item.summary}` })),
+  ].sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? ""))).slice(0, 24);
+  const lines = [
+    "Adapter Event Timeline",
+    `Mission: ${missionId ?? "all"}`,
+    `Proxy questions: ${questions.length}`,
+    `Adapter activities: ${activities.length}`,
+    "Timeline:",
+  ];
+  if (rows.length === 0) lines.push("- none");
+  for (const row of rows) lines.push(`- ${row.at ?? "unknown"} ${row.kind}: ${redactSensitiveText(row.text)}`);
   return lines.join("\n");
 }
 
@@ -5625,6 +5783,20 @@ function parseFlags(args) {
   return flags;
 }
 
+function firstPositionalArg(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    const part = args[index];
+    if (part.startsWith("--")) {
+      const key = toCamel(part.slice(2));
+      const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth"]);
+      if (!booleanFlags.has(key) && args[index + 1] && !args[index + 1].startsWith("--")) index += 1;
+      continue;
+    }
+    return part;
+  }
+  return null;
+}
+
 function collectRepeatedFlag(args, flagName) {
   const values = [];
   for (let index = 0; index < args.length; index += 1) {
@@ -5779,6 +5951,7 @@ Commands:
   klemm proxy status --goal goal-id
   klemm proxy review --answer proxy-answer-id [--status reviewed] [--note "..."]
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
+  klemm agent shim [--goal goal-id] [--mission mission-id] [--agent agent-id] [--capture] -- <command>
   klemm event record --mission mission-id --agent agent-codex --type command_planned --summary "..."
   klemm agents
   klemm propose --mission mission-id --actor Codex --type git_push --target "origin main"
@@ -5828,7 +6001,7 @@ Commands:
   klemm onboard --stdin
   klemm onboard v2 --stdin
   klemm debrief [--mission mission-id]
-  klemm tui [--mission mission-id] [--view overview|memory|workbench|goals|proxy|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
+  klemm tui [--mission mission-id] [--view overview|memory|workbench|goals|proxy|adapters|queue|agents|policies|model|logs|trust|evidence] [--decision decision-id] [--memory memory-id] [--interactive]
   klemm run codex|claude|shell|profile-name [--profile-file path] [--mission mission-id] [--goal goal-id] [--dry-run] [--capture] [--record-tree] [--timeout-ms 60000] -- [args...]
   klemm supervise [--mission mission-id] [--capture] [--record-tree] [--timeout-ms 60000] [--watch] [--watch-loop] [--intercept-output] [--watch-interval-ms 1000] [--cwd path] -- <command> [args...]
   klemm supervised-runs [--details]
