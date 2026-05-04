@@ -157,6 +157,7 @@ test("status and doctor report daemon HTTP health while preserving local fallbac
   try {
     const status = await runKlemm(["status"], { env });
     assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, new RegExp(`Data dir: ${dataDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(status.stdout, /Daemon transport: ok/);
     assert.match(status.stdout, /Store fallback: available/);
 

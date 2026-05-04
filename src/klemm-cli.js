@@ -309,6 +309,9 @@ async function wrapCodexSessionFromCli(args) {
     console.log(`Error: ${debrief.error}`);
     process.exitCode = 1;
   }
+  console.log("Review this session:");
+  console.log(`  env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm debrief --mission ${mission.id}`);
+  console.log(`  env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm queue`);
 }
 
 async function installCodexIntegrationFromCli(args) {
@@ -793,6 +796,7 @@ async function printStatus() {
   const status = getKlemmStatus(state);
   const daemon = await probeDaemonHealth(process.env.KLEMM_DAEMON_URL);
   console.log("Klemm status");
+  console.log(`Data dir: ${KLEMM_DATA_DIR}`);
   console.log(`Daemon transport: ${daemon.ok ? "ok" : "unavailable"}`);
   console.log(`Store fallback: ${daemon.ok ? "available" : "active"}`);
   console.log(`Active missions: ${status.activeMissionCount}`);

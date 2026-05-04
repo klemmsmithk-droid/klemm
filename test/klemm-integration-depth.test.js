@@ -145,6 +145,9 @@ test("codex wrapper dogfoods a full session with mission, plan, guarded command,
   assert.match(wrap.stdout, /Guarded command decision: queue/);
   assert.match(wrap.stdout, /Dry run: Codex launch skipped/);
   assert.match(wrap.stdout, /Debrief reported: accepted/);
+  assert.match(wrap.stdout, /Review this session:/);
+  assert.match(wrap.stdout, /KLEMM_DATA_DIR=/);
+  assert.match(wrap.stdout, /klemm debrief --mission mission-wrap/);
 
   const debrief = await runKlemm(["debrief", "--mission", "mission-wrap"], { env });
   assert.match(debrief.stdout, /Queued: 1/);
