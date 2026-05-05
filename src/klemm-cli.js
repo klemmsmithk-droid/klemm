@@ -241,6 +241,7 @@ async function main() {
       return reviewMemoryFromCli(args.slice(2), memoryCommandToStatus(args[1]));
     }
     if (command === "user" && args[1] === "model") return printUserModel(args.slice(2));
+    if (command === "user" && args[1] === "brief") return printUserBrief(args.slice(2));
     if (command === "user" && args[1] === "profile") return printUserProfile(args.slice(2));
     if (command === "sync" && args[1] === "add") return addSyncSourceFromCli(args.slice(2));
     if (command === "sync" && args[1] === "plan") return printContextSyncPlan(args.slice(2));
@@ -416,6 +417,17 @@ async function wrapCodexSessionFromCli(args) {
   console.log(`Finish: env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm mission finish ${mission.id} "work complete"`);
   console.log(`Proxy ask: ${sessionEnvPreview("KLEMM_PROXY_ASK_COMMAND", mission.id, agentId)}`);
   console.log(`Proxy continue: ${sessionEnvPreview("KLEMM_PROXY_CONTINUE_COMMAND", mission.id, agentId)}`);
+  const profileBrief = buildUserBrief(store.getState(), { adapter: "codex", missionId: mission.id, includeEvidence: true });
+  console.log(`Kyle profile brief: ${profileBrief.reviewedCount > 0 ? "loaded" : "empty"}`);
+  console.log(`Profile evidence: ${profileBrief.reviewedCount} reviewed memories, ${profileBrief.policyCount} policies`);
+  console.log(`Profile brief: ${sessionEnvPreview("KLEMM_USER_BRIEF_COMMAND", mission.id, agentId)}`);
+  store.update((current) => recordAgentActivity(current, {
+    missionId: mission.id,
+    agentId,
+    type: "profile_brief",
+    summary: `Codex received Kyle profile brief with ${profileBrief.reviewedCount} reviewed memories and ${profileBrief.policyCount} policies.`,
+    target: "klemm user brief",
+  }));
 
   const sessionEnv = buildCodexSessionEnv({
     missionId: mission.id,
@@ -582,9 +594,10 @@ function printCodexWhatKlemmSaw(missionId) {
     diffs: activities.filter((activity) => activity.type === "file_change" || (activity.fileChanges ?? []).length > 0 || /\bdiff\b/i.test(`${activity.summary} ${activity.target}`)).length,
     queue_decisions: decisions.filter((decision) => decision.decision === "queue").length,
     debriefs: activities.filter((activity) => activity.type === "debrief").length,
+    profile_briefs: activities.filter((activity) => activity.type === "profile_brief" || /profile brief/i.test(activity.summary ?? "")).length,
   };
   console.log("What Klemm saw:");
-  console.log(`plans=${counts.plans} proxy_questions=${counts.proxy_questions} commands=${counts.commands} diffs=${counts.diffs} queue_decisions=${counts.queue_decisions} debriefs=${counts.debriefs}`);
+  console.log(`plans=${counts.plans} proxy_questions=${counts.proxy_questions} commands=${counts.commands} diffs=${counts.diffs} queue_decisions=${counts.queue_decisions} debriefs=${counts.debriefs} profile_briefs=${counts.profile_briefs}`);
 }
 
 function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, adapterClientId, adapterToken }) {
@@ -594,6 +607,7 @@ function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, 
   const proxyAskCommand = `klemm proxy ask --goal ${missionId} --agent ${agentId}`;
   const proxyContinueCommand = `klemm proxy continue --goal ${missionId} --agent ${agentId}`;
   const proxyStatusCommand = `klemm proxy status --goal ${missionId}`;
+  const userBriefCommand = `klemm user brief --for codex --mission ${missionId}`;
   return {
     KLEMM_MISSION_ID: missionId,
     KLEMM_AGENT_ID: agentId,
@@ -604,6 +618,7 @@ function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, 
     KLEMM_PROXY_ASK_COMMAND: proxyAskCommand,
     KLEMM_PROXY_CONTINUE_COMMAND: proxyContinueCommand,
     KLEMM_PROXY_STATUS_COMMAND: proxyStatusCommand,
+    KLEMM_USER_BRIEF_COMMAND: userBriefCommand,
     KLEMM_PROTOCOL_VERSION: String(protocolVersion),
     ...(adapterClientId ? { KLEMM_ADAPTER_CLIENT_ID: adapterClientId } : {}),
     ...(adapterToken ? { KLEMM_ADAPTER_TOKEN: adapterToken } : {}),
@@ -613,6 +628,7 @@ function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, 
 function sessionEnvPreview(name, missionId, agentId) {
   if (name === "KLEMM_PROXY_ASK_COMMAND") return `KLEMM_PROXY_ASK_COMMAND="klemm proxy ask --goal ${missionId} --agent ${agentId}"`;
   if (name === "KLEMM_PROXY_CONTINUE_COMMAND") return `KLEMM_PROXY_CONTINUE_COMMAND="klemm proxy continue --goal ${missionId} --agent ${agentId}"`;
+  if (name === "KLEMM_USER_BRIEF_COMMAND") return `klemm user brief --for codex --mission ${missionId}`;
   return `${name}=unknown`;
 }
 
@@ -2554,6 +2570,8 @@ async function proveClaudeAdapter(flags = {}) {
     ],
   }));
   console.log("Install: pass");
+  recordAdapterProfileBrief("claude", missionId);
+  console.log("Profile brief: pass");
   await smokeClaudeHooks({ mission: missionId, goal: goalId, home });
   store.update((current) => recordAgentActivity(current, {
     missionId,
@@ -2587,6 +2605,8 @@ async function proveCursorAdapter(flags = {}) {
   await cursorLiveProbeFromCli({ home });
   console.log("MCP config: pass");
   console.log("Rules: pass");
+  recordAdapterProfileBrief("cursor", missionId);
+  console.log("Profile brief: pass");
   store.update((current) => recordAgentActivity(current, { missionId, agentId: "agent-cursor", type: "session_start", summary: "Cursor adapter proof session started." }));
   store.update((current) => recordAgentActivity(current, { missionId, agentId: "agent-cursor", type: "plan", summary: "Cursor adapter proof plan event." }));
   store.update((current) => askProxy(current, {
@@ -2613,6 +2633,19 @@ function printSingleAdapterCompliance(adapter, missionId) {
   console.log(`Compliance: ${item.score}/${item.total} ${item.status}`);
 }
 
+function recordAdapterProfileBrief(adapter, missionId) {
+  const agentId = `agent-${adapter}`;
+  const brief = buildUserBrief(store.getState(), { adapter, missionId, includeEvidence: true });
+  store.update((current) => recordAgentActivity(current, {
+    missionId,
+    agentId,
+    type: "profile_brief",
+    target: "klemm user brief",
+    summary: `${adapter} received Kyle profile brief with ${brief.reviewedCount} reviewed memories and ${brief.policyCount} policies.`,
+  }));
+  return brief;
+}
+
 function adaptersStatusFromCli(args = []) {
   const flags = parseFlags(args);
   const home = flags.home ?? process.env.HOME;
@@ -2623,6 +2656,7 @@ function adaptersStatusFromCli(args = []) {
     console.log(`${row.label}: ${row.state}${row.lastSeen ? `, last action ${row.lastSeen}` : ""}`);
     console.log(`  Capabilities: ${row.capabilities.join(",") || "none"}`);
     console.log(`  Compliance: ${row.compliance}`);
+    console.log(`  Profile brief: ${row.profileBrief ? "yes" : "no"}`);
     console.log(`  Next fix: ${row.nextFix}`);
   }
 }
@@ -2645,6 +2679,7 @@ function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = 
     const capabilityList = registration?.capabilities ?? ADAPTER_CAPABILITIES[adapter] ?? [];
     const score = compliance.adapters.find((item) => item.id === adapter);
     const latest = latestAdapterSeen(adapterActivities, supervisedRuns, adapter);
+    const profileBrief = adapterActivities.some((activity) => activity.type === "profile_brief" || /profile brief/i.test(activity.summary ?? ""));
     return {
       id: adapter,
       label: labels[adapter],
@@ -2653,6 +2688,7 @@ function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = 
       capabilities: capabilityList,
       compliance: score ? `${score.score}/${score.total} ${score.status}` : "0/8 weak",
       nextFix: adapterNextFix(adapter, { installed, live }),
+      profileBrief,
     };
   });
 }
@@ -4083,13 +4119,23 @@ async function printStartStatus() {
   const daemon = await probeDaemonHealth(process.env.KLEMM_DAEMON_URL);
   const agentCalls = countAgentCalls(state);
   const activeAgents = (state.agents ?? []).filter((agent) => agent.status !== "finished" && agent.status !== "stopped").length;
+  const activeMission = (state.missions ?? []).find((mission) => mission.status === "active") ?? state.missions?.[0];
+  const reviewed = reviewedProfileMemories(state);
+  const pending = (state.memories ?? []).filter((memory) => memory.status === "pending_review");
+  const pinned = reviewed.filter((memory) => memory.status === "pinned");
+  const unresolvedQueue = (state.queue ?? []).filter((item) => item.status === "queued").length;
+  const profileHealth = reviewed.length >= 3 ? "ready" : reviewed.length > 0 ? "warming" : "empty";
   console.log("Status");
   console.log(`Klemm running: ${daemon.ok ? "yes (daemon)" : "yes (local CLI)"}`);
   console.log(`Daemon: ${daemon.ok ? "running" : "not running"}`);
   console.log(`Data dir: ${KLEMM_DATA_DIR}`);
   console.log(`Agent calls: ${agentCalls}`);
   console.log(`Active agents: ${activeAgents}`);
-  console.log(`Queued decisions: ${(state.queue ?? []).filter((item) => item.status === "queued").length}`);
+  console.log(`Active mission: ${activeMission?.id ?? "none"}`);
+  console.log(`Kyle profile health: ${profileHealth}`);
+  console.log(`Profile evidence: ${reviewed.length} reviewed, ${pending.length} pending, ${pinned.length} pinned`);
+  console.log(`Unresolved queue: ${unresolvedQueue}`);
+  console.log(`Queued decisions: ${unresolvedQueue}`);
 }
 
 function countAgentCalls(state) {
@@ -6007,6 +6053,87 @@ function printUserModel(args) {
   if (flags.coverage) printUserModelCoverage(state);
 }
 
+function printUserBrief(args) {
+  const flags = parseFlags(args);
+  const adapter = flags.for ?? flags.adapter ?? "agent";
+  const brief = buildUserBrief(store.getState(), {
+    adapter,
+    missionId: flags.mission,
+    includeEvidence: Boolean(flags.evidence),
+  });
+  console.log("Klemm User Brief");
+  console.log(`For: ${brief.adapter}`);
+  console.log(`Current goal: ${brief.currentGoal}`);
+  console.log(`Reviewed evidence: ${brief.reviewedCount}`);
+  console.log(`Policy count: ${brief.policyCount}`);
+  console.log("");
+  console.log("Working style");
+  printBriefList(brief.workingStyle);
+  console.log("");
+  console.log("Authority boundaries");
+  printBriefList(brief.authorityBoundaries);
+  console.log("");
+  console.log("Proceed/what's next");
+  printBriefList(brief.promptIntent);
+  console.log("");
+  console.log("Risk queue rules");
+  printBriefList(brief.riskRules);
+  console.log("");
+  console.log("Agent instructions");
+  for (const line of brief.instructions) console.log(`- ${line}`);
+  if (!brief.includeEvidence) return;
+  console.log("");
+  console.log("Source evidence");
+  if (brief.sourceEvidence.length === 0) console.log("- none reviewed yet");
+  for (const memory of brief.sourceEvidence) {
+    console.log(`- ${memory.id} ${memory.status} source=${memory.source} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"}: ${redactSensitiveText(memory.text)}`);
+  }
+}
+
+function buildUserBrief(state, { adapter = "agent", missionId, includeEvidence = false } = {}) {
+  const mission = (state.missions ?? []).find((item) => item.id === missionId) ?? (state.missions ?? []).find((item) => item.status === "active");
+  const reviewed = reviewedProfileMemories(state);
+  const policies = (state.policies ?? []).filter((policy) => policy.status !== "disabled");
+  const profile = buildKyleProfile(state);
+  const promptIntent = uniqueMemories([
+    ...reviewed.filter((memory) => memory.memoryClass === "prompt_intent_pattern"),
+    ...reviewed.filter((memory) => /proceed|what'?s next|what is next|continue|no corners|dogfood/i.test(memory.text ?? "")),
+  ]).slice(0, 6);
+  const riskRules = uniqueMemories([
+    ...profile.authorityBoundaries,
+    ...reviewed.filter((memory) => /push|deploy|external|credential|oauth|production|approval|queue/i.test(memory.text ?? "")),
+  ]).slice(0, 6);
+  return {
+    adapter: String(adapter),
+    missionId: mission?.id,
+    currentGoal: mission?.goal ?? "none",
+    reviewedCount: reviewed.length,
+    policyCount: policies.length,
+    workingStyle: profile.workingStyle.slice(0, 6),
+    authorityBoundaries: profile.authorityBoundaries.slice(0, 6),
+    promptIntent,
+    riskRules,
+    instructions: [
+      "Use this brief before asking Kyle routine clarification questions.",
+      "Continue only for safe local, goal-aligned implementation and verification.",
+      "Queue destructive, external, credential, financial, legal, reputation, deploy, publish, OAuth, or git push actions.",
+      "Cite profile evidence when asking Klemm proxy questions or explaining a decision.",
+    ],
+    includeEvidence,
+    sourceEvidence: uniqueMemories([...profile.workingStyle, ...profile.authorityBoundaries, ...promptIntent, ...riskRules]).slice(0, 12),
+  };
+}
+
+function printBriefList(memories) {
+  if (memories.length === 0) {
+    console.log("- none reviewed yet");
+    return;
+  }
+  for (const memory of memories.slice(0, 6)) {
+    console.log(`- ${redactSensitiveText(memory.text)} (${memory.status}, ${memory.source})`);
+  }
+}
+
 function printUserProfile(args) {
   const flags = parseFlags(args);
   const state = store.getState();
@@ -6123,6 +6250,7 @@ function printStartMemoryDashboard() {
   const rejected = memories.filter((memory) => memory.status === "rejected");
   const quarantined = state.memoryQuarantine ?? [];
   console.log("Memory Workbench");
+  console.log("Review inbox");
   console.log(`Pending review: ${pending.length}`);
   printMemoryDashboardSamples(pending);
   console.log(`Approved: ${approved.length}`);
@@ -6131,6 +6259,7 @@ function printStartMemoryDashboard() {
   printMemoryDashboardSamples(pinned);
   console.log(`Quarantined/rejected: ${quarantined.length + rejected.length}`);
   printMemoryDashboardSamples([...rejected, ...quarantined.map((item) => ({ id: item.id, text: item.text ?? item.summary ?? item.reason, source: item.provider ?? item.source ?? "quarantine" }))]);
+  console.log("Commands: klemm memory approve|reject|pin <memory-id>");
   console.log("Review next: klemm memory review");
   console.log("Profile: klemm user profile --evidence");
 }

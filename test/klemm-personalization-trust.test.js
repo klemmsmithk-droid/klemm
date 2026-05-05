@@ -95,6 +95,8 @@ test("klemm start context includes a memory dashboard path", async () => {
   assert.match(result.stdout, /Approved:/);
   assert.match(result.stdout, /Pinned authority:/);
   assert.match(result.stdout, /Quarantined\/rejected:/);
+  assert.match(result.stdout, /Review inbox/);
+  assert.match(result.stdout, /Commands: klemm memory approve\|reject\|pin/);
   assert.match(result.stdout, /Review next: klemm memory review/);
 });
 
@@ -178,4 +180,92 @@ test("real-world trial status reports agent-police readiness and missing pieces"
   assert.match(result.stdout, /Agent Police Readiness: \d+%/);
   assert.match(result.stdout, /Missing pieces:/);
   assert.match(result.stdout, /Codex session capture|Claude live proof|Cursor live proof|reviewed Kyle profile evidence/);
+});
+
+test("user brief produces a compact agent-readable profile for Codex", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-user-brief-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env, ["No corners cut means focused tests, full tests, and debrief."]);
+  await runKlemm(["mission", "start", "--id", "mission-user-brief", "--goal", "Keep Codex aligned with Kyle"], { env });
+
+  const result = await runKlemm(["user", "brief", "--for", "codex", "--mission", "mission-user-brief", "--evidence"], { env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Klemm User Brief/);
+  assert.match(result.stdout, /For: codex/);
+  assert.match(result.stdout, /Current goal: Keep Codex aligned with Kyle/);
+  assert.match(result.stdout, /Working style/);
+  assert.match(result.stdout, /Authority boundaries/);
+  assert.match(result.stdout, /Proceed\/what's next/);
+  assert.match(result.stdout, /Risk queue rules/);
+  assert.match(result.stdout, /terminal-native/);
+  assert.match(result.stdout, /push to GitHub without approval/);
+  assert.match(result.stdout, /Reviewed evidence: \d+/);
+});
+
+test("codex wrap loads the profile brief and injects a brief command into sessions", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-codex-brief-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env);
+
+  const wrapped = await runKlemm([
+    "codex",
+    "wrap",
+    "--id",
+    "mission-codex-brief",
+    "--goal",
+    "Use Kyle profile brief",
+    "--plan",
+    "Read the brief, then run a safe local proof.",
+    "--",
+    "node",
+    "-e",
+    "console.log(process.env.KLEMM_USER_BRIEF_COMMAND)",
+  ], { env });
+
+  assert.equal(wrapped.status, 0, wrapped.stderr);
+  assert.match(wrapped.stdout, /Kyle profile brief: loaded/);
+  assert.match(wrapped.stdout, /Profile evidence: \d+ reviewed memories, \d+ policies/);
+  assert.match(wrapped.stdout, /Profile brief: klemm user brief --for codex --mission mission-codex-brief/);
+  assert.match(wrapped.stdout, /klemm user brief --for codex --mission mission-codex-brief/);
+  assert.match(wrapped.stdout, /What Klemm saw:/);
+  assert.match(wrapped.stdout, /profile_briefs=1/);
+});
+
+test("klemm start status shows profile health and active operator state", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-start-profile-health-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env);
+  await runKlemm(["mission", "start", "--id", "mission-start-profile-health", "--goal", "Show profile health"], { env });
+  await runKlemm(["proxy", "ask", "--goal", "mission-start-profile-health", "--agent", "agent-codex", "--question", "Should I proceed?", "--context", "safe local work"], { env });
+
+  const result = await runKlemm(["start"], { env, input: "status\nquit\n" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Active mission: mission-start-profile-health/);
+  assert.match(result.stdout, /Kyle profile health: ready/);
+  assert.match(result.stdout, /Profile evidence: \d+ reviewed, \d+ pending, \d+ pinned/);
+  assert.match(result.stdout, /Unresolved queue: 0/);
+});
+
+test("Claude and Cursor adapter proofs receive profile briefs and status reports it", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-adapter-briefs-"));
+  const home = join(dataDir, "home");
+  const env = { KLEMM_DATA_DIR: dataDir, HOME: home };
+  await importKyleContext(env);
+  await runKlemm(["goal", "start", "--id", "goal-adapter-briefs", "--text", "Prove adapter profile briefs", "--success", "brief received"], { env });
+
+  const claude = await runKlemm(["adapters", "proof", "claude", "--mission", "mission-goal-adapter-briefs", "--goal", "goal-adapter-briefs", "--home", home], { env });
+  const cursor = await runKlemm(["adapters", "proof", "cursor", "--mission", "mission-goal-adapter-briefs", "--goal", "goal-adapter-briefs", "--home", home], { env });
+
+  assert.equal(claude.status, 0, claude.stderr);
+  assert.equal(cursor.status, 0, cursor.stderr);
+  assert.match(claude.stdout, /Profile brief: pass/);
+  assert.match(cursor.stdout, /Profile brief: pass/);
+
+  const status = await runKlemm(["adapters", "status", "--mission", "mission-goal-adapter-briefs", "--home", home], { env });
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /Claude: live, hooks reporting/);
+  assert.match(status.stdout, /Cursor: live, MCP reporting/);
+  assert.match(status.stdout, /Profile brief: yes/);
 });
