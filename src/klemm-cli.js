@@ -250,6 +250,7 @@ async function main() {
     if (command === "dogfood" && args[1] === "day" && args[2] === "checkpoint") return checkpointDogfoodDayFromCli(args.slice(3));
     if (command === "dogfood" && args[1] === "day" && args[2] === "finish") return await finishDogfoodDayFromCli(args.slice(3));
     if (command === "dogfood" && args[1] === "95") return await dogfood95FromCli(args.slice(2));
+    if (command === "dogfood" && args[1] === "golden") return await dogfoodGoldenFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "status") return printDogfoodStatus(args.slice(2));
     if (command === "dogfood" && args[1] === "adapters") return await dogfoodAdaptersFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "start") return await startDogfoodWrapperFromCli(args.slice(2));
@@ -2374,12 +2375,22 @@ function printLiveAdaptersDoctor({ home, missionId, registrations }) {
     } else {
       console.log(`${name}: ${installed ? "installed" : "missing"}${live ? " and reporting" : ""}`);
     }
+    printAdapterDoctorGuidance(name, { home, installed, targets });
   }
   const shellInstalled = realAdapterTargets("shell", home).some((target) => existsSync(target.path));
   console.log(`shell: ${shellInstalled ? "profile installed" : "shim available"}`);
+  printAdapterDoctorGuidance("shell", { home, installed: shellInstalled, targets: realAdapterTargets("shell", home) });
   console.log(`Mission: ${missionId ?? "all"}`);
   console.log(`Live activities: ${activities.length}`);
   console.log(`Registrations: ${registrations.length}`);
+}
+
+function printAdapterDoctorGuidance(name, { home, installed, targets }) {
+  const registration = (store.getState().adapterRegistrations ?? []).find((item) => item.id === name);
+  const capabilities = registration?.capabilities ?? ADAPTER_CAPABILITIES[name] ?? [];
+  console.log(`${name}: ${installed ? "installed" : "missing"} install_path=${targets.map((target) => target.path).join(",")}`);
+  console.log(`${name}: capabilities=${capabilities.join(",") || "none"}`);
+  console.log(`${name}: uninstall=klemm adapters uninstall ${name} --home ${home}`);
 }
 
 function adaptersHealthFromCli(args = []) {
@@ -2643,6 +2654,12 @@ async function smokeClaudeHooks(flags = {}) {
 
 function yn(value) {
   return value ? "yes" : "no";
+}
+
+function oneLineText(value, maxLength = 160) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
 }
 
 function adapterHasLiveActivity(adapter, activities) {
@@ -6073,6 +6090,153 @@ function printDogfoodStatus(args) {
   console.log(renderKlemmDashboard(store.getState(), { missionId: flags.mission }));
 }
 
+async function dogfoodGoldenFromCli(args = []) {
+  const action = args[0] ?? "status";
+  if (action === "start") return await startGoldenDogfoodFromCli(args.slice(1));
+  if (action === "status") return printGoldenDogfoodStatusFromCli(args.slice(1));
+  if (action === "finish") return await finishGoldenDogfoodFromCli(args.slice(1));
+  throw new Error("Usage: klemm dogfood golden start|status|finish --mission <mission-id>");
+}
+
+async function startGoldenDogfoodFromCli(args = []) {
+  const separator = args.indexOf("--");
+  const flagArgs = separator >= 0 ? args.slice(0, separator) : args;
+  const command = separator >= 0 ? args.slice(separator + 1) : ["node", "-e", "console.log('klemm golden dogfood')"];
+  const flags = parseFlags(flagArgs);
+  const id = flags.id ?? flags.mission ?? `mission-golden-${Date.now()}`;
+  const goal = flags.goal ?? "Build Klemm with Klemm supervising the work.";
+  const now = new Date().toISOString();
+
+  store.update((state) => ({
+    ...state,
+    goldenDogfoodRuns: [
+      {
+        id: `golden-${Date.now()}`,
+        missionId: id,
+        goal,
+        status: "active",
+        startedAt: now,
+        requiredEvidence: ["plan_reports", "command_capture", "diff_reports", "proxy_questions", "queue_decisions", "debriefs"],
+      },
+      ...(state.goldenDogfoodRuns ?? []).filter((run) => run.missionId !== id),
+    ],
+    auditEvents: [
+      {
+        id: `audit-golden-dogfood-${Date.now()}`,
+        type: "golden_dogfood_started",
+        at: now,
+        missionId: id,
+        summary: goal,
+      },
+      ...(state.auditEvents ?? []),
+    ],
+  }));
+
+  console.log("Klemm golden dogfood started");
+  console.log(`Mission: ${id}`);
+  console.log(`Goal: ${goal}`);
+  console.log("Required evidence: plan, command capture, diff, proxy question, queue decision, debrief");
+  await wrapCodexSessionFromCli([
+    "--id", id,
+    "--goal", goal,
+    "--plan", flags.plan ?? "Golden dogfood loop: capture real evidence before finish.",
+    "--",
+    ...command,
+  ]);
+}
+
+function printGoldenDogfoodStatusFromCli(args = []) {
+  const flags = parseFlags(args);
+  const report = buildGoldenDogfoodReport(store.getState(), { missionId: flags.mission ?? flags.id ?? args[0] });
+  printGoldenDogfoodReport(report);
+}
+
+async function finishGoldenDogfoodFromCli(args = []) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? flags.id ?? args[0];
+  if (!missionId) throw new Error("Usage: klemm dogfood golden finish --mission <mission-id> [--force]");
+  const state = store.getState();
+  const report = buildGoldenDogfoodReport(state, { missionId });
+  const unresolved = (state.queue ?? []).filter((decision) => decision.status === "queued" && decision.missionId === missionId);
+  if (!flags.force && (!report.pass || unresolved.length > 0)) {
+    console.log("Golden dogfood finish blocked");
+    console.log(`Mission: ${missionId}`);
+    console.log(`unresolved_queue=${unresolved.length}`);
+    for (const [gate, passed] of Object.entries(report.gates)) console.log(`${gate}=${passed ? "present" : "missing"}`);
+    if (report.fakedEvidence) console.log("faked_evidence=yes");
+    for (const decision of unresolved.slice(0, 5)) console.log(`- ${decision.id} ${decision.actionType}: klemm queue inspect ${decision.id}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const next = store.update((current) => ({
+    ...current,
+    goldenDogfoodRuns: (current.goldenDogfoodRuns ?? []).map((run) =>
+      run.missionId === missionId ? { ...run, status: "finished", finishedAt: now, gates: report.gates } : run,
+    ),
+    auditEvents: [
+      {
+        id: `audit-golden-dogfood-finish-${Date.now()}`,
+        type: "golden_dogfood_finished",
+        at: now,
+        missionId,
+        summary: "Golden dogfood loop finished with required evidence.",
+      },
+      ...(current.auditEvents ?? []),
+    ],
+  }));
+  console.log("Golden dogfood debrief");
+  console.log(summarizeDebrief(next, { missionId }));
+  const finished = finishMissionLocal(missionId, flags.note ?? "golden dogfood complete");
+  console.log(`Mission finished: ${finished.id}`);
+  const current = store.getState();
+  const queued = (current.queue ?? []).filter((decision) => decision.status === "queued").length;
+  const active = (current.missions ?? []).filter((mission) => mission.status === "active").length;
+  console.log(`Live state: ${queued === 0 && active === 0 ? "clean" : `active=${active} queued=${queued}`}`);
+}
+
+function buildGoldenDogfoodReport(state, { missionId } = {}) {
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  const supervisedRuns = (state.supervisedRuns ?? []).filter((run) => !missionId || run.missionId === missionId);
+  const proxyQuestions = (state.proxyQuestions ?? []).filter((question) => !missionId || question.missionId === missionId);
+  const decisions = (state.decisions ?? []).filter((decision) => !missionId || decision.missionId === missionId);
+  const queueDecisions = decisions.filter((decision) => decision.decision === "queue");
+  const gates = {
+    plan_reports: activities.some((activity) => activity.type === "plan"),
+    command_capture: supervisedRuns.some((run) => String(run.command ?? "").length > 0 && !/dry_run/i.test(`${run.status ?? ""} ${run.stdout ?? ""}`)),
+    diff_reports: activities.some((activity) => activity.type === "file_change" || (activity.fileChanges ?? []).length > 0 || /\bdiff\b/i.test(`${activity.summary ?? ""} ${activity.target ?? ""}`)),
+    proxy_questions: proxyQuestions.length > 0,
+    queue_decisions: queueDecisions.length > 0,
+    debriefs: activities.some((activity) => activity.type === "debrief"),
+  };
+  const timeline = [
+    ...activities.map((activity) => ({ at: activity.createdAt, kind: activity.type, text: `${activity.agentId}: ${activity.summary ?? activity.command ?? activity.target ?? ""}` })),
+    ...supervisedRuns.map((run) => ({ at: run.finishedAt ?? run.startedAt, kind: "command_capture", text: `${run.id} exit=${run.exitCode ?? "unknown"} command=${run.command} stdout=${oneLineText(run.stdout ?? "")}` })),
+    ...proxyQuestions.map((question) => ({ at: question.createdAt, kind: "proxy_question", text: `${question.id}: ${question.question}` })),
+    ...decisions.map((decision) => ({ at: decision.createdAt, kind: `decision_${decision.decision}`, text: `${decision.id} ${decision.actor} ${decision.actionType} ${decision.target}` })),
+  ].sort((a, b) => String(a.at ?? "").localeCompare(String(b.at ?? "")));
+  const fakedEvidence = timeline.some((row) => /\bfaked evidence\b|\bfixture-only\b|\bsimulated-only\b|\bnot real evidence\b|\bdry_run\b/i.test(row.text));
+  return {
+    missionId,
+    gates,
+    timeline,
+    fakedEvidence,
+    pass: Object.values(gates).every(Boolean) && !fakedEvidence,
+  };
+}
+
+function printGoldenDogfoodReport(report) {
+  console.log("Golden Dogfood Loop");
+  console.log(`Mission: ${report.missionId ?? "all"}`);
+  for (const [gate, passed] of Object.entries(report.gates)) console.log(`${gate}=${passed ? "present" : "missing"}`);
+  console.log(`Faked evidence: ${report.fakedEvidence ? "yes" : "no"}`);
+  console.log(`Verdict: ${report.pass ? "pass" : "needs_work"}`);
+  console.log("Timeline:");
+  if (report.timeline.length === 0) console.log("- none");
+  for (const row of report.timeline.slice(0, 20)) console.log(`- ${row.at ?? "unknown"} ${row.kind}: ${redactSensitiveText(row.text)}`);
+}
+
 async function dogfoodAdaptersFromCli(args) {
   const flags = parseFlags(args);
   const home = flags.home ?? join(KLEMM_DATA_DIR, "dogfood-adapters-home");
@@ -7754,6 +7918,7 @@ _klemm() {
     'install:Install Klemm daemon, Codex wrapper, profiles, and policies'
     'codex wrap:Run a wrapped Codex dogfood session'
     'dogfood finish:Finish a dogfood mission after queue-safe debrief'
+    'dogfood golden:Run the strict golden dogfood evidence loop'
     'dogfood start:Start dogfood through klemm codex wrap'
     'readiness:Score private-alpha ship readiness'
     'helper status:Show native macOS helper rail status'
@@ -8227,6 +8392,7 @@ Commands:
   klemm dogfood status --mission mission-id
   klemm dogfood start --id mission-id --goal "..." --plan "..." [--dry-run] -- <command>
   klemm dogfood adapters [--id goal-id] --goal "..." [--home path]
+  klemm dogfood golden start|status|finish --mission mission-id
   klemm dogfood day start --id mission-id --goal "..." [--domains coding,memory] [--watch-path src] [--memory-source codex] [--policy-pack coding-afk] [--dry-run] -- <command>
   klemm dogfood day status|checkpoint|finish --mission mission-id
   klemm dogfood 95 start|status|checkpoint|finish --mission mission-id
