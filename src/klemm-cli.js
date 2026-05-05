@@ -3591,6 +3591,8 @@ async function startInteractiveFromCli(args) {
 async function startInteractiveTty(flags) {
   emitKeypressEvents(process.stdin);
   let selectedIndex = 0;
+  let contextIndex = 0;
+  let mode = "main";
   let busy = false;
   let closed = false;
   let resolveDone;
@@ -3609,7 +3611,9 @@ async function startInteractiveTty(flags) {
     setRawMode(Boolean(previousRaw));
     resolveDone();
   };
-  const onEnd = () => cleanup();
+  const onEnd = () => {
+    if (!busy) cleanup();
+  };
   const askLine = async (prompt) => {
     setRawMode(false);
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -3620,12 +3624,47 @@ async function startInteractiveTty(flags) {
       if (!closed) setRawMode(true);
     }
   };
-  const rerender = ({ clear = true } = {}) => printStartMenu(selectedIndex, { clear });
+  const rerender = ({ clear = true } = {}) => {
+    if (mode === "context") return printStartContextMenu(contextIndex, { clear });
+    return printStartMenu(selectedIndex, { clear });
+  };
   const onKeypress = async (_chunk, key = {}) => {
     if (busy) return;
     if (key.ctrl && key.name === "c") {
       cleanup();
       console.log("Goodbye.");
+      return;
+    }
+    if (mode === "context") {
+      if (key.name === "escape" || key.sequence === "q") {
+        mode = "main";
+        rerender();
+        return;
+      }
+      if (key.name === "down") {
+        contextIndex = moveStartSelection(contextIndex, 1, START_CONTEXT_PROVIDERS.length);
+        rerender();
+        return;
+      }
+      if (key.name === "up") {
+        contextIndex = moveStartSelection(contextIndex, -1, START_CONTEXT_PROVIDERS.length);
+        rerender();
+        return;
+      }
+      const directProvider = key.name === "return" || key.name === "enter"
+        ? START_CONTEXT_PROVIDERS[contextIndex]
+        : findStartContextProvider(key.sequence);
+      if (directProvider) {
+        busy = true;
+        await openStartContextProvider(directProvider.id, flags);
+        mode = "main";
+        if (!closed) {
+          rerender({ clear: false });
+          busy = false;
+        } else {
+          busy = false;
+        }
+      }
       return;
     }
     if (key.name === "down") {
@@ -3646,6 +3685,13 @@ async function startInteractiveTty(flags) {
         console.log("Goodbye.");
         return;
       }
+      if (choice === "context") {
+        mode = "context";
+        contextIndex = 0;
+        rerender();
+        busy = false;
+        return;
+      }
       await runStartMenuChoice(choice, flags, { askLine });
       if (!closed) {
         rerender({ clear: false });
@@ -3659,6 +3705,13 @@ async function startInteractiveTty(flags) {
       if (directChoice === "quit") {
         cleanup();
         console.log("Goodbye.");
+        return;
+      }
+      if (directChoice === "context") {
+        mode = "context";
+        contextIndex = 0;
+        rerender();
+        busy = false;
         return;
       }
       await runStartMenuChoice(directChoice, flags, { askLine });
@@ -3760,8 +3813,8 @@ function parseStartMenuInput(raw, selectedIndex = 0) {
   return { choice: normalizeStartChoice(withoutArrows), selectedIndex: nextIndex };
 }
 
-function moveStartSelection(selectedIndex, delta) {
-  return (selectedIndex + delta + START_MENU_OPTIONS.length) % START_MENU_OPTIONS.length;
+function moveStartSelection(selectedIndex, delta, itemCount = START_MENU_OPTIONS.length) {
+  return (selectedIndex + delta + itemCount) % itemCount;
 }
 
 async function runStartMenuChoice(choice, flags = {}, tty = {}) {
@@ -3864,11 +3917,13 @@ function saveStartDirection(text) {
   console.log(`Direction: ${redactSensitiveText(saved.direction)}`);
 }
 
-function printStartContextMenu() {
+function printStartContextMenu(selectedIndex = 0, { clear = false } = {}) {
+  if (clear) process.stdout.write(START_CLEAR_SCREEN);
   console.log("Context");
-  console.log("Choose a service to connect as read-only context:");
+  console.log("Use ↑/↓ then Enter to choose a service:");
   START_CONTEXT_PROVIDERS.forEach((provider, index) => {
-    console.log(`${index + 1}. ${provider.name}`);
+    const pointer = index === selectedIndex ? ">" : " ";
+    console.log(`${pointer} ${index + 1}. ${provider.name}`);
   });
 }
 

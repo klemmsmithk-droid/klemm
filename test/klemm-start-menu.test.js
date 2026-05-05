@@ -85,6 +85,27 @@ test("klemm start context lists providers and records a connection request", asy
   assert.match(result.stdout, /Connection request saved: context-connection-/);
 });
 
+test("klemm start context providers are selectable with arrows and enter", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-start-context-arrows-"));
+  const env = { KLEMM_DATA_DIR: dataDir, KLEMM_FORCE_INTERACTIVE: "1" };
+
+  const result = await runKlemm(["start", "--no-open"], {
+    env,
+    input: "\x1b[B\x1b[B\n\x1b[B\x1b[B\n",
+    timeoutMs: 5000,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Context/);
+  assert.match(result.stdout, /Use ↑\/↓ then Enter to choose a service/);
+  assert.match(result.stdout, /> 3\. Gemini/);
+  assert.match(result.stdout, /Opening Gemini connection/);
+  assert.match(result.stdout, /https:\/\/gemini\.google\.com/);
+  assert.match(result.stdout, /Browser open: skipped/);
+  assert.match(result.stdout, /Connection request saved: context-connection-/);
+  assert.doesNotMatch(result.stdout, /provider>/);
+});
+
 test("klemm start agents lists agents currently in use", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-start-agents-"));
   const env = { KLEMM_DATA_DIR: dataDir };
