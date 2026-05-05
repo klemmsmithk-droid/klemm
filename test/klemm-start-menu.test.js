@@ -83,8 +83,10 @@ test("klemm start context lists providers and records a connection request", asy
   assert.match(result.stdout, /No public ChatGPT history OAuth flow/);
   assert.match(result.stdout, /ChatGPT data export/);
   assert.match(result.stdout, /OPENAI_API_KEY/);
-  assert.match(result.stdout, /https:\/\/help\.openai\.com\/en\/articles\/11487775/);
-  assert.match(result.stdout, /Browser open: skipped/);
+  assert.match(result.stdout, /This setup stays in Klemm/);
+  assert.match(result.stdout, /What to do now:/);
+  assert.doesNotMatch(result.stdout, /https:\/\/help\.openai\.com/);
+  assert.doesNotMatch(result.stdout, /Browser open:/);
   assert.match(result.stdout, /Connector saved: connector-chatgpt/);
   assert.match(result.stdout, /Connection request saved: context-connection-/);
   assert.doesNotMatch(result.stdout, /URL: https:\/\/chatgpt\.com\s/);

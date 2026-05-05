@@ -3946,17 +3946,17 @@ async function openStartContextProvider(rawProvider, flags = {}) {
 
 async function openOfficialChatGptConnector(provider, flags = {}) {
   console.log("Official ChatGPT connector");
+  console.log("This setup stays in Klemm. No browser will open unless you choose an explicit open command later.");
   console.log("No public ChatGPT history OAuth flow is available for Klemm to request chat history directly.");
   console.log("Supported official paths:");
   console.log("1. ChatGPT data export: export conversations from ChatGPT and import the file into Klemm.");
   console.log("2. OpenAI API key: set OPENAI_API_KEY so Klemm can use OpenAI models for local distillation.");
   console.log("3. ChatGPT custom connector: add Klemm's MCP server inside ChatGPT Apps & Connectors when your plan supports custom connectors.");
-  console.log(`OpenAI connector docs: ${provider.url}`);
-  console.log(`OpenAI API keys: ${provider.apiKeyUrl}`);
-  console.log("Next command after export:");
+  console.log("What to do now:");
+  console.log("- Export ChatGPT data from ChatGPT Settings > Data Controls.");
   console.log("klemm connectors setup chatgpt --mode export --path ~/Downloads/chatgpt-export.json --review-required");
-  const openResult = await openBrowserUrl(provider.url, flags);
-  console.log(`Browser open: ${openResult}`);
+  console.log("- Or set OPENAI_API_KEY in your shell before running Klemm.");
+  console.log("- Or install Klemm MCP into ChatGPT Apps/Connectors from Klemm's MCP config when your ChatGPT plan supports custom connectors.");
   const now = new Date().toISOString();
   const next = store.update((state) => {
     const connector = {
