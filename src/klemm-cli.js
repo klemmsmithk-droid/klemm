@@ -136,6 +136,20 @@ const START_CONTEXT_PROVIDERS = [
   },
 ];
 
+const START_COLORS = {
+  reset: "\x1b[0m",
+  forestGreen: "\x1b[38;2;34;139;34m",
+  white: "\x1b[97m",
+};
+
+const START_KLEMM_ASCII = [
+  "K    K  L       EEEEEE  M  M  M",
+  "K  K    L       E       MM MM M",
+  "KK      L       EEEE    M  M  M",
+  "K  K    L       E       M     M",
+  "K    K  LLLLLL  EEEEEE  M     M",
+];
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0] ?? "status";
@@ -3625,6 +3639,7 @@ async function processStartMenuLines(lines, flags) {
 }
 
 function printStartMenu() {
+  printStartBanner();
   console.log("Klemm Start");
   console.log("Choose:");
   console.log("1. Status");
@@ -3633,6 +3648,24 @@ function printStartMenu() {
   console.log("4. Agents");
   console.log("5. Quit");
   console.log("Type a number or name:");
+}
+
+function printStartBanner() {
+  const frame = [
+    "        /\\          /\\          /\\        ",
+    "       /**\\   /\\   /**\\   /\\   /**\\       ",
+    "  ____/****\\_/  \\_/****\\_/  \\_/****\\____  ",
+  ];
+  console.log(startStyle("==================================================", START_COLORS.forestGreen));
+  for (const line of frame) console.log(startStyle(line, START_COLORS.forestGreen));
+  for (const line of START_KLEMM_ASCII) console.log(startStyle(line, START_COLORS.white));
+  console.log(startStyle("forest-green personal authority layer", START_COLORS.forestGreen));
+  console.log(startStyle("==================================================", START_COLORS.forestGreen));
+}
+
+function startStyle(text, ansi) {
+  if (process.env.KLEMM_NO_COLOR) return text;
+  return `${ansi}${text}${START_COLORS.reset}`;
 }
 
 function normalizeStartChoice(raw) {

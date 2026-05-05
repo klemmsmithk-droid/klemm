@@ -39,6 +39,10 @@ test("klemm start opens a compact status front door", async () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Klemm Start/);
+  assert.match(result.stdout, /\x1b\[38;2;34;139;34m/);
+  assert.match(result.stdout, /\x1b\[97m/);
+  assert.match(result.stdout, /K\s+K\s+L\s+EEEEEE\s+M\s+M\s+M/);
+  assert.match(result.stdout, /forest-green personal authority layer/i);
   assert.match(result.stdout, /1\. Status/);
   assert.match(result.stdout, /Klemm running:/);
   assert.match(result.stdout, /Daemon:/);
