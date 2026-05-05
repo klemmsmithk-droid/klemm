@@ -139,6 +139,12 @@ const START_CONTEXT_PROVIDERS = [
   },
 ];
 
+const START_CONTEXT_MEMORY_OPTION = {
+  id: "memory",
+  name: "Memory",
+  aliases: ["5", "memory", "memories", "review", "profile", "user"],
+};
+
 const START_COLORS = {
   reset: "\x1b[0m",
   forestGreen: "\x1b[38;2;34;139;34m",
@@ -235,6 +241,7 @@ async function main() {
       return reviewMemoryFromCli(args.slice(2), memoryCommandToStatus(args[1]));
     }
     if (command === "user" && args[1] === "model") return printUserModel(args.slice(2));
+    if (command === "user" && args[1] === "profile") return printUserProfile(args.slice(2));
     if (command === "sync" && args[1] === "add") return addSyncSourceFromCli(args.slice(2));
     if (command === "sync" && args[1] === "plan") return printContextSyncPlan(args.slice(2));
     if (command === "sync" && args[1] === "run") return await runContextSyncFromCli(args.slice(2));
@@ -2949,6 +2956,7 @@ function trustWhyDecisionV4(decision, state = store.getState()) {
   const mission = (state.missions ?? []).find((item) => item.id === decision.missionId);
   const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
   const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
+  const profileEvidence = selectProfileEvidence(state, `${decision.actionType} ${decision.target} ${decision.reason}`, { limit: 5 });
   const uncertainty = (decision.matchedPolicies ?? []).length && sourceMemories.length ? "low" : "medium";
   store.update((current) => ({
     ...current,
@@ -2973,6 +2981,15 @@ function trustWhyDecisionV4(decision, state = store.getState()) {
   if (sourceMemories.length === 0) console.log("- none");
   for (const memory of sourceMemories) {
     console.log(`- ${memory.id} ${memory.status}: ${redactSensitiveText(memory.text)}`);
+  }
+  console.log("");
+  console.log("Kyle profile:");
+  console.log(`- Reviewed memories: ${reviewedProfileMemories(state).length}`);
+  console.log(`- Best matching profile signal: ${profileEvidence[0] ? redactSensitiveText(profileEvidence[0].text) : "none"}`);
+  console.log("Profile evidence:");
+  if (profileEvidence.length === 0) console.log("- none");
+  for (const memory of profileEvidence) {
+    console.log(`- ${memory.id} ${memory.status} class=${memory.memoryClass} source=${memory.source}: ${redactSensitiveText(memory.text)}`);
   }
   console.log("");
   console.log("Source chain:");
@@ -3867,17 +3884,17 @@ async function startInteractiveTty(flags) {
         return;
       }
       if (key.name === "down") {
-        contextIndex = moveStartSelection(contextIndex, 1, START_CONTEXT_PROVIDERS.length);
+        contextIndex = moveStartSelection(contextIndex, 1, startContextOptions().length);
         rerender();
         return;
       }
       if (key.name === "up") {
-        contextIndex = moveStartSelection(contextIndex, -1, START_CONTEXT_PROVIDERS.length);
+        contextIndex = moveStartSelection(contextIndex, -1, startContextOptions().length);
         rerender();
         return;
       }
       const directProvider = key.name === "return" || key.name === "enter"
-        ? START_CONTEXT_PROVIDERS[contextIndex]
+        ? startContextOptions()[contextIndex]
         : findStartContextProvider(key.sequence);
       if (directProvider) {
         busy = true;
@@ -4146,7 +4163,7 @@ function printStartContextMenu(selectedIndex = 0, { clear = false } = {}) {
   if (clear) process.stdout.write(START_CLEAR_SCREEN);
   console.log("Context");
   console.log("Use ↑/↓ then Enter to choose a service:");
-  START_CONTEXT_PROVIDERS.forEach((provider, index) => {
+  startContextOptions().forEach((provider, index) => {
     const pointer = index === selectedIndex ? ">" : " ";
     console.log(`${pointer} ${index + 1}. ${provider.name}`);
   });
@@ -4158,6 +4175,7 @@ async function openStartContextProvider(rawProvider, flags = {}) {
     console.log(`Unknown context provider: ${rawProvider || "none"}`);
     return;
   }
+  if (provider.id === "memory") return printStartMemoryDashboard();
   if (provider.id === "chatgpt") return await openOfficialChatGptConnector(provider, flags);
   console.log(`Opening ${provider.name} connection`);
   console.log(`URL: ${provider.url}`);
@@ -4244,7 +4262,11 @@ function saveContextConnectionRequest(provider, flags = {}, { status } = {}) {
 
 function findStartContextProvider(rawProvider) {
   const value = String(rawProvider ?? "").trim().toLowerCase();
-  return START_CONTEXT_PROVIDERS.find((provider) => provider.aliases.includes(value) || provider.id === value || provider.name.toLowerCase() === value);
+  return startContextOptions().find((provider) => provider.aliases.includes(value) || provider.id === value || provider.name.toLowerCase() === value);
+}
+
+function startContextOptions() {
+  return [...START_CONTEXT_PROVIDERS, START_CONTEXT_MEMORY_OPTION];
 }
 
 async function openBrowserUrl(url, flags = {}) {
@@ -4733,6 +4755,18 @@ function proxyAskFromCli(args) {
   console.log(`Should continue: ${answer.shouldContinue ? "yes" : "no"}`);
   console.log(`Answer: ${redactSensitiveText(answer.answer)}`);
   console.log(`Next prompt: ${redactSensitiveText(answer.nextPrompt)}`);
+  const state = store.getState();
+  const evidenceMemories = (state.memories ?? []).filter((memory) => (answer.evidenceMemoryIds ?? []).includes(memory.id));
+  const profileEvidence = evidenceMemories.length > 0
+    ? evidenceMemories
+    : selectProfileEvidence(state, `${flags.question ?? ""} ${flags.context ?? ""} ${answer.answer ?? ""}`, { limit: 4 });
+  console.log("Kyle profile:");
+  console.log(`Reviewed memories: ${reviewedProfileMemories(state).length}`);
+  console.log("Profile evidence:");
+  if (profileEvidence.length === 0) console.log("- none");
+  for (const memory of profileEvidence.slice(0, 4)) {
+    console.log(`- ${memory.id} ${memory.status}: ${redactSensitiveText(memory.text)}`);
+  }
   if (answer.queuedDecisionId) console.log(`Queued decision: ${answer.queuedDecisionId}`);
 }
 
@@ -5973,6 +6007,144 @@ function printUserModel(args) {
   if (flags.coverage) printUserModelCoverage(state);
 }
 
+function printUserProfile(args) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const profile = buildKyleProfile(state);
+  console.log("Kyle Profile Card");
+  console.log(`Reviewed evidence: ${profile.reviewedCount}`);
+  console.log(`Pending review: ${profile.pendingCount}`);
+  console.log(`Pinned authority: ${profile.pinnedCount}`);
+  console.log("");
+  console.log("Standing intent");
+  printProfileList(profile.standingIntent);
+  console.log("");
+  console.log("Working style");
+  printProfileList(profile.workingStyle);
+  console.log("");
+  console.log("Authority boundaries");
+  printProfileList(profile.authorityBoundaries);
+  console.log("");
+  console.log("Preferred agent behavior");
+  printProfileList(profile.preferredAgentBehavior);
+  console.log("");
+  console.log("Correction history");
+  if (profile.corrections.length === 0) {
+    console.log("- none reviewed yet");
+  } else {
+    for (const correction of profile.corrections) {
+      console.log(`- ${correction.id} ${correction.status}: ${redactSensitiveText(correction.preference ?? correction.text ?? "")}`);
+    }
+  }
+  if (!flags.evidence) return;
+  console.log("");
+  console.log("Source evidence");
+  if (profile.sourceEvidence.length === 0) console.log("- none reviewed yet");
+  for (const memory of profile.sourceEvidence) {
+    const source = (state.memorySources ?? []).find((item) => item.id === memory.memorySourceId || item.provider === memory.source || item.sourceRef === memory.sourceRef);
+    console.log(`- ${memory.id} ${memory.status} class=${memory.memoryClass} source=${memory.source} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"} record=${source?.id ?? "none"}: ${redactSensitiveText(memory.text)}`);
+  }
+}
+
+function printProfileList(memories) {
+  if (memories.length === 0) {
+    console.log("- none reviewed yet");
+    return;
+  }
+  for (const memory of memories.slice(0, 8)) {
+    console.log(`- ${redactSensitiveText(memory.text)} (${memory.status}, ${memory.source})`);
+  }
+}
+
+function buildKyleProfile(state, { query } = {}) {
+  const reviewed = reviewedProfileMemories(state);
+  const pending = (state.memories ?? []).filter((memory) => memory.status === "pending_review");
+  const pinned = reviewed.filter((memory) => memory.status === "pinned");
+  const relevant = query ? selectProfileEvidence(state, query, { limit: 8 }) : reviewed;
+  const agentPattern = /(agent|codex|claude|cursor|shell|proceed|what'?s next|what is next|dogfood|safe local|afk|supervis|police|mission|goal)/i;
+  return {
+    reviewedCount: reviewed.length,
+    pendingCount: pending.length,
+    pinnedCount: pinned.length,
+    standingIntent: uniqueMemories([
+      ...reviewed.filter((memory) => ["project_context", "personality_interest", "standing_preference"].includes(memory.memoryClass)),
+      ...reviewed.filter((memory) => /intent|goal|klemm|agent/i.test(memory.text ?? "")),
+    ]).slice(0, 8),
+    workingStyle: reviewed.filter((memory) => ["standing_preference", "prompt_intent_pattern"].includes(memory.memoryClass)).slice(0, 8),
+    authorityBoundaries: reviewed.filter((memory) => memory.memoryClass === "authority_boundary").slice(0, 8),
+    preferredAgentBehavior: reviewed.filter((memory) => agentPattern.test(memory.text ?? "")).slice(0, 8),
+    corrections: [
+      ...(state.corrections ?? []).filter((correction) => correction.status !== "rejected"),
+      ...reviewed.filter((memory) => memory.memoryClass === "prior_correction" || memory.source === "correction"),
+    ].slice(0, 8),
+    sourceEvidence: relevant.slice(0, 12),
+  };
+}
+
+function reviewedProfileMemories(state) {
+  return (state.memories ?? []).filter((memory) => memory.status === "approved" || memory.status === "pinned");
+}
+
+function uniqueMemories(memories) {
+  const seen = new Set();
+  return memories.filter((memory) => {
+    if (!memory?.id || seen.has(memory.id)) return false;
+    seen.add(memory.id);
+    return true;
+  });
+}
+
+function selectProfileEvidence(state, query, { limit = 6 } = {}) {
+  const terms = String(query ?? "")
+    .toLowerCase()
+    .replace(/[_-]/g, " ")
+    .split(/[^a-z0-9']+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 3)
+    .filter((term) => !["agent", "codex", "mission", "local", "action", "command"].includes(term));
+  const memories = reviewedProfileMemories(state).map((memory) => {
+    const haystack = `${memory.text ?? ""} ${memory.memoryClass ?? ""} ${memory.source ?? ""}`.toLowerCase();
+    const score = terms.reduce((total, term) => total + (haystack.includes(term) ? 1 : 0), 0) + (memory.status === "pinned" ? 0.5 : 0);
+    return { memory, score };
+  });
+  const matches = memories
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map((item) => item.memory);
+  return uniqueMemories([...matches, ...reviewedProfileMemories(state)]).slice(0, limit);
+}
+
+function printStartMemoryDashboard() {
+  const state = store.getState();
+  const memories = state.memories ?? [];
+  const pending = memories.filter((memory) => memory.status === "pending_review");
+  const approved = memories.filter((memory) => memory.status === "approved");
+  const pinned = memories.filter((memory) => memory.status === "pinned");
+  const rejected = memories.filter((memory) => memory.status === "rejected");
+  const quarantined = state.memoryQuarantine ?? [];
+  console.log("Memory Workbench");
+  console.log(`Pending review: ${pending.length}`);
+  printMemoryDashboardSamples(pending);
+  console.log(`Approved: ${approved.length}`);
+  printMemoryDashboardSamples(approved);
+  console.log(`Pinned authority: ${pinned.length}`);
+  printMemoryDashboardSamples(pinned);
+  console.log(`Quarantined/rejected: ${quarantined.length + rejected.length}`);
+  printMemoryDashboardSamples([...rejected, ...quarantined.map((item) => ({ id: item.id, text: item.text ?? item.summary ?? item.reason, source: item.provider ?? item.source ?? "quarantine" }))]);
+  console.log("Review next: klemm memory review");
+  console.log("Profile: klemm user profile --evidence");
+}
+
+function printMemoryDashboardSamples(items) {
+  if (items.length === 0) {
+    console.log("- none");
+    return;
+  }
+  for (const item of items.slice(0, 3)) {
+    console.log(`- ${item.id ?? "source"} ${redactSensitiveText(item.text ?? item.summary ?? "")} (${item.source ?? item.provider ?? "unknown"})`);
+  }
+}
+
 function printUserModelCoverage(state) {
   const coverage = buildUserModelCoverage(state);
   console.log("User model coverage:");
@@ -7004,11 +7176,16 @@ function printRealWorldTrialStatus({ missionId, home }) {
   for (const row of buildAdapterStatusRows(state, { home, missionId: resolvedMissionId })) {
     console.log(`${row.label}: ${row.state}${row.lastSeen ? `, last action ${row.lastSeen}` : ""}`);
   }
+  const readiness = buildAgentPoliceReadiness(state, { missionId: resolvedMissionId, evidence });
+  console.log(`Agent Police Readiness: ${readiness.score}%`);
   console.log("Observed evidence:");
   console.log(`codex_session=${yn(evidence.codexSession)}`);
   console.log(`claude_live=${yn(evidence.claudeLive)}`);
   console.log(`cursor_live=${yn(evidence.cursorLive)}`);
   console.log(`queue_clean=${yn(evidence.queueClean)}`);
+  console.log("Missing pieces:");
+  if (readiness.missing.length === 0) console.log("- none");
+  for (const item of readiness.missing) console.log(`- ${item}`);
   console.log("Next proof:");
   if (!evidence.claudeLive) console.log(`- klemm adapters proof claude --mission ${resolvedMissionId ?? "<mission>"} --goal ${resolvedMissionId ?? "<goal>"} --home ${home}`);
   if (!evidence.cursorLive) console.log(`- klemm adapters proof cursor --mission ${resolvedMissionId ?? "<mission>"} --goal ${resolvedMissionId ?? "<goal>"} --home ${home}`);
@@ -7060,6 +7237,27 @@ function findRealWorldTrial(state, missionId) {
   const trials = state.realWorldTrials ?? [];
   if (missionId) return trials.find((trial) => trial.missionId === missionId || trial.id === missionId);
   return trials[0];
+}
+
+function buildAgentPoliceReadiness(state, { missionId, evidence } = {}) {
+  const reviewed = reviewedProfileMemories(state);
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  const decisions = (state.decisions ?? []).filter((decision) => !missionId || decision.missionId === missionId);
+  const debriefs = (state.debriefs ?? []).filter((debrief) => !missionId || debrief.missionId === missionId);
+  const observedEvidence = evidence ?? realWorldEvidence(state, { missionId });
+  const checks = [
+    { ok: observedEvidence.codexSession, points: 25, missing: "Codex session capture" },
+    { ok: observedEvidence.claudeLive, points: 15, missing: "Claude live proof" },
+    { ok: observedEvidence.cursorLive, points: 15, missing: "Cursor live proof" },
+    { ok: observedEvidence.queueClean, points: 10, missing: "clean decision queue" },
+    { ok: reviewed.length > 0, points: 15, missing: "reviewed Kyle profile evidence" },
+    { ok: activities.length > 0, points: 10, missing: "live agent activity evidence" },
+    { ok: decisions.length > 0 || debriefs.length > 0, points: 10, missing: "trust/debrief decision evidence" },
+  ];
+  return {
+    score: checks.reduce((total, check) => total + (check.ok ? check.points : 0), 0),
+    missing: checks.filter((check) => !check.ok).map((check) => check.missing),
+  };
 }
 
 function realWorldEvidence(state, { missionId } = {}) {
