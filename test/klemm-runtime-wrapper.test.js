@@ -83,6 +83,31 @@ test("klemm run codex can use the default Codex command without a trailing separ
   assert.match(result.stdout, /Dry run: launch skipped/);
 });
 
+test("klemm run unknown profile explains available profiles without dumping usage", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-runtime-unknown-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  const result = await runKlemm(["run", "cursor"], { env });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Unknown runtime profile: cursor/);
+  assert.match(result.stdout, /Available profiles: codex, claude, shell/);
+  assert.match(result.stdout, /Most users start with: klemm start/);
+  assert.doesNotMatch(result.stderr, /Usage:/);
+});
+
+test("klemm run shell without a command explains the missing command", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-runtime-shell-help-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  const result = await runKlemm(["run", "shell"], { env });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stdout, /Shell runtime needs a command/);
+  assert.match(result.stdout, /Try: klemm run shell -- npm test/);
+  assert.doesNotMatch(result.stderr, /Usage:/);
+});
+
 test("klemm run intercepts high-risk profile commands before launch", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-runtime-"));
   const env = { KLEMM_DATA_DIR: dataDir };

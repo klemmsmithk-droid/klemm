@@ -6770,8 +6770,13 @@ async function runRuntimeFromCli(args) {
   const flagArgs = separator >= 0 ? rest.slice(0, separator) : rest;
   const runtimeArgs = separator >= 0 ? rest.slice(separator + 1) : [];
   const flags = parseFlags(flagArgs);
-  const profile = await loadRuntimeProfile(profileName, flags.profileFile);
-  if (!profile) throw new Error(`Usage: klemm run <${Object.keys(AGENT_RUNTIME_PROFILES).join("|")}> [--profile-file path] [--mission <id>] [--dry-run] -- [args...]`);
+  const profiles = await loadRuntimeProfiles(flags.profileFile);
+  const profile = profiles[profileName];
+  if (!profile) {
+    printUnknownRunProfile(profileName, profiles);
+    process.exitCode = 1;
+    return;
+  }
   const goal = flags.goal ? findGoal(store.getState(), flags.goal) : null;
   if (flags.goal && !goal) throw new Error(`Goal not found: ${flags.goal}`);
   const missionId = flags.mission ?? goal?.missionId ?? profile.defaultMission?.id;
@@ -6800,7 +6805,11 @@ async function runRuntimeFromCli(args) {
     console.log(`Adapter client ensured: ${profile.adapterClientId}`);
   }
   const command = profile.command.length > 0 ? [...profile.command, ...runtimeArgs] : runtimeArgs;
-  if (command.length === 0) throw new Error(`Usage: klemm run ${profileName} [--mission <id>] -- <command> [args...]`);
+  if (command.length === 0) {
+    printRuntimeMissingCommand(profileName);
+    process.exitCode = 1;
+    return;
+  }
 
   const commandCwd = flags.cwd ?? process.cwd();
   const withAgent = store.update((state) =>
@@ -6897,7 +6906,24 @@ function printRunQuickStart() {
   console.log("Add --dry-run to preview what Klemm would launch.");
 }
 
-async function loadRuntimeProfile(profileName, profileFile) {
+function printUnknownRunProfile(profileName, profiles) {
+  console.log(`Unknown runtime profile: ${profileName}`);
+  console.log(`Available profiles: ${Object.keys(profiles).join(", ")}`);
+  console.log("");
+  printRunQuickStart();
+}
+
+function printRuntimeMissingCommand(profileName) {
+  if (profileName === "shell") {
+    console.log("Shell runtime needs a command.");
+    console.log("Try: klemm run shell -- npm test");
+    return;
+  }
+  console.log(`Runtime profile "${profileName}" needs a command.`);
+  console.log(`Try: klemm run ${profileName} -- <command>`);
+}
+
+async function loadRuntimeProfiles(profileFile) {
   let profiles = { ...AGENT_RUNTIME_PROFILES };
   if (profileFile) {
     const parsed = JSON.parse(await readFile(profileFile, "utf8"));
@@ -6910,6 +6936,11 @@ async function loadRuntimeProfile(profileName, profileFile) {
       };
     }
   }
+  return profiles;
+}
+
+async function loadRuntimeProfile(profileName, profileFile) {
+  const profiles = await loadRuntimeProfiles(profileFile);
   return profiles[profileName];
 }
 
