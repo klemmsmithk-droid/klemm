@@ -143,6 +143,8 @@ const START_COLORS = {
   white: "\x1b[97m",
 };
 
+const START_CLEAR_SCREEN = "\x1b[2J\x1b[H";
+
 const START_KLEMM_ASCII = [
   "K    K  L       EEEEEE  M   M  M   M",
   "K  K    L       E       MM MM  MM MM",
@@ -3578,7 +3580,7 @@ async function printStatus() {
 
 async function startInteractiveFromCli(args) {
   const flags = parseFlags(args);
-  if (process.stdin.isTTY) {
+  if (process.stdin.isTTY || process.env.KLEMM_FORCE_INTERACTIVE === "1") {
     return await startInteractiveTty(flags);
   }
   printStartMenu();
@@ -3603,9 +3605,11 @@ async function startInteractiveTty(flags) {
     if (closed) return;
     closed = true;
     process.stdin.off("keypress", onKeypress);
+    process.stdin.off("end", onEnd);
     setRawMode(Boolean(previousRaw));
     resolveDone();
   };
+  const onEnd = () => cleanup();
   const askLine = async (prompt) => {
     setRawMode(false);
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -3616,7 +3620,7 @@ async function startInteractiveTty(flags) {
       if (!closed) setRawMode(true);
     }
   };
-  const rerender = () => printStartMenu(selectedIndex);
+  const rerender = ({ clear = true } = {}) => printStartMenu(selectedIndex, { clear });
   const onKeypress = async (_chunk, key = {}) => {
     if (busy) return;
     if (key.ctrl && key.name === "c") {
@@ -3644,7 +3648,7 @@ async function startInteractiveTty(flags) {
       }
       await runStartMenuChoice(choice, flags, { askLine });
       if (!closed) {
-        rerender();
+        rerender({ clear: false });
         busy = false;
       }
       return;
@@ -3659,15 +3663,16 @@ async function startInteractiveTty(flags) {
       }
       await runStartMenuChoice(directChoice, flags, { askLine });
       if (!closed) {
-        rerender();
+        rerender({ clear: false });
         busy = false;
       }
     }
   };
   process.stdin.on("keypress", onKeypress);
+  process.stdin.once("end", onEnd);
   setRawMode(true);
   process.stdin.resume();
-  printStartMenu(selectedIndex);
+  printStartMenu(selectedIndex, { clear: true });
   await done;
 }
 
@@ -3704,7 +3709,8 @@ async function processStartMenuLines(lines, flags) {
   }
 }
 
-function printStartMenu(selectedIndex = 0) {
+function printStartMenu(selectedIndex = 0, { clear = false } = {}) {
+  if (clear) process.stdout.write(START_CLEAR_SCREEN);
   printStartBanner();
   console.log("Klemm Start");
   console.log("Use ↑/↓ then Enter, or type a number/name:");

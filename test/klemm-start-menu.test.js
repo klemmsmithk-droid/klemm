@@ -116,3 +116,18 @@ test("klemm start supports arrow-key selection for the main menu", async () => {
   assert.match(result.stdout, /Agents in use/);
   assert.match(result.stdout, /agent-arrow/);
 });
+
+test("klemm start clears the terminal before interactive arrow redraws", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-start-redraw-"));
+  const env = { KLEMM_DATA_DIR: dataDir, KLEMM_FORCE_INTERACTIVE: "1" };
+
+  const result = await runKlemm(["start"], {
+    env,
+    input: "\x1b[B",
+    timeoutMs: 5000,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\x1b\[2J\x1b\[H/);
+  assert.match(result.stdout, /> 2\. Directions/);
+});
