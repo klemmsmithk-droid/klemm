@@ -6761,6 +6761,10 @@ async function superviseFromCli(args) {
 
 async function runRuntimeFromCli(args) {
   const profileName = args[0];
+  if (!profileName) {
+    printRunQuickStart();
+    return;
+  }
   const rest = args.slice(1);
   const separator = rest.indexOf("--");
   const flagArgs = separator >= 0 ? rest.slice(0, separator) : rest;
@@ -6880,6 +6884,17 @@ async function runRuntimeFromCli(args) {
   if (flags.capture) persistCapturedRun({ ...flags, mission: missionId }, commandToRun.join(" "), result, commandCwd);
   console.log(`Klemm runtime exit: ${result.status}`);
   process.exitCode = result.status;
+}
+
+function printRunQuickStart() {
+  console.log("Klemm run");
+  console.log("Most users start with: klemm start");
+  console.log("");
+  console.log("Run Codex through Klemm: klemm run codex");
+  console.log("Run Claude through Klemm: klemm run claude");
+  console.log("Run a shell command through Klemm: klemm run shell -- npm test");
+  console.log("");
+  console.log("Add --dry-run to preview what Klemm would launch.");
 }
 
 async function loadRuntimeProfile(profileName, profileFile) {

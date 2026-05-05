@@ -54,6 +54,35 @@ test("klemm run prepares a named Codex runtime profile without launching in dry-
   assert.match(agents.stdout, /agent-runtime-codex active mission=mission-runtime kind=codex_agent/);
 });
 
+test("klemm run without a profile gives a friendly next step instead of a hard usage error", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-runtime-help-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  const result = await runKlemm(["run"], { env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Klemm run/);
+  assert.match(result.stdout, /Most users start with: klemm start/);
+  assert.match(result.stdout, /Run Codex through Klemm: klemm run codex/);
+  assert.doesNotMatch(result.stderr, /Usage:/);
+});
+
+test("klemm run codex can use the default Codex command without a trailing separator", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-runtime-no-separator-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+
+  await runKlemm(["mission", "start", "--id", "mission-runtime-no-separator", "--hub", "codex", "--goal", "Dogfood runtime wrapper"], {
+    env,
+  });
+
+  const result = await runKlemm(["run", "codex", "--mission", "mission-runtime-no-separator", "--dry-run"], { env });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Agent runtime profile: codex/);
+  assert.match(result.stdout, /Command: codex/);
+  assert.match(result.stdout, /Dry run: launch skipped/);
+});
+
 test("klemm run intercepts high-risk profile commands before launch", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-runtime-"));
   const env = { KLEMM_DATA_DIR: dataDir };
@@ -71,4 +100,3 @@ test("klemm run intercepts high-risk profile commands before launch", async () =
   assert.match(blocked.stdout, /Decision: queue/);
   assert.match(blocked.stdout, /git_push/);
 });
-
