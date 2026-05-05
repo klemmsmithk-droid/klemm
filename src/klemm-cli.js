@@ -256,6 +256,7 @@ async function main() {
     if (command === "dogfood" && args[1] === "start") return await startDogfoodWrapperFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "debrief") return await printDebrief(args.slice(2));
     if (command === "dogfood" && args[1] === "finish") return await finishDogfoodFromCli(args.slice(2));
+    if (command === "trial" && args[1] === "real-world") return await realWorldTrialFromCli(args.slice(2));
     if (command === "readiness") return await printReadinessFromCli(args.slice(1));
     if (command === "helper" && args[1] === "install") return await helperInstallFromCli(args.slice(2));
     if (command === "helper" && args[1] === "status") return helperStatusFromCli(args.slice(2));
@@ -6895,6 +6896,184 @@ async function finishDogfoodFromCli(args) {
   console.log(`Live state: ${queued === 0 && active === 0 ? "clean" : `active=${active} queued=${queued}`}`);
 }
 
+async function realWorldTrialFromCli(args = []) {
+  const action = args[0] ?? "status";
+  if (action === "start") return await startRealWorldTrialFromCli(args.slice(1));
+  if (action === "status") return printRealWorldTrialStatusFromCli(args.slice(1));
+  if (action === "finish") return await finishRealWorldTrialFromCli(args.slice(1));
+  throw new Error("Usage: klemm trial real-world start|status|finish --mission <mission-id>");
+}
+
+async function startRealWorldTrialFromCli(args = []) {
+  const separator = args.indexOf("--");
+  const flagArgs = separator >= 0 ? args.slice(0, separator) : args;
+  const command = separator >= 0 ? args.slice(separator + 1) : ["node", "-e", "console.log('real-world klemm trial')"];
+  const flags = parseFlags(flagArgs);
+  const missionId = flags.id ?? flags.mission ?? `mission-real-world-${Date.now()}`;
+  const goal = flags.goal ?? "Prove Klemm is supervising real agent work.";
+  const home = flags.home ?? process.env.HOME;
+  const now = new Date().toISOString();
+
+  console.log("Real World Agent Trial started");
+  console.log(`Mission: ${missionId}`);
+  console.log(`Goal: ${goal}`);
+  console.log("Truth labels: live means observed activity; installed means config exists but no session was seen");
+
+  const registrations = [];
+  for (const adapter of ["codex", "claude", "cursor"]) {
+    registrations.push(await installRealAdapter(adapter, { ...flags, home }));
+  }
+  store.update((current) => ({
+    ...current,
+    adapterRegistrations: [
+      ...registrations,
+      ...(current.adapterRegistrations ?? []).filter((item) => !registrations.some((registration) => registration.id === item.id)),
+    ],
+    realWorldTrials: [
+      {
+        id: `trial-real-world-${Date.now()}`,
+        missionId,
+        goal,
+        home,
+        status: "active",
+        startedAt: now,
+        adaptersInstalled: registrations.map((registration) => registration.id),
+      },
+      ...(current.realWorldTrials ?? []).filter((trial) => trial.missionId !== missionId),
+    ],
+    auditEvents: [
+      {
+        id: `audit-real-world-trial-${Date.now()}`,
+        type: "real_world_trial_started",
+        at: now,
+        missionId,
+        summary: goal,
+      },
+      ...(current.auditEvents ?? []),
+    ],
+  }));
+  console.log("Adapter install audit: pass");
+
+  await wrapCodexSessionFromCli([
+    "--id", missionId,
+    "--goal", goal,
+    "--plan", flags.plan ?? "Real-world trial: run Codex through Klemm and label adapter truth honestly.",
+    "--",
+    ...command,
+  ]);
+  const codexLive = realWorldEvidence(store.getState(), { missionId }).codexSession;
+  console.log(`Codex live proof: ${codexLive ? "pass" : "fail"}`);
+
+  const prove = normalizeListFlag(flags.prove);
+  if (prove.length > 0) ensureRealWorldTrialGoal({ missionId, goal });
+  if (prove.includes("claude")) {
+    await proveClaudeAdapter({ ...flags, mission: missionId, goal: flags.goalId ?? missionId, home });
+    console.log("Claude proof: pass");
+  }
+  if (prove.includes("cursor")) {
+    await proveCursorAdapter({ ...flags, mission: missionId, goal: flags.goalId ?? missionId, home });
+    console.log("Cursor proof: pass");
+  }
+  printRealWorldTrialStatus({ missionId, home });
+}
+
+function ensureRealWorldTrialGoal({ missionId, goal }) {
+  if (findGoal(store.getState(), missionId)) return;
+  store.update((current) => startGoal(current, {
+    id: missionId,
+    missionId,
+    text: goal,
+    success: "Real-world agent trial proves observed Codex supervision and honest adapter status.",
+    watchPaths: ["src", "test", ".agents"],
+  }));
+}
+
+function printRealWorldTrialStatusFromCli(args = []) {
+  const flags = parseFlags(args);
+  printRealWorldTrialStatus({ missionId: flags.mission ?? flags.id ?? args[0], home: flags.home ?? process.env.HOME });
+}
+
+function printRealWorldTrialStatus({ missionId, home }) {
+  const state = store.getState();
+  const trial = findRealWorldTrial(state, missionId);
+  const resolvedMissionId = missionId ?? trial?.missionId;
+  const evidence = realWorldEvidence(state, { missionId: resolvedMissionId });
+  console.log("Real World Agent Trial");
+  console.log(`Mission: ${resolvedMissionId ?? "all"}`);
+  if (trial) console.log(`Goal: ${trial.goal}`);
+  for (const row of buildAdapterStatusRows(state, { home, missionId: resolvedMissionId })) {
+    console.log(`${row.label}: ${row.state}${row.lastSeen ? `, last action ${row.lastSeen}` : ""}`);
+  }
+  console.log("Observed evidence:");
+  console.log(`codex_session=${yn(evidence.codexSession)}`);
+  console.log(`claude_live=${yn(evidence.claudeLive)}`);
+  console.log(`cursor_live=${yn(evidence.cursorLive)}`);
+  console.log(`queue_clean=${yn(evidence.queueClean)}`);
+  console.log("Next proof:");
+  if (!evidence.claudeLive) console.log(`- klemm adapters proof claude --mission ${resolvedMissionId ?? "<mission>"} --goal ${resolvedMissionId ?? "<goal>"} --home ${home}`);
+  if (!evidence.cursorLive) console.log(`- klemm adapters proof cursor --mission ${resolvedMissionId ?? "<mission>"} --goal ${resolvedMissionId ?? "<goal>"} --home ${home}`);
+  if (evidence.claudeLive && evidence.cursorLive) console.log("- none");
+}
+
+async function finishRealWorldTrialFromCli(args = []) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? flags.id ?? args[0];
+  if (!missionId) throw new Error("Usage: klemm trial real-world finish --mission <mission-id> [--force]");
+  const state = store.getState();
+  const unresolved = (state.queue ?? []).filter((decision) => decision.status === "queued" && decision.missionId === missionId);
+  const evidence = realWorldEvidence(state, { missionId });
+  if (!flags.force && (!evidence.codexSession || unresolved.length > 0)) {
+    console.log("Real World Agent Trial finish blocked");
+    console.log(`codex_session=${yn(evidence.codexSession)}`);
+    console.log(`unresolved_queue=${unresolved.length}`);
+    process.exitCode = 2;
+    return;
+  }
+  const now = new Date().toISOString();
+  const next = store.update((current) => ({
+    ...current,
+    realWorldTrials: (current.realWorldTrials ?? []).map((trial) =>
+      trial.missionId === missionId ? { ...trial, status: "finished", finishedAt: now, evidence } : trial,
+    ),
+    auditEvents: [
+      {
+        id: `audit-real-world-trial-finished-${Date.now()}`,
+        type: "real_world_trial_finished",
+        at: now,
+        missionId,
+        summary: "Real-world agent trial finished.",
+      },
+      ...(current.auditEvents ?? []),
+    ],
+  }));
+  console.log("Real World Agent Trial debrief");
+  console.log(summarizeDebrief(next, { missionId }));
+  const finished = finishMissionLocal(missionId, flags.note ?? "real-world trial complete");
+  console.log(`Mission finished: ${finished.id}`);
+  const current = store.getState();
+  const queued = (current.queue ?? []).filter((decision) => decision.status === "queued").length;
+  const activeForMission = (current.missions ?? []).filter((mission) => mission.id === missionId && mission.status === "active").length;
+  console.log(`Live state: ${queued === 0 && activeForMission === 0 ? "clean" : `active=${activeForMission} queued=${queued}`}`);
+}
+
+function findRealWorldTrial(state, missionId) {
+  const trials = state.realWorldTrials ?? [];
+  if (missionId) return trials.find((trial) => trial.missionId === missionId || trial.id === missionId);
+  return trials[0];
+}
+
+function realWorldEvidence(state, { missionId } = {}) {
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  const supervisedRuns = (state.supervisedRuns ?? []).filter((run) => !missionId || run.missionId === missionId);
+  const queue = (state.queue ?? []).filter((item) => !missionId || item.missionId === missionId);
+  return {
+    codexSession: activities.some((activity) => activityMatchesAdapter("codex", activity)) && supervisedRuns.length > 0,
+    claudeLive: activities.some((activity) => activityMatchesAdapter("claude", activity)),
+    cursorLive: activities.some((activity) => activityMatchesAdapter("cursor", activity)),
+    queueClean: queue.every((item) => item.status !== "queued"),
+  };
+}
+
 async function printTui(args) {
   const flags = parseFlags(args);
   console.log(renderTuiView(store.getState(), { missionId: flags.mission, view: flags.view ?? "overview", logFile: flags.logFile, decision: flags.decision, memory: flags.memory, search: flags.search, sourcePreview: flags.sourcePreview }));
@@ -8136,6 +8315,7 @@ _klemm() {
     'adapters proof:Run a Claude/Cursor adapter lifecycle proof'
     'adapters status:Show live adapter control-room status'
     'adapters uninstall:Remove adapter files and restore backups'
+    'trial real-world:Run an honest local real-world agent supervision trial'
     'trust why:Explain a Klemm authority decision'
     'daemon token generate:Create encrypted daemon token file'
     'security adversarial-test:Run prompt-injection hardening fixtures'
@@ -8609,6 +8789,8 @@ Commands:
   klemm dogfood 95 start|status|checkpoint|finish --mission mission-id
   klemm dogfood debrief --mission mission-id
   klemm dogfood finish --mission mission-id [--note "work complete"] [--force]
+  klemm trial real-world start --id mission-id --goal "..." [--home path] [--prove claude,cursor] -- <command>
+  klemm trial real-world status|finish --mission mission-id [--home path]
   klemm readiness [--data-dir path] [--skip-health]
   klemm true-score [--target 60|95]
   klemm helper install|status|snapshot|permissions
