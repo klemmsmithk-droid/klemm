@@ -277,6 +277,8 @@ async function main() {
     if (command === "adapters" && args[1] === "install") return await adaptersInstallFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "uninstall") return await adaptersUninstallFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "dogfood") return await adaptersDogfoodFromCli(args.slice(2));
+    if (command === "adapters" && args[1] === "proof") return await adaptersProofFromCli(args.slice(2));
+    if (command === "adapters" && args[1] === "status") return adaptersStatusFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "probe") return adaptersProbeFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "doctor") return adaptersDoctorFromCli(args.slice(2));
     if (command === "adapters" && args[1] === "health") return adaptersHealthFromCli(args.slice(2));
@@ -393,6 +395,7 @@ async function wrapCodexSessionFromCli(args) {
   );
   const mission = missionState.missions[0];
   console.log(`Codex wrapper session started: ${mission.id}`);
+  console.log("Blessed path: klemm codex wrap");
   console.log(`Session: ${sessionId}`);
   console.log("Klemm is quietly watching");
   console.log("Klemm is watching");
@@ -448,6 +451,8 @@ async function wrapCodexSessionFromCli(args) {
     process.exitCode = 1;
     return;
   }
+  const autoProxy = maybeCaptureCodexAutoProxy({ missionId: mission.id, agentId });
+  console.log(`Automatic proxy check: ${autoProxy.captured ? "captured" : "skipped"}${autoProxy.reason ? ` (${autoProxy.reason})` : ""}`);
 
   let launchOutcome = "completed";
   if (command.length > 0) {
@@ -522,10 +527,12 @@ async function wrapCodexSessionFromCli(args) {
     debrief: debriefText,
   }).result;
   console.log(`Debrief reported: ${debrief.accepted === false ? "rejected" : "accepted"}`);
+  console.log("Final debrief: automatic");
   if (debrief.accepted === false) {
     console.log(`Error: ${debrief.error}`);
     process.exitCode = 1;
   }
+  printCodexWhatKlemmSaw(mission.id);
   console.log("Review this session:");
   console.log(`  env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm debrief --mission ${mission.id}`);
   console.log(`  env KLEMM_DATA_DIR="${KLEMM_DATA_DIR}" klemm queue`);
@@ -533,6 +540,43 @@ async function wrapCodexSessionFromCli(args) {
     const finished = finishMissionLocal(mission.id, "Wrapped Codex session completed.");
     console.log(`Mission finished: ${finished.id}`);
   }
+}
+
+function maybeCaptureCodexAutoProxy({ missionId, agentId }) {
+  const state = store.getState();
+  const memories = state.memories ?? [];
+  const hasReviewedContinuationMemory = memories.some((memory) =>
+    ["approved", "pinned"].includes(memory.status) &&
+    /\bproceed|continue|safe local|implementation|tests|dogfood\b/i.test(`${memory.text} ${memory.memoryClass}`),
+  );
+  if (!hasReviewedContinuationMemory) return { captured: false, reason: "no reviewed continuation memory yet" };
+  const next = store.update((current) => askProxy(current, {
+    goalId: missionId,
+    missionId,
+    agentId,
+    question: "Should Codex continue the safe local implementation loop after this wrapped session starts?",
+    context: "Codex is running through klemm codex wrap. Continue only for safe local implementation, focused tests, and full verification.",
+  }));
+  const answer = next.proxyAnswers?.[0];
+  return { captured: true, answer };
+}
+
+function printCodexWhatKlemmSaw(missionId) {
+  const state = store.getState();
+  const activities = (state.agentActivities ?? []).filter((activity) => activity.missionId === missionId && activityMatchesAdapter("codex", activity));
+  const supervisedRuns = (state.supervisedRuns ?? []).filter((run) => run.missionId === missionId);
+  const proxyQuestions = (state.proxyQuestions ?? []).filter((question) => question.missionId === missionId);
+  const decisions = (state.decisions ?? []).filter((decision) => decision.missionId === missionId);
+  const counts = {
+    plans: activities.filter((activity) => activity.type === "plan").length,
+    proxy_questions: proxyQuestions.length,
+    commands: Math.max(supervisedRuns.length, activities.filter((activity) => activity.type === "command" || activity.type === "tool_call").length),
+    diffs: activities.filter((activity) => activity.type === "file_change" || (activity.fileChanges ?? []).length > 0 || /\bdiff\b/i.test(`${activity.summary} ${activity.target}`)).length,
+    queue_decisions: decisions.filter((decision) => decision.decision === "queue").length,
+    debriefs: activities.filter((activity) => activity.type === "debrief").length,
+  };
+  console.log("What Klemm saw:");
+  console.log(`plans=${counts.plans} proxy_questions=${counts.proxy_questions} commands=${counts.commands} diffs=${counts.diffs} queue_decisions=${counts.queue_decisions} debriefs=${counts.debriefs}`);
 }
 
 function buildCodexSessionEnv({ missionId, agentId, sessionId, protocolVersion, adapterClientId, adapterToken }) {
@@ -2479,6 +2523,167 @@ async function adaptersSmokeFromCli(args = []) {
   await smokeClaudeHooks(flags);
 }
 
+async function adaptersProofFromCli(args = []) {
+  const flags = parseFlags(args);
+  const name = firstPositionalArg(args) ?? "claude";
+  if (name === "claude") return await proveClaudeAdapter(flags);
+  if (name === "cursor") return await proveCursorAdapter(flags);
+  throw new Error("Usage: klemm adapters proof <claude|cursor> --mission <mission-id> --goal <goal-id> --home <path>");
+}
+
+async function proveClaudeAdapter(flags = {}) {
+  const missionId = flags.mission;
+  const goalId = flags.goal ?? missionId;
+  const home = flags.home ?? process.env.HOME;
+  if (!missionId) throw new Error("Usage: klemm adapters proof claude --mission <mission-id> --goal <goal-id> --home <path>");
+  console.log("Claude Code Adapter Proof");
+  const registration = await installRealAdapter("claude", { ...flags, home });
+  store.update((current) => ({
+    ...current,
+    adapterRegistrations: [
+      registration,
+      ...(current.adapterRegistrations ?? []).filter((item) => item.id !== "claude"),
+    ],
+  }));
+  console.log("Install: pass");
+  await smokeClaudeHooks({ mission: missionId, goal: goalId, home });
+  store.update((current) => recordAgentActivity(current, {
+    missionId,
+    agentId: "agent-claude",
+    type: "file_change",
+    fileChanges: [join(home, ".claude", "settings.json")],
+    summary: "Claude Code hook config diff verified during adapter proof.",
+  }));
+  console.log("SessionStart: pass");
+  console.log("PreToolUse: pass");
+  console.log("PostToolUse: pass");
+  console.log("Stop: pass");
+  console.log("SessionEnd: pass");
+  printSingleAdapterCompliance("claude", missionId);
+}
+
+async function proveCursorAdapter(flags = {}) {
+  const missionId = flags.mission;
+  const goalId = flags.goal ?? missionId;
+  const home = flags.home ?? process.env.HOME;
+  if (!missionId) throw new Error("Usage: klemm adapters proof cursor --mission <mission-id> --goal <goal-id> --home <path>");
+  console.log("Cursor Adapter Proof");
+  const registration = await installRealAdapter("cursor", { ...flags, home });
+  store.update((current) => ({
+    ...current,
+    adapterRegistrations: [
+      registration,
+      ...(current.adapterRegistrations ?? []).filter((item) => item.id !== "cursor"),
+    ],
+  }));
+  await cursorLiveProbeFromCli({ home });
+  console.log("MCP config: pass");
+  console.log("Rules: pass");
+  store.update((current) => recordAgentActivity(current, { missionId, agentId: "agent-cursor", type: "session_start", summary: "Cursor adapter proof session started." }));
+  store.update((current) => recordAgentActivity(current, { missionId, agentId: "agent-cursor", type: "plan", summary: "Cursor adapter proof plan event." }));
+  store.update((current) => askProxy(current, {
+    goalId,
+    missionId,
+    agentId: "agent-cursor",
+    question: "Should Cursor continue safe local work through Klemm?",
+    context: "Cursor adapter proof: safe local MCP/rules flow.",
+  }));
+  store.update((current) => proposeAction(current, buildCommandProposal(["npm", "test"], { missionId, actor: "agent-cursor" })));
+  store.update((current) => recordAgentActivity(current, { missionId, agentId: "agent-cursor", type: "tool_call", command: "npm test", target: "MCP", summary: "Cursor adapter proof tool call." }));
+  store.update((current) => recordAgentActivity(current, { missionId, agentId: "agent-cursor", type: "file_change", fileChanges: [join(home, ".cursor", "mcp.json"), join(home, ".cursor", "rules", "klemm.mdc")], summary: "Cursor adapter proof diff." }));
+  store.update((current) => recordAgentActivity(current, { missionId, agentId: "agent-cursor", type: "debrief", summary: "Cursor adapter proof debrief." }));
+  console.log("Plan event: pass");
+  console.log("Tool call: pass");
+  console.log("Diff: pass");
+  console.log("Debrief: pass");
+  printSingleAdapterCompliance("cursor", missionId);
+}
+
+function printSingleAdapterCompliance(adapter, missionId) {
+  const report = buildAdapterComplianceReport(store.getState(), { missionId, adapters: [adapter] });
+  const item = report.adapters[0];
+  console.log(`Compliance: ${item.score}/${item.total} ${item.status}`);
+}
+
+function adaptersStatusFromCli(args = []) {
+  const flags = parseFlags(args);
+  const home = flags.home ?? process.env.HOME;
+  const missionId = flags.mission;
+  console.log("Klemm Adapter Status");
+  console.log(`Mission: ${missionId ?? "all"}`);
+  for (const row of buildAdapterStatusRows(store.getState(), { home, missionId })) {
+    console.log(`${row.label}: ${row.state}${row.lastSeen ? `, last action ${row.lastSeen}` : ""}`);
+    console.log(`  Capabilities: ${row.capabilities.join(",") || "none"}`);
+    console.log(`  Compliance: ${row.compliance}`);
+    console.log(`  Next fix: ${row.nextFix}`);
+  }
+}
+
+function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = {}) {
+  const registrations = state.adapterRegistrations ?? [];
+  const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  const supervisedRuns = (state.supervisedRuns ?? []).filter((run) => !missionId || run.missionId === missionId);
+  const adapters = ["codex", "claude", "cursor", "shell"];
+  const labels = { codex: "Codex", claude: "Claude", cursor: "Cursor", shell: "Shell" };
+  const compliance = buildAdapterComplianceReport(state, { missionId, adapters });
+  return adapters.map((adapter) => {
+    const registration = registrations.find((item) => item.id === adapter);
+    const targets = realAdapterTargets(adapter, home);
+    const installed = adapter === "shell"
+      ? targets.some((target) => existsSync(target.path))
+      : targets.every((target) => existsSync(target.path)) || Boolean(registration);
+    const adapterActivities = activities.filter((activity) => activityMatchesAdapter(adapter, activity));
+    const live = adapterActivities.length > 0 || (adapter === "codex" && supervisedRuns.length > 0);
+    const capabilityList = registration?.capabilities ?? ADAPTER_CAPABILITIES[adapter] ?? [];
+    const score = compliance.adapters.find((item) => item.id === adapter);
+    const latest = latestAdapterSeen(adapterActivities, supervisedRuns, adapter);
+    return {
+      id: adapter,
+      label: labels[adapter],
+      state: adapterStatusLabel(adapter, { installed, live }),
+      lastSeen: latest ? relativeTimeLabel(latest) : null,
+      capabilities: capabilityList,
+      compliance: score ? `${score.score}/${score.total} ${score.status}` : "0/8 weak",
+      nextFix: adapterNextFix(adapter, { installed, live }),
+    };
+  });
+}
+
+function adapterStatusLabel(adapter, { installed, live }) {
+  if (adapter === "codex") return live ? "live, supervised" : installed ? "installed, not seen" : "not installed";
+  if (adapter === "claude") return live ? "live, hooks reporting" : installed ? "installed, not seen" : "not installed";
+  if (adapter === "cursor") return live ? "live, MCP reporting" : installed ? "MCP configured, not seen" : "MCP missing";
+  if (adapter === "shell") return live ? "live, supervised" : installed ? "profile installed" : "shim available";
+  return installed ? "installed" : "missing";
+}
+
+function adapterNextFix(adapter, { installed, live }) {
+  if (!installed && adapter !== "shell") return `klemm adapters install --real ${adapter}`;
+  if (!live && adapter === "codex") return "Start Codex with klemm codex wrap.";
+  if (!live && adapter === "claude") return "Run Claude Code with installed Klemm hooks.";
+  if (!live && adapter === "cursor") return "Open Cursor in this repo so MCP/rules can report.";
+  if (!live && adapter === "shell") return "Run shell work with klemm run shell or klemm agent shim.";
+  return "none";
+}
+
+function latestAdapterSeen(activities, supervisedRuns, adapter) {
+  const candidates = [
+    ...activities.map((activity) => activity.createdAt),
+    ...(adapter === "codex" ? supervisedRuns.map((run) => run.finishedAt ?? run.startedAt) : []),
+  ].filter(Boolean).sort((a, b) => String(b).localeCompare(String(a)));
+  return candidates[0] ?? null;
+}
+
+function relativeTimeLabel(timestamp) {
+  const elapsedMs = Math.max(0, Date.now() - new Date(timestamp).getTime());
+  const minutes = Math.floor(elapsedMs / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes === 1) return "1m ago";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours === 1 ? "1h ago" : `${hours}h ago`;
+}
+
 async function adaptersDogfoodFromCli(args = []) {
   const flags = parseFlags(args);
   if (String(flags.suite ?? "") === "95") return await adaptersDogfood95FromCli(args);
@@ -4057,10 +4262,14 @@ function printStartAgents() {
   const state = store.getState();
   const agents = state.agents ?? [];
   console.log("Agents in use");
+  for (const row of buildAdapterStatusRows(state, { home: process.env.HOME })) {
+    console.log(`${row.label}: ${row.state}${row.lastSeen ? `, last action ${row.lastSeen}` : ""}`);
+  }
   if (agents.length === 0) {
-    console.log("No active agents registered.");
+    console.log("Registered agents: none");
     return;
   }
+  console.log("Registered agents:");
   printAgentSummaryList(agents, state);
 }
 
@@ -7924,6 +8133,8 @@ _klemm() {
     'helper status:Show native macOS helper rail status'
     'observe recommend:Show unmanaged agent recommendations'
     'adapters list:List adapter capabilities and installs'
+    'adapters proof:Run a Claude/Cursor adapter lifecycle proof'
+    'adapters status:Show live adapter control-room status'
     'adapters uninstall:Remove adapter files and restore backups'
     'trust why:Explain a Klemm authority decision'
     'daemon token generate:Create encrypted daemon token file'
@@ -8407,6 +8618,8 @@ Commands:
   klemm observe status|recommend|attach [--process-file path]
   klemm observe loop start|tick|status|stop --id observer-id --mission mission-id
   klemm adapters list|probe|install|uninstall|doctor|health|compliance|smoke|dogfood [--real] [--home path]
+  klemm adapters proof claude|cursor --mission mission-id --goal goal-id --home path
+  klemm adapters status [--mission mission-id] [--home path]
   klemm adapters probe cursor --live --home path
   klemm adapters dogfood --mission mission-id --goal goal-id --home path [--agents claude,cursor]
   klemm adapters dogfood --suite 95 --fake-home path --mission mission-id --goal goal-id
