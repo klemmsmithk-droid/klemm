@@ -114,7 +114,9 @@ const START_CONTEXT_PROVIDERS = [
   {
     id: "chatgpt",
     name: "ChatGPT",
-    url: "https://chatgpt.com",
+    url: "https://help.openai.com/en/articles/11487775-connectors-in-chatgpt",
+    apiKeyUrl: "https://platform.openai.com/api-keys",
+    exportUrl: "https://chatgpt.com/#settings/DataControls",
     aliases: ["1", "chatgpt", "chat", "openai"],
   },
   {
@@ -3933,11 +3935,61 @@ async function openStartContextProvider(rawProvider, flags = {}) {
     console.log(`Unknown context provider: ${rawProvider || "none"}`);
     return;
   }
+  if (provider.id === "chatgpt") return await openOfficialChatGptConnector(provider, flags);
   console.log(`Opening ${provider.name} connection`);
   console.log(`URL: ${provider.url}`);
   const openResult = await openBrowserUrl(provider.url, flags);
   console.log(`Browser open: ${openResult}`);
+  const next = saveContextConnectionRequest(provider, flags, { status: flags.noOpen ? "open_skipped" : "open_requested" });
+  console.log(`Connection request saved: ${next.contextConnectionRequests?.[0]?.id}`);
+}
+
+async function openOfficialChatGptConnector(provider, flags = {}) {
+  console.log("Official ChatGPT connector");
+  console.log("No public ChatGPT history OAuth flow is available for Klemm to request chat history directly.");
+  console.log("Supported official paths:");
+  console.log("1. ChatGPT data export: export conversations from ChatGPT and import the file into Klemm.");
+  console.log("2. OpenAI API key: set OPENAI_API_KEY so Klemm can use OpenAI models for local distillation.");
+  console.log("3. ChatGPT custom connector: add Klemm's MCP server inside ChatGPT Apps & Connectors when your plan supports custom connectors.");
+  console.log(`OpenAI connector docs: ${provider.url}`);
+  console.log(`OpenAI API keys: ${provider.apiKeyUrl}`);
+  console.log("Next command after export:");
+  console.log("klemm connectors setup chatgpt --mode export --path ~/Downloads/chatgpt-export.json --review-required");
+  const openResult = await openBrowserUrl(provider.url, flags);
+  console.log(`Browser open: ${openResult}`);
+  const now = new Date().toISOString();
   const next = store.update((state) => {
+    const connector = {
+      id: "connector-chatgpt",
+      provider: "chatgpt",
+      mode: "official",
+      path: state.contextConnectors?.find((item) => item.provider === "chatgpt")?.path,
+      apiKeyEnv: "OPENAI_API_KEY",
+      reviewRequired: true,
+      status: "needs_export_or_api",
+      docsUrl: provider.url,
+      apiKeyUrl: provider.apiKeyUrl,
+      exportUrl: provider.exportUrl,
+      createdAt: state.contextConnectors?.find((item) => item.provider === "chatgpt")?.createdAt ?? now,
+      updatedAt: now,
+    };
+    return {
+      ...state,
+      contextConnectors: [
+        connector,
+        ...(state.contextConnectors ?? []).filter((item) => item.id !== connector.id && item.provider !== "chatgpt"),
+      ],
+    };
+  });
+  console.log("Connector saved: connector-chatgpt");
+  console.log("Status: needs_export_or_api");
+  const withRequest = saveContextConnectionRequest(provider, flags, { status: "official_setup_opened" });
+  console.log(`Connection request saved: ${withRequest.contextConnectionRequests?.[0]?.id}`);
+  return next;
+}
+
+function saveContextConnectionRequest(provider, flags = {}, { status } = {}) {
+  return store.update((state) => {
     const now = new Date().toISOString();
     const id = buildStartRecordId("context-connection", state.contextConnectionRequests);
     return {
@@ -3948,7 +4000,7 @@ async function openStartContextProvider(rawProvider, flags = {}) {
           provider: provider.id,
           providerName: provider.name,
           url: provider.url,
-          status: flags.noOpen ? "open_skipped" : "open_requested",
+          status: status ?? (flags.noOpen ? "open_skipped" : "open_requested"),
           createdAt: now,
           source: "klemm_start",
         },
@@ -3965,7 +4017,6 @@ async function openStartContextProvider(rawProvider, flags = {}) {
       ],
     };
   });
-  console.log(`Connection request saved: ${next.contextConnectionRequests?.[0]?.id}`);
 }
 
 function findStartContextProvider(rawProvider) {
