@@ -19,9 +19,11 @@ Session start checklist:
 
 1. Run `klemm status` and prefer the daemon transport when it is healthy.
 2. Start with `klemm codex wrap --id <mission-id> --goal "<goal>" --plan "<plan>" --dry-run -- <first-command>` when the first command needs preflight, or `klemm codex dogfood` when only opening the hub mission.
-3. Fetch `klemm codex context --mission <mission-id>` before making decisions.
-4. Register subagents before they begin work.
-5. Use `klemm queue inspect <decision-id>` for any queued or rewritten action.
+3. Fetch the Kyle profile brief first with `$KLEMM_USER_BRIEF_COMMAND` or `klemm user brief --for codex --mission <mission-id>`.
+4. Acknowledge the brief with `klemm brief acknowledge --mission <mission-id> --agent agent-codex`.
+5. Fetch `klemm codex context --mission <mission-id>` before making decisions.
+6. Register subagents before they begin work.
+7. Use `klemm queue inspect <decision-id>` for any queued or rewritten action.
 
 Session finish checklist:
 
@@ -97,17 +99,20 @@ klemm codex capture status --mission <mission-id>
 klemm codex install --output-dir ./codex-klemm --data-dir ./data
 ```
 
-Use `klemm codex wrap` or the installed `klemm-codex` wrapper when starting a real `/klemm` session. The wrapper creates a `codex-session-*` contract, injects `KLEMM_MISSION_ID`, `KLEMM_AGENT_ID`, `KLEMM_CODEX_CONTEXT_COMMAND`, `KLEMM_CODEX_RUN_COMMAND`, and `KLEMM_CODEX_DEBRIEF_COMMAND`, reports session start/plan/session finish/debrief, preflights the launch command, captures supervised execution when allowed, and queues risky launches before execution. Use `klemm codex dogfood` only when opening a hub mission without launching a wrapped session. Use `klemm codex report` for additional plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` for commands inside an already-wrapped session so they flow through supervised watch-loop monitoring with `agent-codex` as the actor.
+Use `klemm codex wrap` or the installed `klemm-codex` wrapper when starting a real `/klemm` session. The wrapper creates a `codex-session-*` contract, injects `KLEMM_MISSION_ID`, `KLEMM_AGENT_ID`, `KLEMM_CODEX_CONTEXT_COMMAND`, `KLEMM_CODEX_RUN_COMMAND`, `KLEMM_CODEX_DEBRIEF_COMMAND`, and `KLEMM_USER_BRIEF_COMMAND`, reports session start/plan/session finish/debrief, preflights the launch command, captures supervised execution when allowed, and queues risky launches before execution. Use `klemm codex dogfood` only when opening a hub mission without launching a wrapped session. Use `klemm codex report` for additional plans, tool calls, diffs, subagents, and uncertainty. Use `klemm codex run` for commands inside an already-wrapped session so they flow through supervised watch-loop monitoring with `agent-codex` as the actor.
 Use `klemm codex install` to write the skill, MCP config, and wrapper bundle for a Codex environment.
 Use `klemm codex contract status` before claiming a live Codex adapter worked. It must show real session contract evidence across lifecycle, plan, tool/command, diff, proxy question, supervised run, and debrief signals with `Faked evidence: no`.
 Use `klemm codex capture status` during ordinary dogfood sessions to check whether Klemm is quietly watching without adding friction. A healthy real session should show `quiet_watch=yes`, `friction=low`, and captured supervised runs.
 
-Wrapped sessions also inject `KLEMM_PROXY_ASK_COMMAND`, `KLEMM_PROXY_CONTINUE_COMMAND`, and `KLEMM_PROXY_STATUS_COMMAND`. Use those environment commands as the default loop before interrupting Kyle:
+Wrapped sessions also inject `KLEMM_USER_BRIEF_COMMAND`, `KLEMM_PROXY_ASK_COMMAND`, `KLEMM_PROXY_CONTINUE_COMMAND`, and `KLEMM_PROXY_STATUS_COMMAND`. Fetch and acknowledge the brief before planning, ask proxy before asking Kyle, and report when work drifts from the brief:
 
 ```text
+$KLEMM_USER_BRIEF_COMMAND
+klemm brief acknowledge --mission <mission-id> --agent agent-codex
 $KLEMM_PROXY_ASK_COMMAND --question "Should I continue with this plan?" --context "<recent plan/output/diff>"
 $KLEMM_PROXY_CONTINUE_COMMAND
 $KLEMM_PROXY_STATUS_COMMAND
+klemm codex report --mission <mission-id> --type plan --summary "<plan and any possible brief drift>"
 ```
 
 Embeddable adapters can use `createKlemmAdapterClient(...).proxyAsk(...)`, `.proxyContinue(...)`, and `.proxyStatus(...)` over HTTP or MCP transports. Treat high-confidence proxy answers as temporary authority for safe local work, medium-confidence answers as constrained course correction, and low-confidence/high-risk answers as a stop-and-escalate signal.

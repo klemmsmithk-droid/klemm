@@ -269,3 +269,105 @@ test("Claude and Cursor adapter proofs receive profile briefs and status reports
   assert.match(status.stdout, /Cursor: live, MCP reporting/);
   assert.match(status.stdout, /Profile brief: yes/);
 });
+
+test("brief acknowledgement contract tracks delivered acknowledged and used status", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-brief-ack-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env);
+  await runKlemm(["mission", "start", "--id", "mission-brief-ack", "--goal", "Enforce Kyle brief"], { env });
+  await runKlemm(["codex", "wrap", "--id", "mission-brief-ack", "--goal", "Enforce Kyle brief", "--dry-run"], { env });
+
+  const ack = await runKlemm(["brief", "acknowledge", "--mission", "mission-brief-ack", "--agent", "agent-codex"], { env });
+  assert.equal(ack.status, 0, ack.stderr);
+  assert.match(ack.stdout, /Brief acknowledged/);
+  assert.match(ack.stdout, /Agent: agent-codex/);
+
+  await runKlemm(["proxy", "ask", "--goal", "mission-brief-ack", "--agent", "agent-codex", "--question", "Should I proceed?", "--context", "safe local tests only"], { env });
+  const status = await runKlemm(["adapters", "status", "--mission", "mission-brief-ack", "--home", dataDir], { env });
+
+  assert.equal(status.status, 0, status.stderr);
+  assert.match(status.stdout, /Codex: live, supervised/);
+  assert.match(status.stdout, /Brief delivered: yes/);
+  assert.match(status.stdout, /Brief acknowledged: yes/);
+  assert.match(status.stdout, /Brief used in proxy\/trust: yes/);
+});
+
+test("reported plans are checked against Kyle's brief and drift is nudged", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-brief-drift-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env);
+  await runKlemm(["mission", "start", "--id", "mission-brief-drift", "--goal", "Catch plan drift"], { env });
+  await runKlemm(["codex", "wrap", "--id", "mission-brief-drift", "--goal", "Catch plan drift", "--dry-run"], { env });
+  await runKlemm(["brief", "acknowledge", "--mission", "mission-brief-drift", "--agent", "agent-codex"], { env });
+
+  const report = await runKlemm([
+    "codex",
+    "report",
+    "--mission",
+    "mission-brief-drift",
+    "--type",
+    "plan",
+    "--summary",
+    "I will finish by pushing to GitHub without asking Kyle.",
+  ], { env });
+
+  assert.equal(report.status, 0, report.stderr);
+  assert.match(report.stdout, /Brief check: conflict/);
+  assert.match(report.stdout, /Klemm nudge: plan conflicts with Kyle authority boundary/);
+  assert.match(report.stdout, /Brief section: Authority boundaries/);
+  assert.match(report.stdout, /push to GitHub without approval/);
+
+  const debrief = await runKlemm(["debrief", "--mission", "mission-brief-drift"], { env });
+  assert.match(debrief.stdout, /plan conflicts with Kyle authority boundary/);
+});
+
+test("proxy and trust explanations lead with the Kyle brief section used", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-brief-explain-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  const memoryIds = await importKyleContext(env);
+  await runKlemm(["mission", "start", "--id", "mission-brief-explain", "--goal", "Explain from the brief"], { env });
+  const proxy = await runKlemm(["proxy", "ask", "--goal", "mission-brief-explain", "--agent", "agent-codex", "--question", "Kyle said what's next. Should I continue?", "--context", "local implementation and focused tests"], { env });
+
+  assert.equal(proxy.status, 0, proxy.stderr);
+  assert.match(proxy.stdout, /Answer came from Kyle profile brief/);
+  assert.match(proxy.stdout, /Brief section: Proceed\/what's next/);
+  assert.match(proxy.stdout, /Source memory:/);
+
+  const pushMemory = memoryIds.find(Boolean);
+  await runKlemm(["memory", "promote-policy", pushMemory, "--action-types", "git_push", "--target-includes", "github,origin"], { env });
+  await runKlemm([
+    "propose",
+    "--id",
+    "decision-brief-trust",
+    "--mission",
+    "mission-brief-explain",
+    "--actor",
+    "agent-codex",
+    "--type",
+    "git_push",
+    "--target",
+    "git push origin main",
+    "--external",
+    "network",
+  ], { env });
+
+  const trust = await runKlemm(["trust", "why", "decision-brief-trust", "--v4"], { env });
+  assert.equal(trust.status, 0, trust.stderr);
+  assert.match(trust.stdout, /Kyle's brief says:/);
+  assert.match(trust.stdout, /Brief section: Authority boundaries/);
+  assert.match(trust.stdout, /push to GitHub without approval/);
+});
+
+test("Klemm Codex skill instructs agents to fetch acknowledge and report drift against the brief", async () => {
+  const skill = await runKlemm(["codex", "install", "--output-dir", join(tmpdir(), "klemm-skill-install"), "--data-dir", join(tmpdir(), "klemm-skill-data")]);
+  assert.equal(skill.status, 0, skill.stderr);
+  const skillPath = skill.stdout.match(/Skill: (.*SKILL\.md)/)?.[1];
+  assert.ok(skillPath, skill.stdout);
+  const contents = await import("node:fs/promises").then((fs) => fs.readFile(skillPath, "utf8"));
+
+  assert.match(contents, /KLEMM_USER_BRIEF_COMMAND/);
+  assert.match(contents, /klemm user brief --for codex/);
+  assert.match(contents, /klemm brief acknowledge/);
+  assert.match(contents, /ask proxy before asking Kyle/);
+  assert.match(contents, /report when work drifts from the brief/);
+});

@@ -208,6 +208,7 @@ async function main() {
     if (command === "proxy" && args[1] === "continue") return proxyContinueFromCli(args.slice(2));
     if (command === "proxy" && args[1] === "status") return proxyStatusFromCli(args.slice(2));
     if (command === "proxy" && args[1] === "review") return proxyReviewFromCli(args.slice(2));
+    if (command === "brief" && args[1] === "acknowledge") return briefAcknowledgeFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "agent" && args[1] === "shim") return await agentShimFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
@@ -2657,6 +2658,9 @@ function adaptersStatusFromCli(args = []) {
     console.log(`  Capabilities: ${row.capabilities.join(",") || "none"}`);
     console.log(`  Compliance: ${row.compliance}`);
     console.log(`  Profile brief: ${row.profileBrief ? "yes" : "no"}`);
+    console.log(`  Brief delivered: ${row.profileBrief ? "yes" : "no"}`);
+    console.log(`  Brief acknowledged: ${row.briefAcknowledged ? "yes" : "no"}`);
+    console.log(`  Brief used in proxy/trust: ${row.briefUsed ? "yes" : "no"}`);
     console.log(`  Next fix: ${row.nextFix}`);
   }
 }
@@ -2665,6 +2669,7 @@ function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = 
   const registrations = state.adapterRegistrations ?? [];
   const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
   const supervisedRuns = (state.supervisedRuns ?? []).filter((run) => !missionId || run.missionId === missionId);
+  const proxyAnswers = (state.proxyAnswers ?? []).filter((answer) => !missionId || answer.missionId === missionId || answer.goalId === missionId);
   const adapters = ["codex", "claude", "cursor", "shell"];
   const labels = { codex: "Codex", claude: "Claude", cursor: "Cursor", shell: "Shell" };
   const compliance = buildAdapterComplianceReport(state, { missionId, adapters });
@@ -2680,6 +2685,8 @@ function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = 
     const score = compliance.adapters.find((item) => item.id === adapter);
     const latest = latestAdapterSeen(adapterActivities, supervisedRuns, adapter);
     const profileBrief = adapterActivities.some((activity) => activity.type === "profile_brief" || /profile brief/i.test(activity.summary ?? ""));
+    const briefAcknowledged = adapterActivities.some((activity) => /brief acknowledged/i.test(activity.summary ?? ""));
+    const briefUsed = proxyAnswers.some((answer) => activityMatchesAdapter(adapter, { agentId: answer.agentId, summary: answer.answer, type: "proxy_answer" }));
     return {
       id: adapter,
       label: labels[adapter],
@@ -2689,6 +2696,8 @@ function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = 
       compliance: score ? `${score.score}/${score.total} ${score.status}` : "0/8 weak",
       nextFix: adapterNextFix(adapter, { installed, live }),
       profileBrief,
+      briefAcknowledged,
+      briefUsed,
     };
   });
 }
@@ -2993,6 +3002,10 @@ function trustWhyDecisionV4(decision, state = store.getState()) {
   const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
   const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
   const profileEvidence = selectProfileEvidence(state, `${decision.actionType} ${decision.target} ${decision.reason}`, { limit: 5 });
+  const briefMatch = selectBriefSectionForText(state, `${decision.actionType} ${decision.target} ${decision.reason}`, {
+    missionId: decision.missionId,
+    adapter: decision.actor,
+  });
   const uncertainty = (decision.matchedPolicies ?? []).length && sourceMemories.length ? "low" : "medium";
   store.update((current) => ({
     ...current,
@@ -3012,6 +3025,8 @@ function trustWhyDecisionV4(decision, state = store.getState()) {
   console.log("Trust UX v4");
   console.log(`Bottom line: ${bottomLine}`);
   console.log(`Because: ${redactSensitiveText(decision.reason)}`);
+  console.log(`Kyle's brief says: ${briefMatch.memory ? redactSensitiveText(briefMatch.memory.text) : "no matching reviewed brief section yet"}`);
+  console.log(`Brief section: ${briefMatch.section}`);
   console.log("");
   console.log("Exact evidence:");
   if (sourceMemories.length === 0) console.log("- none");
@@ -4806,6 +4821,13 @@ function proxyAskFromCli(args) {
   const profileEvidence = evidenceMemories.length > 0
     ? evidenceMemories
     : selectProfileEvidence(state, `${flags.question ?? ""} ${flags.context ?? ""} ${answer.answer ?? ""}`, { limit: 4 });
+  const briefMatch = selectBriefSectionForText(state, `${flags.question ?? ""} ${flags.context ?? ""} ${answer.answer ?? ""}`, {
+    missionId: answer.missionId ?? flags.mission ?? flags.goal,
+    adapter: flags.agent ?? flags.agentId ?? "agent",
+  });
+  console.log("Answer came from Kyle profile brief");
+  console.log(`Brief section: ${briefMatch.section}`);
+  console.log(`Source memory: ${briefMatch.memory?.id ?? "none"}`);
   console.log("Kyle profile:");
   console.log(`Reviewed memories: ${reviewedProfileMemories(state).length}`);
   console.log("Profile evidence:");
@@ -4814,6 +4836,31 @@ function proxyAskFromCli(args) {
     console.log(`- ${memory.id} ${memory.status}: ${redactSensitiveText(memory.text)}`);
   }
   if (answer.queuedDecisionId) console.log(`Queued decision: ${answer.queuedDecisionId}`);
+}
+
+function briefAcknowledgeFromCli(args) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? flags.goal ?? flags.missionId;
+  const agentId = flags.agent ?? flags.agentId ?? "agent-codex";
+  if (!missionId) throw new Error("Usage: klemm brief acknowledge --mission <mission-id> --agent <agent-id>");
+  const brief = buildUserBrief(store.getState(), {
+    adapter: agentId.replace(/^agent-/, ""),
+    missionId,
+    includeEvidence: true,
+  });
+  const next = store.update((state) => recordAgentActivity(state, {
+    missionId,
+    agentId,
+    type: "activity",
+    target: "klemm user brief",
+    summary: `Brief acknowledged by ${agentId}; reviewed=${brief.reviewedCount} policies=${brief.policyCount}.`,
+  }));
+  const activity = next.agentActivities[0];
+  console.log("Brief acknowledged");
+  console.log(`Agent: ${agentId}`);
+  console.log(`Mission: ${missionId}`);
+  console.log(`Activity: ${activity.id}`);
+  console.log(`Reviewed evidence: ${brief.reviewedCount}`);
 }
 
 function proxyContinueFromCli(args) {
@@ -5026,6 +5073,7 @@ function recordCodexAdapterReportFromCli(args) {
       : undefined,
     diff: flags.file ? { files: normalizeListFlag(flags.file) } : undefined,
     uncertainty: flags.uncertainty,
+    plan: flags.plan ?? flags.summary,
   });
   let accepted = true;
   let protocol = { negotiatedVersion: envelope.protocolVersion };
@@ -5056,12 +5104,37 @@ function recordCodexAdapterReportFromCli(args) {
     decision = next.decisions[0];
   }
   const activity = next.agentActivities[0];
+  const briefDrift = envelope.type === "plan"
+    ? evaluatePlanAgainstBrief(next, {
+      missionId: flags.mission,
+      agentId: flags.agent ?? "agent-codex",
+      planText: flags.plan ?? flags.summary ?? envelope.activity.summary,
+    })
+    : null;
+  if (briefDrift?.conflict) {
+    next = store.update((state) => recordAgentActivity(state, {
+      missionId: flags.mission,
+      agentId: flags.agent ?? "agent-codex",
+      type: "activity",
+      target: "klemm user brief",
+      summary: `Klemm nudge: plan conflicts with Kyle authority boundary (${briefDrift.memory?.text ?? briefDrift.reason}).`,
+    }));
+  }
 
   console.log("Codex adapter envelope recorded");
   console.log(`Adapter accepted: ${accepted}`);
   console.log(`Protocol: ${protocol?.negotiatedVersion ?? envelope.protocolVersion}`);
   console.log(`Activity: ${activity.id}`);
   console.log(`Type: ${envelope.type}`);
+  if (briefDrift) {
+    console.log(`Brief check: ${briefDrift.conflict ? "conflict" : "aligned"}`);
+    if (briefDrift.conflict) {
+      console.log("Klemm nudge: plan conflicts with Kyle authority boundary");
+      console.log(`Brief section: ${briefDrift.section}`);
+      console.log(`Source memory: ${briefDrift.memory?.id ?? "none"}`);
+      console.log(`Evidence: ${redactSensitiveText(briefDrift.memory?.text ?? briefDrift.reason)}`);
+    }
+  }
   if (decision) printDecision(decision);
 }
 
@@ -6121,6 +6194,60 @@ function buildUserBrief(state, { adapter = "agent", missionId, includeEvidence =
     ],
     includeEvidence,
     sourceEvidence: uniqueMemories([...profile.workingStyle, ...profile.authorityBoundaries, ...promptIntent, ...riskRules]).slice(0, 12),
+  };
+}
+
+function selectBriefSectionForText(state, text, options = {}) {
+  const query = String(text ?? "");
+  const lower = query.toLowerCase();
+  const brief = buildUserBrief(state, options);
+  if (/push|github|origin|deploy|production|external|credential|oauth|publish|financial|legal|reputation/.test(lower)) {
+    const memory = findBestMemoryForTerms(brief.riskRules, lower) ?? brief.riskRules[0] ?? brief.authorityBoundaries[0];
+    return { section: "Authority boundaries", memory };
+  }
+  if (/proceed|what'?s next|what is next|continue|next concrete|safe local|focused tests|implementation/.test(lower)) {
+    const memory = findBestMemoryForTerms(brief.promptIntent, lower) ?? brief.promptIntent[0] ?? brief.workingStyle[0];
+    return { section: "Proceed/what's next", memory };
+  }
+  if (/terminal|test|verification|debrief|no corners|dogfood|style/.test(lower)) {
+    const memory = findBestMemoryForTerms(brief.workingStyle, lower) ?? brief.workingStyle[0];
+    return { section: "Working style", memory };
+  }
+  const memory = brief.sourceEvidence[0] ?? brief.workingStyle[0] ?? brief.authorityBoundaries[0];
+  return { section: memory?.memoryClass === "authority_boundary" ? "Authority boundaries" : "Working style", memory };
+}
+
+function findBestMemoryForTerms(memories, lowerText) {
+  const terms = lowerText
+    .split(/[^a-z0-9']+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 4);
+  return memories
+    .map((memory) => {
+      const haystack = String(memory.text ?? "").toLowerCase();
+      return { memory, score: terms.reduce((total, term) => total + (haystack.includes(term) ? 1 : 0), 0) };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.memory;
+}
+
+function evaluatePlanAgainstBrief(state, { missionId, agentId, planText } = {}) {
+  const text = String(planText ?? "");
+  const lower = text.toLowerCase();
+  const risky = /push|github|origin|deploy|production|external|credential|oauth|publish|financial|legal|reputation/.test(lower);
+  if (!risky) {
+    return { conflict: false, section: "Working style", reason: "Plan is local and does not contradict reviewed brief rules." };
+  }
+  const match = selectBriefSectionForText(state, text, { missionId, adapter: agentId });
+  const explicitApproval = /ask|approval|queue|review|before|without/.test(lower) && !/without asking|without approval|no approval/.test(lower);
+  if (explicitApproval) {
+    return { conflict: false, section: match.section, memory: match.memory, reason: "Plan mentions review/approval before risky action." };
+  }
+  return {
+    conflict: Boolean(match.memory),
+    section: match.section,
+    memory: match.memory,
+    reason: match.memory ? match.memory.text : "Risky plan lacks a reviewed brief boundary.",
   };
 }
 
