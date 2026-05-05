@@ -51,7 +51,12 @@ test("klemm run prepares a named Codex runtime profile without launching in dry-
   assert.match(result.stdout, /Dry run: launch skipped/);
 
   const agents = await runKlemm(["agents"], { env });
-  assert.match(agents.stdout, /agent-runtime-codex active mission=mission-runtime kind=codex_agent/);
+  assert.match(agents.stdout, /1\. Codex/);
+  assert.match(agents.stdout, /Status: Active/);
+  assert.match(agents.stdout, /Kind: Codex/);
+  assert.match(agents.stdout, /Mission: Dogfood runtime wrapper/);
+  assert.match(agents.stdout, /ID: agent-runtime-codex/);
+  assert.match(agents.stdout, /Mission ID: mission-runtime/);
 });
 
 test("klemm run without a profile gives a friendly next step instead of a hard usage error", async () => {

@@ -3931,15 +3931,14 @@ async function openBrowserUrl(url, flags = {}) {
 }
 
 function printStartAgents() {
-  const agents = store.getState().agents ?? [];
+  const state = store.getState();
+  const agents = state.agents ?? [];
   console.log("Agents in use");
   if (agents.length === 0) {
     console.log("No active agents registered.");
     return;
   }
-  for (const agent of agents) {
-    console.log(`- ${agent.id} ${agent.status} mission=${agent.missionId} kind=${agent.kind} name="${agent.name}"`);
-  }
+  printAgentSummaryList(agents, state);
 }
 
 function buildStartRecordId(prefix, items = []) {
@@ -4755,9 +4754,93 @@ async function runCodexWatchedCommandFromCli(args) {
 function printAgents() {
   const state = store.getState();
   console.log("Klemm agents");
-  for (const agent of state.agents) {
-    console.log(`- ${agent.id} ${agent.status} mission=${agent.missionId} kind=${agent.kind} name="${agent.name}"`);
+  if ((state.agents ?? []).length === 0) {
+    console.log("No agents registered.");
+    return;
   }
+  printAgentSummaryList(state.agents, state);
+}
+
+function printAgentSummaryList(agents, state) {
+  const sorted = [...agents].sort((left, right) =>
+    summarizeAgent(left, state).displayName.localeCompare(summarizeAgent(right, state).displayName),
+  );
+  sorted.forEach((agent, index) => {
+    const summary = summarizeAgent(agent, state);
+    console.log(`${index + 1}. ${summary.displayName}`);
+    console.log(`   Status: ${summary.status}`);
+    console.log(`   Kind: ${summary.kind}`);
+    console.log(`   Mission: ${summary.mission}`);
+    console.log(`   ID: ${agent.id}`);
+    if (agent.missionId) console.log(`   Mission ID: ${agent.missionId}`);
+  });
+}
+
+function summarizeAgent(agent, state) {
+  return {
+    displayName: cleanAgentDisplayName(agent),
+    status: cleanStatusLabel(agent.status),
+    kind: cleanAgentKind(agent.kind),
+    mission: cleanMissionLabel(agent.missionId, state),
+  };
+}
+
+function cleanAgentDisplayName(agent) {
+  const kind = cleanAgentKind(agent.kind);
+  const raw = String(agent.name || agent.id || kind || "Agent");
+  if (!looksMachineGeneratedAgentName(raw)) return raw;
+  const tokens = splitCleanNameTokens(raw)
+    .filter((token) => !["agent", "runtime", "local", "session"].includes(token))
+    .filter((token) => !/^v\d+$/.test(token))
+    .filter((token) => token !== kind.toLowerCase().replace(/\s+/g, ""));
+  const phrase = tokens.length > 0 ? tokens.join(" ") : "agent";
+  if (kind === "Codex") return `Codex ${phrase}`;
+  if (kind === "Claude") return `Claude ${phrase}`;
+  if (kind === "Shell") return phrase === "agent" ? "Shell Agent" : `Shell ${phrase}`;
+  return sentenceCase(phrase);
+}
+
+function cleanAgentKind(kind = "agent") {
+  const normalized = String(kind).replace(/_agent$/, "").replace(/_/g, " ").trim().toLowerCase();
+  if (normalized === "codex") return "Codex";
+  if (normalized === "claude") return "Claude";
+  if (normalized === "shell") return "Shell";
+  if (normalized === "coding") return "Coding";
+  return sentenceCase(normalized || "agent");
+}
+
+function cleanMissionLabel(missionId, state) {
+  const mission = (state.missions ?? []).find((item) => item.id === missionId);
+  if (mission?.goal) return mission.goal;
+  if (!missionId) return "Unassigned";
+  return sentenceCase(
+    splitCleanNameTokens(missionId)
+      .filter((token) => !["mission", "goal"].includes(token))
+      .filter((token) => !/^v\d+$/.test(token))
+      .join(" "),
+  );
+}
+
+function looksMachineGeneratedAgentName(value) {
+  return /^agent[-_]/i.test(value) || /^agent[-_]/i.test(value.replace(/\s+/g, "-")) || /[-_](codex|runtime|shell|claude|goal)[-_]/i.test(value);
+}
+
+function splitCleanNameTokens(value) {
+  return String(value)
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .split(/[^a-zA-Z0-9]+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function cleanStatusLabel(status = "unknown") {
+  return sentenceCase(String(status).replace(/_/g, " "));
+}
+
+function sentenceCase(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 }
 
 function recordEventFromCli(args, { codexLabel = false } = {}) {

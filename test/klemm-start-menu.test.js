@@ -100,6 +100,24 @@ test("klemm start agents lists agents currently in use", async () => {
   assert.match(result.stdout, /mission-start-menu/);
 });
 
+test("klemm start agents uses clean reader-friendly agent names", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-start-agent-clean-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await runKlemm(["mission", "start", "--id", "mission-goal-klemm-goal-adapter-v1", "--goal", "Klemm goal adapter"], { env });
+  await runKlemm(["agent", "register", "--id", "agent-codex-goal-adapter-v1", "--mission", "mission-goal-klemm-goal-adapter-v1", "--name", "agent-codex-goal-adapter-v1", "--kind", "codex_agent"], { env });
+  await runKlemm(["agent", "register", "--id", "agent-runtime-shell", "--mission", "mission-goal-klemm-goals", "--name", "Shell Agent", "--kind", "shell_agent"], { env });
+
+  const result = await runKlemm(["start"], { env, input: "agents\nquit\n" });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /1\. Codex goal adapter/);
+  assert.match(result.stdout, /Kind: Codex/);
+  assert.match(result.stdout, /Mission: Klemm goal adapter/);
+  assert.match(result.stdout, /ID: agent-codex-goal-adapter-v1/);
+  assert.doesNotMatch(result.stdout, /- agent-codex-goal-adapter-v1 .* mission=/);
+  assert.doesNotMatch(result.stdout, /kind=codex_agent/);
+});
+
 test("klemm start supports arrow-key selection for the main menu", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-start-arrow-agents-"));
   const env = { KLEMM_DATA_DIR: dataDir };

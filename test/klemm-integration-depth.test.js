@@ -234,7 +234,11 @@ test("runtime profiles v2 load config files, inject env, default missions, and a
   assert.match(result.stdout, /profile-token/);
 
   const agents = await runKlemm(["agents"], { env });
-  assert.match(agents.stdout, /agent-profile-codex active mission=mission-profile/);
+  assert.match(agents.stdout, /1\. Profile Codex/);
+  assert.match(agents.stdout, /Status: Active/);
+  assert.match(agents.stdout, /Mission: Runtime profile mission/);
+  assert.match(agents.stdout, /ID: agent-profile-codex/);
+  assert.match(agents.stdout, /Mission ID: mission-profile/);
 });
 
 test("decision queue inspect and TUI rewrite show rewrite, memories, and policy evidence", async () => {
