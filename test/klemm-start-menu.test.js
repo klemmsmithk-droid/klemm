@@ -41,8 +41,8 @@ test("klemm start opens a compact status front door", async () => {
   assert.match(result.stdout, /Klemm Start/);
   assert.match(result.stdout, /\x1b\[38;2;34;139;34m/);
   assert.match(result.stdout, /\x1b\[97m/);
-  assert.match(result.stdout, /K\s+K\s+L\s+EEEEEE\s+M\s+M\s+M/);
-  assert.match(result.stdout, /forest-green personal authority layer/i);
+  assert.match(result.stdout, /K\s+K\s+L\s+EEEEEE\s+M\s+M\s+M\s+M/);
+  assert.doesNotMatch(result.stdout, /forest-green personal authority layer/i);
   assert.match(result.stdout, /1\. Status/);
   assert.match(result.stdout, /Klemm running:/);
   assert.match(result.stdout, /Daemon:/);
@@ -98,4 +98,21 @@ test("klemm start agents lists agents currently in use", async () => {
   assert.match(result.stdout, /agent-codex/);
   assert.match(result.stdout, /Codex/);
   assert.match(result.stdout, /mission-start-menu/);
+});
+
+test("klemm start supports arrow-key selection for the main menu", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-start-arrow-agents-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await runKlemm(["mission", "start", "--id", "mission-arrow-menu", "--goal", "Navigate Klemm"], { env });
+  await runKlemm(["agent", "register", "--id", "agent-arrow", "--mission", "mission-arrow-menu", "--name", "Arrow Agent", "--kind", "shell_agent"], { env });
+
+  const result = await runKlemm(["start"], {
+    env,
+    input: "\x1b[B\x1b[B\x1b[B\nquit\n",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Use ↑\/↓ then Enter/);
+  assert.match(result.stdout, /Agents in use/);
+  assert.match(result.stdout, /agent-arrow/);
 });

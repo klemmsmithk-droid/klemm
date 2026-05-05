@@ -5,6 +5,7 @@ import { existsSync, openSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { chmod, copyFile, mkdir, readdir, readFile, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 
 import {
@@ -143,11 +144,19 @@ const START_COLORS = {
 };
 
 const START_KLEMM_ASCII = [
-  "K    K  L       EEEEEE  M  M  M",
-  "K  K    L       E       MM MM M",
-  "KK      L       EEEE    M  M  M",
-  "K  K    L       E       M     M",
-  "K    K  LLLLLL  EEEEEE  M     M",
+  "K    K  L       EEEEEE  M   M  M   M",
+  "K  K    L       E       MM MM  MM MM",
+  "KK      L       EEEE    M M M  M M M",
+  "K  K    L       E       M   M  M   M",
+  "K    K  LLLLLL  EEEEEE  M   M  M   M",
+];
+
+const START_MENU_OPTIONS = [
+  { choice: "status", label: "Status" },
+  { choice: "directions", label: "Directions" },
+  { choice: "context", label: "Context" },
+  { choice: "agents", label: "Agents" },
+  { choice: "quit", label: "Quit" },
 ];
 
 async function main() {
@@ -3569,52 +3578,109 @@ async function printStatus() {
 
 async function startInteractiveFromCli(args) {
   const flags = parseFlags(args);
-  printStartMenu();
   if (process.stdin.isTTY) {
     return await startInteractiveTty(flags);
   }
+  printStartMenu();
   const input = await readStdin();
-  const lines = input.split(/\r?\n/);
-  return await processStartMenuLines(lines, flags);
+  return await processStartMenuLines(input.split(/\r?\n/), flags);
 }
 
 async function startInteractiveTty(flags) {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    while (true) {
-      const raw = await rl.question("klemm> ");
-      const choice = normalizeStartChoice(raw);
+  emitKeypressEvents(process.stdin);
+  let selectedIndex = 0;
+  let busy = false;
+  let closed = false;
+  let resolveDone;
+  const done = new Promise((resolve) => {
+    resolveDone = resolve;
+  });
+  const previousRaw = process.stdin.isRaw;
+  const setRawMode = (enabled) => {
+    if (typeof process.stdin.setRawMode === "function") process.stdin.setRawMode(enabled);
+  };
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    process.stdin.off("keypress", onKeypress);
+    setRawMode(Boolean(previousRaw));
+    resolveDone();
+  };
+  const askLine = async (prompt) => {
+    setRawMode(false);
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      return await rl.question(prompt);
+    } finally {
+      rl.close();
+      if (!closed) setRawMode(true);
+    }
+  };
+  const rerender = () => printStartMenu(selectedIndex);
+  const onKeypress = async (_chunk, key = {}) => {
+    if (busy) return;
+    if (key.ctrl && key.name === "c") {
+      cleanup();
+      console.log("Goodbye.");
+      return;
+    }
+    if (key.name === "down") {
+      selectedIndex = moveStartSelection(selectedIndex, 1);
+      rerender();
+      return;
+    }
+    if (key.name === "up") {
+      selectedIndex = moveStartSelection(selectedIndex, -1);
+      rerender();
+      return;
+    }
+    if (key.name === "return" || key.name === "enter") {
+      busy = true;
+      const choice = START_MENU_OPTIONS[selectedIndex].choice;
       if (choice === "quit") {
+        cleanup();
         console.log("Goodbye.");
         return;
       }
-      if (choice === "directions") {
-        console.log("Directions");
-        console.log("Type directions for Klemm, then press return.");
-        const text = await rl.question("direction> ");
-        saveStartDirection(text);
-        continue;
+      await runStartMenuChoice(choice, flags, { askLine });
+      if (!closed) {
+        rerender();
+        busy = false;
       }
-      if (choice === "context") {
-        printStartContextMenu();
-        const provider = await rl.question("provider> ");
-        await openStartContextProvider(provider, flags);
-        continue;
-      }
-      await runStartMenuChoice(choice);
+      return;
     }
-  } finally {
-    rl.close();
-  }
+    const directChoice = normalizeStartChoice(key.sequence);
+    if (directChoice && directChoice !== key.sequence) {
+      busy = true;
+      if (directChoice === "quit") {
+        cleanup();
+        console.log("Goodbye.");
+        return;
+      }
+      await runStartMenuChoice(directChoice, flags, { askLine });
+      if (!closed) {
+        rerender();
+        busy = false;
+      }
+    }
+  };
+  process.stdin.on("keypress", onKeypress);
+  setRawMode(true);
+  process.stdin.resume();
+  printStartMenu(selectedIndex);
+  await done;
 }
 
 async function processStartMenuLines(lines, flags) {
   let index = 0;
+  let selectedIndex = 0;
   while (index < lines.length) {
-    const raw = lines[index]?.trim() ?? "";
+    const raw = lines[index] ?? "";
     index += 1;
-    if (!raw) continue;
-    const choice = normalizeStartChoice(raw);
+    const parsed = parseStartMenuInput(raw, selectedIndex);
+    selectedIndex = parsed.selectedIndex;
+    const choice = parsed.choice;
+    if (!choice) continue;
     if (choice === "quit") {
       console.log("Goodbye.");
       return;
@@ -3634,20 +3700,18 @@ async function processStartMenuLines(lines, flags) {
       await openStartContextProvider(provider, flags);
       continue;
     }
-    await runStartMenuChoice(choice);
+    await runStartMenuChoice(choice, flags);
   }
 }
 
-function printStartMenu() {
+function printStartMenu(selectedIndex = 0) {
   printStartBanner();
   console.log("Klemm Start");
-  console.log("Choose:");
-  console.log("1. Status");
-  console.log("2. Directions");
-  console.log("3. Context");
-  console.log("4. Agents");
-  console.log("5. Quit");
-  console.log("Type a number or name:");
+  console.log("Use ↑/↓ then Enter, or type a number/name:");
+  START_MENU_OPTIONS.forEach((option, index) => {
+    const pointer = index === selectedIndex ? ">" : " ";
+    console.log(`${pointer} ${index + 1}. ${option.label}`);
+  });
 }
 
 function printStartBanner() {
@@ -3659,7 +3723,6 @@ function printStartBanner() {
   console.log(startStyle("==================================================", START_COLORS.forestGreen));
   for (const line of frame) console.log(startStyle(line, START_COLORS.forestGreen));
   for (const line of START_KLEMM_ASCII) console.log(startStyle(line, START_COLORS.white));
-  console.log(startStyle("forest-green personal authority layer", START_COLORS.forestGreen));
   console.log(startStyle("==================================================", START_COLORS.forestGreen));
 }
 
@@ -3678,9 +3741,37 @@ function normalizeStartChoice(raw) {
   return value;
 }
 
-async function runStartMenuChoice(choice) {
+function parseStartMenuInput(raw, selectedIndex = 0) {
+  const value = String(raw ?? "");
+  let nextIndex = selectedIndex;
+  for (const match of value.matchAll(/\x1b\[([AB])/g)) {
+    nextIndex = moveStartSelection(nextIndex, match[1] === "B" ? 1 : -1);
+  }
+  const withoutArrows = value.replace(/\x1b\[[AB]/g, "").trim();
+  if (value.includes("\x1b[") && !withoutArrows) {
+    return { choice: START_MENU_OPTIONS[nextIndex].choice, selectedIndex: nextIndex };
+  }
+  return { choice: normalizeStartChoice(withoutArrows), selectedIndex: nextIndex };
+}
+
+function moveStartSelection(selectedIndex, delta) {
+  return (selectedIndex + delta + START_MENU_OPTIONS.length) % START_MENU_OPTIONS.length;
+}
+
+async function runStartMenuChoice(choice, flags = {}, tty = {}) {
   if (choice === "status") return await printStartStatus();
   if (choice === "agents") return printStartAgents();
+  if (choice === "directions") {
+    console.log("Directions");
+    console.log("Type directions for Klemm, then press return.");
+    const text = tty.askLine ? await tty.askLine("direction> ") : "";
+    return saveStartDirection(text);
+  }
+  if (choice === "context") {
+    printStartContextMenu();
+    const provider = tty.askLine ? await tty.askLine("provider> ") : "";
+    return await openStartContextProvider(provider, flags);
+  }
   if (!choice) return;
   console.log(`Unknown choice: ${choice}`);
   printStartMenu();
