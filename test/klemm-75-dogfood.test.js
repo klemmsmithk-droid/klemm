@@ -179,7 +179,7 @@ test("wrapped Codex sessions queue risky launch commands before execution", asyn
     "--goal",
     "Queue risky wrapped launch",
     "--plan",
-    "Try a risky publish command.",
+    "Check whether a wrapped launch command is allowed before execution.",
     "--",
     "git",
     "push",

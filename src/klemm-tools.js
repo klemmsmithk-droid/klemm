@@ -44,6 +44,10 @@ import {
 } from "./klemm.js";
 import { buildOsObservation } from "./klemm-os.js";
 
+function firstNonEmptyText(...values) {
+  return values.map((value) => String(value ?? "").trim()).find(Boolean) ?? "";
+}
+
 export const KLEMM_MCP_TOOLS = [
   {
     name: "register_agent",
@@ -296,10 +300,24 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
         })
       : state;
     nextState = recordAgentActivity(nextState, envelope.activity);
+    const adapterActivity = nextState.agentActivities[0];
     let decision = null;
     if (envelope.action) {
       nextState = proposeAction(nextState, envelope.action);
       decision = nextState.decisions[0];
+    }
+    let briefCheck = null;
+    let briefDecision = null;
+    if (envelope.type === "plan") {
+      const checked = checkBriefPlan(nextState, {
+        missionId: envelope.missionId,
+        agentId: envelope.agentId,
+        plan: firstNonEmptyText(args.plan, envelope.activity.evidence?.plan, envelope.summary),
+        now: args.now,
+      });
+      nextState = checked.state;
+      briefCheck = checked.check;
+      briefDecision = checked.decision;
     }
     let goalTick = null;
     if (goal) {
@@ -315,7 +333,7 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
       });
       goalTick = nextState.goals.find((item) => item.id === goal.id)?.ticks?.[0] ?? null;
     }
-    return { state: nextState, result: { accepted: true, protocol: validation.protocol, envelope, activity: nextState.agentActivities[0], decision, goalTick } };
+    return { state: nextState, result: { accepted: true, protocol: validation.protocol, envelope, activity: adapterActivity, decision, goalTick, briefCheck, briefDecision } };
   }
 
   if (name === "evaluate_agent_alignment") {

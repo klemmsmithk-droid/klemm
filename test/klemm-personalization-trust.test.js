@@ -314,14 +314,14 @@ test("reported plans are checked against Kyle's brief and drift is nudged", asyn
     "I will finish by pushing to GitHub without asking Kyle.",
   ], { env });
 
-  assert.equal(report.status, 0, report.stderr);
-  assert.match(report.stdout, /Brief check: conflict/);
-  assert.match(report.stdout, /Klemm nudge: plan conflicts with Kyle authority boundary/);
+  assert.equal(report.status, 2, report.stderr);
+  assert.match(report.stdout, /Brief autopilot: queue/);
+  assert.match(report.stdout, /Autopilot stop: queued by Klemm brief enforcement/);
   assert.match(report.stdout, /Brief section: Authority boundaries/);
-  assert.match(report.stdout, /push to GitHub without approval/);
+  assert.match(report.stdout, /Queued decision: decision-brief-check-/);
 
   const debrief = await runKlemm(["debrief", "--mission", "mission-brief-drift"], { env });
-  assert.match(debrief.stdout, /plan conflicts with Kyle authority boundary/);
+  assert.match(debrief.stdout, /High-risk brief conflict queued/);
 });
 
 test("proxy and trust explanations lead with the Kyle brief section used", async () => {

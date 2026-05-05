@@ -2062,7 +2062,7 @@ export function summarizeDebrief(state, { missionId } = {}) {
     "Recent activity:",
     ...(agentActivities.length === 0
       ? ["- none"]
-      : agentActivities.slice(0, 5).map((activity) => `- ${activity.id} ${activity.type}: ${redactSensitiveText(activity.summary)} ${redactSensitiveText(activity.target ?? "")}`)),
+      : agentActivities.slice(0, 8).map((activity) => `- ${activity.id} ${activity.type}: ${redactSensitiveText(activity.summary)} ${redactSensitiveText(activity.target ?? "")}`)),
     "Recent supervised runs:",
     ...(supervisedRuns.length === 0
       ? ["- none"]

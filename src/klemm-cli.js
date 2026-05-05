@@ -470,7 +470,7 @@ async function wrapCodexSessionFromCli(args) {
     adapterToken: flags.adapterToken,
     event: "plan",
     summary: flags.plan ?? `Wrapped Codex plan for ${mission.goal}`,
-    plan: flags.plan ?? "",
+    plan: flags.plan ?? `Wrapped Codex plan for ${mission.goal}`,
   }).result;
   console.log(`Plan reported: ${plan.accepted === false ? "rejected" : "accepted"}`);
   if (plan.accepted === false) {
@@ -478,11 +478,23 @@ async function wrapCodexSessionFromCli(args) {
     process.exitCode = 1;
     return;
   }
-  const autoProxy = maybeCaptureCodexAutoProxy({ missionId: mission.id, agentId });
-  console.log(`Automatic proxy check: ${autoProxy.captured ? "captured" : "skipped"}${autoProxy.reason ? ` (${autoProxy.reason})` : ""}`);
 
   let launchOutcome = "completed";
-  if (command.length > 0) {
+  const briefCheck = plan.briefCheck;
+  if (briefCheck) printBriefAutopilotResult(briefCheck);
+  const stoppedByBrief = briefCheck && ["queue", "pause"].includes(briefCheck.enforcement);
+  if (stoppedByBrief) {
+    launchOutcome = briefCheck.enforcement === "queue" ? "queued_by_brief" : "paused_by_brief";
+    console.log(`Autopilot stop: ${briefCheck.enforcement === "queue" ? "queued by Klemm brief enforcement" : "paused by Klemm brief enforcement"}`);
+    process.exitCode = 2;
+  }
+
+  if (!stoppedByBrief) {
+    const autoProxy = maybeCaptureCodexAutoProxy({ missionId: mission.id, agentId });
+    console.log(`Automatic proxy check: ${autoProxy.captured ? "captured" : "skipped"}${autoProxy.reason ? ` (${autoProxy.reason})` : ""}`);
+  }
+
+  if (!stoppedByBrief && command.length > 0) {
     const guarded = store.update((state) =>
       proposeAction(state, buildCommandProposal(command, {
         missionId: mission.id,
@@ -506,7 +518,9 @@ async function wrapCodexSessionFromCli(args) {
     }
   }
 
-  if (flags.dryRun) {
+  if (stoppedByBrief) {
+    console.log("Codex launch skipped by brief enforcement");
+  } else if (flags.dryRun) {
     console.log("Dry run: Codex launch skipped");
   } else if (command.length === 0) {
     await withTemporaryEnv(sessionEnv, async () => {
@@ -1013,6 +1027,16 @@ async function printReadinessFromCli(args) {
   for (const gate of report.gates) {
     console.log(`${gate.id}: ${gate.pass ? "pass" : "fail"} - ${gate.detail}`);
   }
+  if (report.activeMissions.length > 0) {
+    console.log("Active missions:");
+    for (const mission of report.activeMissions.slice(0, 8)) {
+      console.log(`- ${mission.id}: ${mission.goal}`);
+      console.log(`  finish: klemm mission finish ${mission.id} "stale mission closed"`);
+    }
+  }
+  if (report.installNeedsRepair) {
+    console.log(`Repair install: ${report.installRepairAction}`);
+  }
   console.log("Next actions:");
   if (report.nextActions.length === 0) {
     console.log("- ship private alpha");
@@ -1090,8 +1114,8 @@ async function buildPrivateAlphaReadinessReport(flags = {}) {
     {
       id: "mission_clean",
       pass: activeMissions.length === 0,
-      detail: `${activeMissions.length} active missions`,
-      action: "klemm dogfood finish --mission <mission-id>",
+      detail: activeMissions.length === 0 ? "0 active missions" : `${activeMissions.length} active missions: ${activeMissions.map((mission) => mission.id).slice(0, 5).join(",")}`,
+      action: activeMissions[0] ? `klemm mission finish ${activeMissions[0].id} "stale mission closed"` : "klemm mission list",
     },
     {
       id: "doctor",
@@ -1108,10 +1132,15 @@ async function buildPrivateAlphaReadinessReport(flags = {}) {
   ];
   const passed = gates.filter((gate) => gate.pass).length;
   const score = Math.round((passed / gates.length) * 100);
+  const installNeedsRepair = !existsSync(plistPath) || !existsSync(profilesPath) || !existsSync(skillPath) || !wrapperExecutable || !existsSync(mcpPath);
+  const installRepairAction = `klemm install --data-dir "${dataDir}" --policy-pack coding-afk --agents codex,claude,shell`;
   return {
     score,
     ready: score === 100,
     gates,
+    activeMissions,
+    installNeedsRepair,
+    installRepairAction,
     trueRails: {
       helperChecks: (state.helperChecks ?? []).length,
       observationEvents: (state.observationEvents ?? []).length,
@@ -2951,6 +2980,7 @@ function trustWhyFromCli(args) {
   const state = store.getState();
   if (flags.proxy) return trustWhyProxyFromCli(flags.proxy);
   if (flags.goal) return trustWhyGoalFromCli(flags.goal);
+  if (flags.brief) return trustWhyBriefFromCli(flags.brief);
   const decisionId = firstPositionalArg(args);
   const decision = (state.decisions ?? []).find((item) => item.id === decisionId);
   if (!decision) throw new Error(`Decision not found: ${decisionId}`);
@@ -3146,6 +3176,51 @@ function trustWhyProxyFromCli(answerId) {
   console.log("Correction path:");
   console.log(`- klemm proxy review --answer ${answer.id} --status reviewed --note "..."`);
   console.log("- Promote a reviewed correction or memory if this should become a standing rule.");
+}
+
+function trustWhyBriefFromCli(checkId) {
+  const state = store.getState();
+  const activity = (state.agentActivities ?? []).find((item) => item.evidence?.briefCheckId === checkId);
+  if (!activity) throw new Error(`Brief check not found: ${checkId}`);
+  const mission = (state.missions ?? []).find((item) => item.id === activity.missionId);
+  const evidence = activity.evidence ?? {};
+  const sourceMemory = (state.memories ?? []).find((memory) => memory.id === evidence.sourceMemoryId);
+  const corrections = (state.corrections ?? []).filter((correction) => correction.briefCheckId === checkId || correction.decisionId === checkId);
+  const enforcement = evidence.enforcement ?? "unknown";
+  console.log("Why Klemm checked the brief");
+  console.log(`Bottom line: ${enforcement}`);
+  console.log(`Check ID: ${checkId}`);
+  console.log(`Agent: ${activity.agentId}`);
+  console.log(`Mission: ${mission?.id ?? activity.missionId ?? "none"} ${mission?.goal ?? ""}`);
+  console.log(`Plan seen: ${redactSensitiveText(activity.command || activity.summary)}`);
+  console.log(`Risk: ${evidence.riskLevel ?? "unknown"}`);
+  console.log(`Reason: ${redactSensitiveText(evidence.reason ?? activity.summary)}`);
+  console.log("");
+  console.log("Exact evidence:");
+  if (sourceMemory) {
+    console.log(`- ${sourceMemory.id} ${sourceMemory.status}: ${redactSensitiveText(sourceMemory.text)}`);
+    console.log(`  source=${sourceMemory.source} ref=${sourceMemory.sourceRef ?? sourceMemory.evidence?.sourceRef ?? "unknown"}`);
+  } else {
+    console.log("- no reviewed memory matched; deterministic brief rule applied");
+  }
+  console.log("");
+  console.log("Source chain:");
+  console.log(`- brief_check=${checkId}`);
+  console.log(`- activity=${activity.id}`);
+  if (evidence.queuedDecisionId) console.log(`- queued_decision=${evidence.queuedDecisionId}`);
+  console.log("");
+  console.log("What would change this:");
+  if (enforcement === "nudge") console.log("- evidence that this is a genuinely narrow/local change where focused review is enough");
+  else if (enforcement === "queue") console.log("- explicit Kyle approval or a reviewed policy allowing this exact high-risk action");
+  else if (enforcement === "pause") console.log("- a fresh plan that acknowledges the brief and avoids repeated drift");
+  else console.log("- a correction if this aligned decision was wrong");
+  console.log("");
+  console.log("Correction history:");
+  if (corrections.length === 0) console.log("- none");
+  for (const correction of corrections) console.log(`- ${correction.id} ${correction.status}: ${redactSensitiveText(correction.preference)}`);
+  console.log("");
+  console.log("Teach Klemm:");
+  console.log(`- klemm brief correct --check ${checkId} --verdict not_drift|always_queue|allow_locally --note "..."`);
 }
 
 function trustWhyGoalFromCli(goalId) {
@@ -4167,6 +4242,21 @@ async function printStartStatus() {
   console.log(`Profile evidence: ${reviewed.length} reviewed, ${pending.length} pending, ${pinned.length} pinned`);
   console.log(`Unresolved queue: ${unresolvedQueue}`);
   console.log(`Queued decisions: ${unresolvedQueue}`);
+  const codexDir = join(KLEMM_DATA_DIR, "codex-integration");
+  const installMissing =
+    !existsSync(join(KLEMM_DATA_DIR, "com.klemm.daemon.plist")) ||
+    !existsSync(join(KLEMM_DATA_DIR, "profiles", "default-profiles.json")) ||
+    !existsSync(join(codexDir, "skills", "klemm", "SKILL.md")) ||
+    !existsSync(join(codexDir, "mcp.json")) ||
+    !existsSync(join(codexDir, "bin", "klemm-codex"));
+  if (installMissing) {
+    console.log(`Repair install: klemm install --data-dir "${KLEMM_DATA_DIR}" --policy-pack coding-afk --agents codex,claude,shell`);
+  }
+  const activeMissions = (state.missions ?? []).filter((mission) => mission.status === "active");
+  if (activeMissions.length > 0) {
+    console.log("Finish stale missions:");
+    for (const mission of activeMissions.slice(0, 5)) console.log(`- klemm mission finish ${mission.id} "stale mission closed"`);
+  }
 }
 
 function countAgentCalls(state) {
@@ -5150,6 +5240,7 @@ function recordCodexAdapterReportFromCli(args) {
     protocol = toolResult.result.protocol;
     next = toolResult.state;
     decision = toolResult.result.decision;
+    const briefCheck = toolResult.result.briefCheck;
     console.log("Codex adapter envelope recorded");
     console.log(`Adapter accepted: ${accepted}`);
     console.log(`Protocol: ${protocol?.negotiatedVersion ?? "none"}`);
@@ -5157,7 +5248,12 @@ function recordCodexAdapterReportFromCli(args) {
       console.log(`Error: ${toolResult.result.error}`);
       return;
     }
+    if (briefCheck) printBriefAutopilotResult(briefCheck);
     if (decision) printDecision(decision);
+    if (briefCheck && ["queue", "pause"].includes(briefCheck.enforcement)) {
+      console.log(`Autopilot stop: ${briefCheck.enforcement === "queue" ? "queued by Klemm brief enforcement" : "paused by Klemm brief enforcement"}`);
+      process.exitCode = 2;
+    }
     return;
   }
   next = store.update((state) => recordAgentActivity(state, envelope.activity));
@@ -5169,21 +5265,16 @@ function recordCodexAdapterReportFromCli(args) {
     decision = next.decisions[0];
   }
   const activity = next.agentActivities[0];
-  const briefDrift = envelope.type === "plan"
-    ? evaluatePlanAgainstBrief(next, {
+  let briefCheck = null;
+  if (envelope.type === "plan") {
+    const checked = checkBriefPlan(next, {
       missionId: flags.mission,
       agentId: flags.agent ?? "agent-codex",
-      planText: flags.plan ?? flags.summary ?? envelope.activity.summary,
-    })
-    : null;
-  if (briefDrift?.conflict) {
-    next = store.update((state) => recordAgentActivity(state, {
-      missionId: flags.mission,
-      agentId: flags.agent ?? "agent-codex",
-      type: "activity",
-      target: "klemm user brief",
-      summary: `Klemm nudge: plan conflicts with Kyle authority boundary (${briefDrift.memory?.text ?? briefDrift.reason}).`,
-    }));
+      plan: flags.plan ?? flags.summary ?? envelope.activity.evidence?.plan ?? envelope.activity.summary,
+    });
+    store.saveState(checked.state);
+    next = checked.state;
+    briefCheck = checked.check;
   }
 
   console.log("Codex adapter envelope recorded");
@@ -5191,16 +5282,23 @@ function recordCodexAdapterReportFromCli(args) {
   console.log(`Protocol: ${protocol?.negotiatedVersion ?? envelope.protocolVersion}`);
   console.log(`Activity: ${activity.id}`);
   console.log(`Type: ${envelope.type}`);
-  if (briefDrift) {
-    console.log(`Brief check: ${briefDrift.conflict ? "conflict" : "aligned"}`);
-    if (briefDrift.conflict) {
-      console.log("Klemm nudge: plan conflicts with Kyle authority boundary");
-      console.log(`Brief section: ${briefDrift.section}`);
-      console.log(`Source memory: ${briefDrift.memory?.id ?? "none"}`);
-      console.log(`Evidence: ${redactSensitiveText(briefDrift.memory?.text ?? briefDrift.reason)}`);
-    }
-  }
+  if (briefCheck) printBriefAutopilotResult(briefCheck);
   if (decision) printDecision(decision);
+  if (briefCheck && ["queue", "pause"].includes(briefCheck.enforcement)) {
+    console.log(`Autopilot stop: ${briefCheck.enforcement === "queue" ? "queued by Klemm brief enforcement" : "paused by Klemm brief enforcement"}`);
+    process.exitCode = 2;
+  }
+}
+
+function printBriefAutopilotResult(check) {
+  console.log(`Brief autopilot: ${check.enforcement}`);
+  console.log(`Check ID: ${check.id}`);
+  console.log(`Brief check: ${check.enforcement}`);
+  console.log(`Reason: ${redactSensitiveText(check.reason)}`);
+  if (check.section) console.log(`Brief section: ${check.section}`);
+  if (check.sourceMemoryId) console.log(`Source memory: ${check.sourceMemoryId}`);
+  if (check.suggestedRewrite) console.log(`Suggested rewrite: ${check.suggestedRewrite}`);
+  if (check.queuedDecisionId) console.log(`Queued decision: ${check.queuedDecisionId}`);
 }
 
 function printCodexContractStatusFromCli(args = []) {
@@ -5211,6 +5309,7 @@ function printCodexContractStatusFromCli(args = []) {
   console.log(`Mission: ${missionId ?? "all"}`);
   console.log(`session_contract=${yn(report.gates.sessionContract)}`);
   console.log(`plan_reports=${yn(report.gates.planReports)}`);
+  console.log(`brief_checks=${yn(report.gates.briefChecks)}`);
   console.log(`tool_calls=${yn(report.gates.toolCalls)}`);
   console.log(`diff_reports=${yn(report.gates.diffReports)}`);
   console.log(`proxy_questions=${yn(report.gates.proxyQuestions)}`);
@@ -5234,6 +5333,7 @@ function buildCodexContractReport(state, { missionId } = {}) {
   const gates = {
     sessionContract: codexActivities.some((activity) => activity.type === "session_start" || activity.type === "session_finish"),
     planReports: codexActivities.some((activity) => activity.type === "plan"),
+    briefChecks: codexActivities.some((activity) => activity.evidence?.briefCheckId),
     toolCalls: codexActivities.some((activity) => activity.type === "tool_call" || activity.type === "command") || supervisedRuns.length > 0,
     diffReports: codexActivities.some((activity) => activity.type === "file_change" || (activity.fileChanges ?? []).length > 0 || /\bdiff\b/i.test(`${activity.summary} ${activity.target}`)),
     proxyQuestions: proxyQuestions.length > 0,
@@ -6901,12 +7001,15 @@ async function finishGoldenDogfoodFromCli(args = []) {
 
 function buildGoldenDogfoodReport(state, { missionId } = {}) {
   const activities = (state.agentActivities ?? []).filter((activity) => !missionId || activity.missionId === missionId);
+  const events = (state.agentEvents ?? []).filter((event) => !missionId || event.missionId === missionId);
   const supervisedRuns = (state.supervisedRuns ?? []).filter((run) => !missionId || run.missionId === missionId);
   const proxyQuestions = (state.proxyQuestions ?? []).filter((question) => !missionId || question.missionId === missionId);
   const decisions = (state.decisions ?? []).filter((decision) => !missionId || decision.missionId === missionId);
   const queueDecisions = decisions.filter((decision) => decision.decision === "queue");
+  const briefChecks = activities.filter((activity) => activity.evidence?.briefCheckId);
   const gates = {
-    plan_reports: activities.some((activity) => activity.type === "plan"),
+    plan_reports: activities.some((activity) => activity.type === "plan") || events.some((event) => event.type === "agent_event" && /\bplan\b/i.test(event.summary ?? "")),
+    brief_checks: briefChecks.length > 0,
     command_capture: supervisedRuns.some((run) => String(run.command ?? "").length > 0 && !/dry_run/i.test(`${run.status ?? ""} ${run.stdout ?? ""}`)),
     diff_reports: activities.some((activity) => activity.type === "file_change" || (activity.fileChanges ?? []).length > 0 || /\bdiff\b/i.test(`${activity.summary ?? ""} ${activity.target ?? ""}`)),
     proxy_questions: proxyQuestions.length > 0,
@@ -6915,6 +7018,7 @@ function buildGoldenDogfoodReport(state, { missionId } = {}) {
   };
   const timeline = [
     ...activities.map((activity) => ({ at: activity.createdAt, kind: activity.type, text: `${activity.agentId}: ${activity.summary ?? activity.command ?? activity.target ?? ""}` })),
+    ...events.map((event) => ({ at: event.createdAt, kind: event.type, text: `${event.agentId}: ${event.summary ?? ""}` })),
     ...supervisedRuns.map((run) => ({ at: run.finishedAt ?? run.startedAt, kind: "command_capture", text: `${run.id} exit=${run.exitCode ?? "unknown"} command=${run.command} stdout=${oneLineText(run.stdout ?? "")}` })),
     ...proxyQuestions.map((question) => ({ at: question.createdAt, kind: "proxy_question", text: `${question.id}: ${question.question}` })),
     ...decisions.map((decision) => ({ at: decision.createdAt, kind: `decision_${decision.decision}`, text: `${decision.id} ${decision.actor} ${decision.actionType} ${decision.target}` })),
@@ -9337,6 +9441,7 @@ Commands:
   klemm trust why --v4 <decision-id>
   klemm trust why --goal goal-id
   klemm trust why --proxy proxy-answer-id
+  klemm trust why --brief brief-check-id
   klemm trust timeline --mission mission-id
   klemm corrections add --decision <id> --preference "..."
   klemm corrections review|approve|reject|promote <correction-id>
