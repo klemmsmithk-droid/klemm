@@ -17,9 +17,11 @@ import {
   buildUserModelSummary,
   buildCodexContext,
   addStructuredPolicy,
+  checkBriefPlan,
   continueProxy,
   distillMemory,
   evaluateAgentAlignment,
+  getBriefRuntimeStatus,
   getGoalStatus,
   getKlemmStatus,
   getProxyStatus,
@@ -33,6 +35,8 @@ import {
   searchMemories,
   simulatePolicyDecision,
   recordAgentActivity,
+  recordBriefAcknowledgement,
+  recordBriefCorrection,
   proposeAction,
   recordAgentEvent,
   recordOsObservation,
@@ -209,6 +213,8 @@ async function main() {
     if (command === "proxy" && args[1] === "status") return proxyStatusFromCli(args.slice(2));
     if (command === "proxy" && args[1] === "review") return proxyReviewFromCli(args.slice(2));
     if (command === "brief" && args[1] === "acknowledge") return briefAcknowledgeFromCli(args.slice(2));
+    if (command === "brief" && args[1] === "check") return briefCheckFromCli(args.slice(2));
+    if (command === "brief" && args[1] === "correct") return briefCorrectFromCli(args.slice(2));
     if (command === "agent" && args[1] === "register") return registerAgentFromCli(args.slice(2));
     if (command === "agent" && args[1] === "shim") return await agentShimFromCli(args.slice(2));
     if (command === "event" && args[1] === "record") return recordEventFromCli(args.slice(2));
@@ -2661,6 +2667,9 @@ function adaptersStatusFromCli(args = []) {
     console.log(`  Brief delivered: ${row.profileBrief ? "yes" : "no"}`);
     console.log(`  Brief acknowledged: ${row.briefAcknowledged ? "yes" : "no"}`);
     console.log(`  Brief used in proxy/trust: ${row.briefUsed ? "yes" : "no"}`);
+    console.log(`  Last brief check: ${row.lastBriefCheck}`);
+    console.log(`  Drift count: ${row.briefDriftCount}`);
+    console.log(`  Enforcement state: ${row.briefEnforcementState}`);
     console.log(`  Next fix: ${row.nextFix}`);
   }
 }
@@ -2687,6 +2696,10 @@ function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = 
     const profileBrief = adapterActivities.some((activity) => activity.type === "profile_brief" || /profile brief/i.test(activity.summary ?? ""));
     const briefAcknowledged = adapterActivities.some((activity) => /brief acknowledged/i.test(activity.summary ?? ""));
     const briefUsed = proxyAnswers.some((answer) => activityMatchesAdapter(adapter, { agentId: answer.agentId, summary: answer.answer, type: "proxy_answer" }));
+    const briefStatus = getBriefRuntimeStatus(state, {
+      missionId,
+      agentId: adapter === "codex" ? "agent-codex" : `agent-${adapter}`,
+    });
     return {
       id: adapter,
       label: labels[adapter],
@@ -2698,6 +2711,9 @@ function buildAdapterStatusRows(state, { home = process.env.HOME, missionId } = 
       profileBrief,
       briefAcknowledged,
       briefUsed,
+      lastBriefCheck: briefStatus.lastBriefCheck,
+      briefDriftCount: briefStatus.driftCount,
+      briefEnforcementState: briefStatus.enforcementState,
     };
   });
 }
@@ -4348,6 +4364,10 @@ function printStartAgents() {
   console.log("Agents in use");
   for (const row of buildAdapterStatusRows(state, { home: process.env.HOME })) {
     console.log(`${row.label}: ${row.state}${row.lastSeen ? `, last action ${row.lastSeen}` : ""}`);
+    console.log(`  brief delivered ${row.profileBrief ? "yes" : "no"}, acknowledged ${row.briefAcknowledged ? "yes" : "no"}`);
+    console.log(`  last brief check ${row.lastBriefCheck}`);
+    console.log(`  drift count ${row.briefDriftCount}`);
+    console.log(`  enforcement state ${row.briefEnforcementState}`);
   }
   if (agents.length === 0) {
     console.log("Registered agents: none");
@@ -4848,19 +4868,64 @@ function briefAcknowledgeFromCli(args) {
     missionId,
     includeEvidence: true,
   });
-  const next = store.update((state) => recordAgentActivity(state, {
-    missionId,
-    agentId,
-    type: "activity",
-    target: "klemm user brief",
-    summary: `Brief acknowledged by ${agentId}; reviewed=${brief.reviewedCount} policies=${brief.policyCount}.`,
-  }));
+  const next = store.update((state) => recordBriefAcknowledgement(state, { missionId, agentId }).state);
   const activity = next.agentActivities[0];
   console.log("Brief acknowledged");
   console.log(`Agent: ${agentId}`);
   console.log(`Mission: ${missionId}`);
   console.log(`Activity: ${activity.id}`);
   console.log(`Reviewed evidence: ${brief.reviewedCount}`);
+}
+
+function briefCheckFromCli(args) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? flags.goal ?? flags.missionId;
+  const agentId = flags.agent ?? flags.agentId ?? "agent-codex";
+  const plan = flags.plan ?? flags.summary ?? args.join(" ");
+  if (!missionId || !plan) throw new Error('Usage: klemm brief check --mission <mission-id> --agent <agent-id> --plan "..."');
+  const next = store.update((state) => checkBriefPlan(state, { missionId, agentId, plan }).state);
+  const activity = next.agentActivities[0];
+  const check = {
+    id: activity.evidence?.briefCheckId,
+    enforcement: activity.evidence?.enforcement,
+    riskLevel: activity.evidence?.riskLevel,
+    driftCount: activity.evidence?.driftCount,
+    reason: activity.evidence?.reason ?? activity.summary,
+    suggestedRewrite: activity.evidence?.suggestedRewrite,
+    queuedDecisionId: activity.evidence?.queuedDecisionId,
+    section: activity.evidence?.section,
+    sourceMemoryId: activity.evidence?.sourceMemoryId,
+  };
+  console.log(`Brief check: ${check.enforcement}`);
+  console.log(`Check ID: ${check.id}`);
+  console.log(`Agent: ${agentId}`);
+  console.log(`Mission: ${missionId}`);
+  console.log(`Enforcement: ${check.enforcement}`);
+  console.log(`Risk: ${check.riskLevel}`);
+  console.log(`Drift count: ${check.driftCount}`);
+  console.log(`Reason: ${check.reason}`);
+  if (check.section) console.log(`Brief section: ${check.section}`);
+  if (check.sourceMemoryId) console.log(`Source memory: ${check.sourceMemoryId}`);
+  if (check.suggestedRewrite) console.log(`Suggested rewrite: ${check.suggestedRewrite}`);
+  if (check.queuedDecisionId) console.log(`Queued decision: ${check.queuedDecisionId}`);
+  if (check.enforcement === "queue") console.log("High-risk brief conflict queued");
+  if (check.enforcement === "pause") console.log("Repeated brief drift paused the agent");
+}
+
+function briefCorrectFromCli(args) {
+  const flags = parseFlags(args);
+  const checkId = flags.check ?? flags.checkId ?? args[0];
+  const verdict = flags.verdict;
+  const note = flags.note ?? args.slice(1).join(" ");
+  if (!checkId || !verdict || !note) throw new Error('Usage: klemm brief correct --check <brief-check-id> --verdict not_drift|always_queue|allow_locally --note "..."');
+  const next = store.update((state) => recordBriefCorrection(state, { checkId, verdict, note }).state);
+  const correction = next.corrections[0];
+  const memory = next.memories[0];
+  console.log(`Brief correction recorded: ${correction.id}`);
+  console.log(`Check ID: ${checkId}`);
+  console.log(`Verdict: ${correction.verdict}`);
+  console.log(`Memory candidate: ${memory.status}`);
+  console.log(redactSensitiveText(correction.preference));
 }
 
 function proxyContinueFromCli(args) {
@@ -9152,7 +9217,12 @@ async function visitFiles(root, current, snapshot) {
       continue;
     }
     if (!entry.isFile()) continue;
-    const info = await stat(absolute);
+    let info;
+    try {
+      info = await stat(absolute);
+    } catch {
+      continue;
+    }
     snapshot.set(relative(root, absolute), `${info.mtimeMs}:${info.size}`);
   }
 }

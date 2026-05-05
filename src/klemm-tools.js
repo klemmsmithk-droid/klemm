@@ -3,6 +3,7 @@ import {
   askProxy,
   buildUserModelSummary,
   addAdapterClient,
+  checkBriefPlan,
   continueProxy,
   distillMemory,
   buildCodexContext,
@@ -12,6 +13,7 @@ import {
   evaluateAgentAlignment,
   findGoal,
   getGoalStatus,
+  getBriefRuntimeStatus,
   getKlemmStatus,
   getProxyStatus,
   importContextSource,
@@ -21,6 +23,8 @@ import {
   normalizeAgentAdapterEnvelope,
   proposeAction,
   recordAgentActivity,
+  recordBriefAcknowledgement,
+  recordBriefCorrection,
   recordAgentEvent,
   recordGoalTick,
   recordOsObservation,
@@ -188,6 +192,22 @@ export const KLEMM_MCP_TOOLS = [
   {
     name: "proxy_review",
     description: "Record review feedback for a Klemm proxy answer.",
+  },
+  {
+    name: "brief_acknowledge",
+    description: "Record that an agent received and acknowledged the current Klemm user brief.",
+  },
+  {
+    name: "brief_check",
+    description: "Check an agent plan against the active user brief and return aligned, nudge, queue, or pause enforcement.",
+  },
+  {
+    name: "brief_status",
+    description: "Inspect brief delivery, acknowledgement, last check, drift count, and enforcement state.",
+  },
+  {
+    name: "brief_correct",
+    description: "Record user feedback on a brief check and create a reviewable memory candidate.",
   },
 ];
 
@@ -460,6 +480,32 @@ export function executeKlemmTool(name, args = {}, { state } = {}) {
   if (name === "proxy_review") {
     const nextState = reviewProxy(state, args);
     return { state: nextState, result: { review: nextState.proxyReviews[0] } };
+  }
+
+  if (name === "brief_acknowledge") {
+    const output = recordBriefAcknowledgement(state, args);
+    return { state: output.state, result: { acknowledged: true, activity: output.acknowledgement } };
+  }
+
+  if (name === "brief_check") {
+    const output = checkBriefPlan(state, args);
+    return {
+      state: output.state,
+      result: {
+        check: output.check,
+        enforcement: output.check.enforcement,
+        decision: output.decision,
+      },
+    };
+  }
+
+  if (name === "brief_status") {
+    return { state, result: { status: getBriefRuntimeStatus(state, args) } };
+  }
+
+  if (name === "brief_correct") {
+    const output = recordBriefCorrection(state, args);
+    return { state: output.state, result: { correction: output.correction, memory: output.memory } };
   }
 
   if (name === "proxy_memory_seed") {

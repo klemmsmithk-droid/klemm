@@ -1663,6 +1663,195 @@ export function recordAgentActivity(state, options = {}) {
   );
 }
 
+export function recordBriefAcknowledgement(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const missionId = options.missionId ?? options.mission ?? options.goal;
+  const agentId = options.agentId ?? options.agent ?? "agent-codex";
+  if (!missionId) throw new Error("missionId is required");
+  const reviewedCount = (state.memories ?? []).filter((memory) => ["approved", "pinned"].includes(memory.status)).length;
+  const policyCount = (state.policies ?? []).filter((policy) => policy.status !== "disabled").length;
+  const next = recordAgentActivity(state, {
+    missionId,
+    agentId,
+    type: "activity",
+    target: "klemm user brief",
+    summary: `Brief acknowledged by ${agentId}; reviewed=${reviewedCount} policies=${policyCount}.`,
+    evidence: {
+      briefRuntimeEvent: "acknowledged",
+      reviewedCount,
+      policyCount,
+    },
+    now,
+  });
+  return { state: next, acknowledgement: next.agentActivities[0] };
+}
+
+export function checkBriefPlan(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const missionId = options.missionId ?? options.mission ?? options.goal;
+  const agentId = options.agentId ?? options.agent ?? "agent-codex";
+  const plan = redactSensitiveText(options.plan ?? options.planText ?? options.summary ?? "");
+  if (!missionId) throw new Error("missionId is required");
+  if (!plan) throw new Error("plan is required");
+  const sequence = countBriefChecks(state, { missionId }) + 1;
+  const checkId = options.id ?? `brief-check-${missionId}-${sequence}`;
+  const priorDriftCount = countBriefDrift(state, { missionId, agentId });
+  const drift = classifyBriefPlanDrift(state, { missionId, agentId, plan, priorDriftCount });
+  const enforcement = drift.enforcement;
+  const decisionId = enforcement === "queue" ? `decision-${checkId}` : null;
+  let next = state;
+  if (decisionId) {
+    next = proposeAction(next, {
+      id: decisionId,
+      missionId,
+      actor: agentId,
+      actionType: "brief_conflict",
+      target: plan,
+      privacyExposure: "local_context",
+      externality: "brief_high_risk_conflict",
+      missionRelevance: "related",
+      now,
+    });
+  }
+  next = recordAgentActivity(next, {
+    id: `activity-${checkId}`,
+    missionId,
+    agentId,
+    type: "activity",
+    target: "klemm brief check",
+    summary: `Brief check ${enforcement}: ${drift.reason}`,
+    command: plan,
+    evidence: {
+      briefRuntimeEvent: "check",
+      briefCheckId: checkId,
+      enforcement,
+      riskLevel: drift.riskLevel,
+      drift: drift.drift ? "yes" : "no",
+      driftCount: enforcement === "aligned" ? priorDriftCount : priorDriftCount + 1,
+      suggestedRewrite: drift.suggestedRewrite ?? "",
+      queuedDecisionId: decisionId ?? "",
+      section: drift.section ?? "",
+      sourceMemoryId: drift.memory?.id ?? "",
+      reason: drift.reason,
+    },
+    now,
+  });
+  const activity = next.agentActivities[0];
+  return {
+    state: next,
+    check: {
+      id: checkId,
+      missionId,
+      agentId,
+      plan,
+      enforcement,
+      drift: drift.drift,
+      riskLevel: drift.riskLevel,
+      reason: drift.reason,
+      section: drift.section,
+      sourceMemoryId: drift.memory?.id,
+      suggestedRewrite: drift.suggestedRewrite,
+      queuedDecisionId: decisionId,
+      driftCount: activity.evidence?.driftCount ?? (drift.drift ? priorDriftCount + 1 : priorDriftCount),
+      activityId: activity.id,
+      createdAt: now,
+    },
+    decision: decisionId ? next.decisions.find((decision) => decision.id === decisionId) : null,
+  };
+}
+
+export function getBriefRuntimeStatus(state, options = {}) {
+  const missionId = options.missionId ?? options.mission ?? options.goal;
+  const agentId = options.agentId ?? options.agent;
+  const activities = (state.agentActivities ?? [])
+    .filter((activity) => !missionId || activity.missionId === missionId)
+    .filter((activity) => !agentId || activity.agentId === agentId);
+  const delivered = activities.some((activity) => activity.type === "profile_brief" || /profile brief/i.test(`${activity.type} ${activity.summary} ${activity.target}`));
+  const acknowledged = activities.some((activity) => activity.evidence?.briefRuntimeEvent === "acknowledged" || /brief acknowledged/i.test(activity.summary ?? ""));
+  const checks = activities.filter((activity) => activity.evidence?.briefCheckId || /brief check/i.test(`${activity.target} ${activity.summary}`));
+  const latest = checks[0] ?? null;
+  const driftChecks = checks.filter((activity) => ["nudge", "queue", "pause"].includes(activity.evidence?.enforcement));
+  return {
+    missionId,
+    agentId,
+    briefDelivered: delivered,
+    briefAcknowledged: acknowledged,
+    lastBriefCheck: latest?.evidence?.enforcement ?? "none",
+    lastBriefCheckId: latest?.evidence?.briefCheckId,
+    driftCount: driftChecks.length,
+    enforcementState: latest?.evidence?.enforcement ?? "none",
+    lastActivityAt: latest?.createdAt,
+    checks,
+  };
+}
+
+export function recordBriefCorrection(state, options = {}) {
+  const now = options.now ?? new Date().toISOString();
+  const checkId = options.checkId ?? options.check;
+  const verdict = normalizeBriefCorrectionVerdict(options.verdict);
+  const note = redactSensitiveText(options.note ?? options.preference ?? "");
+  if (!checkId) throw new Error("checkId is required");
+  if (!note) throw new Error("note is required");
+  const checkActivity = findBriefCheckActivity(state, checkId);
+  if (!checkActivity) throw new Error(`Brief check not found: ${checkId}`);
+  const correction = {
+    id: options.id ?? `correction-brief-${compactTimestamp(now)}-${(state.corrections?.length ?? 0) + 1}`,
+    decisionId: checkId,
+    briefCheckId: checkId,
+    missionId: checkActivity.missionId,
+    agentId: checkActivity.agentId,
+    verdict,
+    preference: briefCorrectionMemoryText(verdict, note),
+    note,
+    status: "pending",
+    createdAt: now,
+  };
+  const memory = {
+    id: options.memoryId ?? `memory-${compactTimestamp(now)}-${(state.memories?.length ?? 0) + 1}`,
+    memoryClass: verdict === "always_queue" ? "authority_boundary" : "standing_preference",
+    text: correction.preference,
+    source: "brief_correction",
+    sourceRef: checkId,
+    confidence: 0.82,
+    status: "pending_review",
+    createdAt: now,
+    evidence: {
+      provider: "klemm_brief",
+      sourceRef: checkId,
+      verdict,
+      note,
+    },
+  };
+  const next = updateState(
+    {
+      ...state,
+      corrections: [correction, ...(state.corrections ?? [])],
+      memories: [memory, ...(state.memories ?? [])],
+      sourceEvidenceLinks: [
+        {
+          id: `source-link-${compactTimestamp(now)}-brief-correction`,
+          memoryId: memory.id,
+          sourceRef: checkId,
+          decisionId: checkId,
+          createdAt: now,
+        },
+        ...(state.sourceEvidenceLinks ?? []),
+      ],
+    },
+    now,
+    {
+      type: "brief_correction_recorded",
+      at: now,
+      missionId: checkActivity.missionId,
+      agentId: checkActivity.agentId,
+      correctionId: correction.id,
+      memoryId: memory.id,
+      summary: correction.preference,
+    },
+  );
+  return { state: next, correction, memory };
+}
+
 export function evaluateAgentAlignment(state, options = {}) {
   const now = options.now ?? new Date().toISOString();
   const mission = findMission(state, options.missionId);
@@ -2592,6 +2781,104 @@ function normalizeActivityType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
   const known = new Set(["session_start", "session_finish", "plan", "command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "uncertainty", "debrief", "activity"]);
   return known.has(value) ? value : "activity";
+}
+
+function countBriefChecks(state, { missionId } = {}) {
+  return (state.agentActivities ?? []).filter((activity) => activity.missionId === missionId && activity.evidence?.briefCheckId).length;
+}
+
+function countBriefDrift(state, { missionId, agentId } = {}) {
+  return (state.agentActivities ?? [])
+    .filter((activity) => activity.missionId === missionId)
+    .filter((activity) => !agentId || activity.agentId === agentId)
+    .filter((activity) => ["nudge", "queue", "pause"].includes(activity.evidence?.enforcement)).length;
+}
+
+function findBriefCheckActivity(state, checkId) {
+  return (state.agentActivities ?? []).find((activity) => activity.evidence?.briefCheckId === checkId);
+}
+
+function classifyBriefPlanDrift(state, { missionId, agentId, plan, priorDriftCount } = {}) {
+  const lower = String(plan ?? "").toLowerCase();
+  const highRisk = /push|github|origin|deploy|production|external|credential|oauth|publish|financial|legal|reputation/.test(lower);
+  const skipTests = /skip tests?|without tests?|no tests?|call it done|ignore tests?/i.test(plan ?? "");
+  const match = selectBriefMemory(state, plan, { highRisk, skipTests });
+  if (highRisk) {
+    return {
+      enforcement: "queue",
+      drift: true,
+      riskLevel: "high",
+      section: "Authority boundaries",
+      memory: match,
+      reason: "High-risk brief conflict queued.",
+      suggestedRewrite: "Queue this for Kyle instead of taking external, credential, deploy, publish, financial, legal, reputation, OAuth, or git push action.",
+    };
+  }
+  if (skipTests) {
+    if (priorDriftCount >= 2) {
+      return {
+        enforcement: "pause",
+        drift: true,
+        riskLevel: "medium",
+        section: "Working style",
+        memory: match,
+        reason: "Repeated brief drift paused the agent.",
+        suggestedRewrite: "Pause and ask Kyle before continuing. Then restart with focused tests, relevant verification, and debrief.",
+      };
+    }
+    return {
+      enforcement: "nudge",
+      drift: true,
+      riskLevel: "medium",
+      section: "Working style",
+      memory: match,
+      reason: "Plan skips verification that Kyle's brief expects.",
+      suggestedRewrite: "Run focused tests or a focused verification pass, then debrief what changed and what remains.",
+    };
+  }
+  return {
+    enforcement: "aligned",
+    drift: false,
+    riskLevel: "low",
+    section: "Working style",
+    memory: match,
+    reason: "Plan is local and aligned with the active brief.",
+  };
+}
+
+function selectBriefMemory(state, text, { highRisk = false, skipTests = false } = {}) {
+  const reviewed = (state.memories ?? []).filter((memory) => ["approved", "pinned"].includes(memory.status));
+  const preferred = highRisk
+    ? reviewed.filter((memory) => /push|github|deploy|external|credential|oauth|approval|queue/i.test(memory.text ?? ""))
+    : skipTests
+      ? reviewed.filter((memory) => /test|verify|verification|debrief|no corners|focused/i.test(memory.text ?? ""))
+      : reviewed;
+  return findBestMemoryByTerms(preferred.length > 0 ? preferred : reviewed, text);
+}
+
+function findBestMemoryByTerms(memories, text) {
+  const terms = String(text ?? "")
+    .toLowerCase()
+    .split(/[^a-z0-9']+/)
+    .filter((term) => term.length >= 4);
+  return memories
+    .map((memory) => ({
+      memory,
+      score: terms.reduce((total, term) => total + (String(memory.text ?? "").toLowerCase().includes(term) ? 1 : 0), 0),
+    }))
+    .sort((a, b) => b.score - a.score)[0]?.memory ?? memories[0];
+}
+
+function normalizeBriefCorrectionVerdict(verdict) {
+  const normalized = String(verdict ?? "").trim().toLowerCase().replaceAll("-", "_");
+  if (["not_drift", "always_queue", "allow_locally"].includes(normalized)) return normalized;
+  throw new Error("verdict must be not_drift, always_queue, or allow_locally");
+}
+
+function briefCorrectionMemoryText(verdict, note) {
+  if (verdict === "not_drift") return `This was not drift: ${note}`;
+  if (verdict === "always_queue") return `Always queue this kind of brief drift: ${note}`;
+  return `Allow locally when this comes up again: ${note}`;
 }
 
 function findMission(state, missionId) {

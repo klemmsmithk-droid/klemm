@@ -90,6 +90,21 @@ export function createKlemmHttpServer({ getState, saveState }) {
         }, { getState, saveState });
       }
 
+      if (request.method === "POST" && url.pathname === "/api/brief/acknowledge") {
+        return runTool(response, "brief_acknowledge", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/brief/check") {
+        return runTool(response, "brief_check", await readJson(request), { getState, saveState });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/brief/status") {
+        return runTool(response, "brief_status", {
+          missionId: url.searchParams.get("mission") ?? url.searchParams.get("missionId"),
+          agentId: url.searchParams.get("agent") ?? url.searchParams.get("agentId"),
+        }, { getState, saveState });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/agents/register") {
         return runTool(response, "register_agent", await readJson(request), { getState, saveState });
       }

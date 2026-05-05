@@ -21,9 +21,10 @@ Session start checklist:
 2. Start with `klemm codex wrap --id <mission-id> --goal "<goal>" --plan "<plan>" --dry-run -- <first-command>` when the first command needs preflight, or `klemm codex dogfood` when only opening the hub mission.
 3. Fetch the Kyle profile brief first with `$KLEMM_USER_BRIEF_COMMAND` or `klemm user brief --for codex --mission <mission-id>`.
 4. Acknowledge the brief with `klemm brief acknowledge --mission <mission-id> --agent agent-codex`.
-5. Fetch `klemm codex context --mission <mission-id>` before making decisions.
-6. Register subagents before they begin work.
-7. Use `klemm queue inspect <decision-id>` for any queued or rewritten action.
+5. Check the plan against the brief with `klemm brief check --mission <mission-id> --agent agent-codex --plan "<plan>"` before executing it.
+6. Fetch `klemm codex context --mission <mission-id>` before making decisions.
+7. Register subagents before they begin work.
+8. Use `klemm queue inspect <decision-id>` for any queued or rewritten action.
 
 Session finish checklist:
 
@@ -109,13 +110,16 @@ Wrapped sessions also inject `KLEMM_USER_BRIEF_COMMAND`, `KLEMM_PROXY_ASK_COMMAN
 ```text
 $KLEMM_USER_BRIEF_COMMAND
 klemm brief acknowledge --mission <mission-id> --agent agent-codex
+klemm brief check --mission <mission-id> --agent agent-codex --plan "<next plan>"
 $KLEMM_PROXY_ASK_COMMAND --question "Should I continue with this plan?" --context "<recent plan/output/diff>"
 $KLEMM_PROXY_CONTINUE_COMMAND
 $KLEMM_PROXY_STATUS_COMMAND
 klemm codex report --mission <mission-id> --type plan --summary "<plan and any possible brief drift>"
 ```
 
-Embeddable adapters can use `createKlemmAdapterClient(...).proxyAsk(...)`, `.proxyContinue(...)`, and `.proxyStatus(...)` over HTTP or MCP transports. Treat high-confidence proxy answers as temporary authority for safe local work, medium-confidence answers as constrained course correction, and low-confidence/high-risk answers as a stop-and-escalate signal.
+If `klemm brief check` returns `nudge`, apply the suggested rewrite before continuing. If it returns `queue`, inspect and wait for the queued decision. If it returns `pause`, stop and ask Kyle because the agent has drifted repeatedly.
+
+Embeddable adapters can use `createKlemmAdapterClient(...).briefAcknowledge(...)`, `.briefCheck(...)`, `.briefStatus(...)`, `.proxyAsk(...)`, `.proxyContinue(...)`, and `.proxyStatus(...)` over HTTP or MCP transports. Treat high-confidence proxy answers as temporary authority for safe local work, medium-confidence answers as constrained course correction, and low-confidence/high-risk answers as a stop-and-escalate signal.
 
 When launching agent runtimes through Klemm, use the named wrapper:
 

@@ -36,6 +36,15 @@ export function createKlemmAdapterClient(options = {}) {
     async proxyStatus(payload = {}) {
       return await this.call("proxy_status", payload);
     },
+    async briefAcknowledge(payload = {}) {
+      return await this.call("brief_acknowledge", payload);
+    },
+    async briefCheck(payload = {}) {
+      return await this.call("brief_check", payload);
+    },
+    async briefStatus(payload = {}) {
+      return await this.call("brief_status", payload);
+    },
     plan(payload = {}) {
       return envelope("plan", payload);
     },
@@ -170,6 +179,9 @@ function httpToolRoute(toolName) {
   if (toolName === "proxy_ask") return { method: "POST", path: "/api/proxy/ask" };
   if (toolName === "proxy_continue") return { method: "POST", path: "/api/proxy/continue" };
   if (toolName === "proxy_status") return { method: "GET", path: "/api/proxy/status" };
+  if (toolName === "brief_acknowledge") return { method: "POST", path: "/api/brief/acknowledge" };
+  if (toolName === "brief_check") return { method: "POST", path: "/api/brief/check" };
+  if (toolName === "brief_status") return { method: "GET", path: "/api/brief/status" };
   throw new Error(`Klemm HTTP transport does not expose tool: ${toolName}`);
 }
 

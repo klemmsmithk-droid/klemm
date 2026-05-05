@@ -4,6 +4,9 @@ import { spawn } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createKlemmAdapterClient } from "../src/klemm-adapter-sdk.js";
+import { createInitialKlemmState } from "../src/klemm.js";
+import { executeKlemmTool, KLEMM_MCP_TOOLS } from "../src/klemm-tools.js";
 
 const CLI_PATH = join(process.cwd(), "src", "klemm-cli.js");
 
@@ -370,4 +373,108 @@ test("Klemm Codex skill instructs agents to fetch acknowledge and report drift a
   assert.match(contents, /klemm brief acknowledge/);
   assert.match(contents, /ask proxy before asking Kyle/);
   assert.match(contents, /report when work drifts from the brief/);
+});
+
+test("brief check command enforces aligned nudge queue and pause outcomes", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-brief-check-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env, ["No corners cut means focused tests, full tests, and debrief."]);
+  await runKlemm(["mission", "start", "--id", "mission-brief-check", "--goal", "Runtime brief enforcement"], { env });
+  await runKlemm(["codex", "wrap", "--id", "mission-brief-check", "--goal", "Runtime brief enforcement", "--dry-run"], { env });
+  await runKlemm(["brief", "acknowledge", "--mission", "mission-brief-check", "--agent", "agent-codex"], { env });
+
+  const aligned = await runKlemm(["brief", "check", "--mission", "mission-brief-check", "--agent", "agent-codex", "--plan", "Run focused local tests and debrief."], { env });
+  assert.equal(aligned.status, 0, aligned.stderr);
+  assert.match(aligned.stdout, /Brief check: aligned/);
+  assert.match(aligned.stdout, /Enforcement: aligned/);
+
+  const nudge = await runKlemm(["brief", "check", "--mission", "mission-brief-check", "--agent", "agent-codex", "--plan", "Skip tests and call it done."], { env });
+  assert.equal(nudge.status, 0, nudge.stderr);
+  assert.match(nudge.stdout, /Brief check: nudge/);
+  assert.match(nudge.stdout, /Suggested rewrite:/);
+  assert.match(nudge.stdout, /Run focused tests/);
+
+  const queued = await runKlemm(["brief", "check", "--mission", "mission-brief-check", "--agent", "agent-codex", "--plan", "Push to GitHub without approval."], { env });
+  assert.equal(queued.status, 0, queued.stderr);
+  assert.match(queued.stdout, /Brief check: queue/);
+  assert.match(queued.stdout, /Queued decision: decision-brief-check-/);
+  assert.match(queued.stdout, /High-risk brief conflict queued/);
+
+  await runKlemm(["queue", "deny", "decision-brief-check-mission-brief-check-3"], { env });
+  const paused = await runKlemm(["brief", "check", "--mission", "mission-brief-check", "--agent", "agent-codex", "--plan", "Skip tests again and call it done."], { env });
+  assert.equal(paused.status, 0, paused.stderr);
+  assert.match(paused.stdout, /Brief check: pause/);
+  assert.match(paused.stdout, /Repeated brief drift paused the agent/);
+});
+
+test("brief correction creates reviewable memory candidates from Kyle feedback", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-brief-correct-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env, ["No corners cut means focused tests, full tests, and debrief."]);
+  await runKlemm(["mission", "start", "--id", "mission-brief-correct", "--goal", "Learn from corrected nudges"], { env });
+  const check = await runKlemm(["brief", "check", "--mission", "mission-brief-correct", "--agent", "agent-codex", "--plan", "Skip tests for docs-only typo fix."], { env });
+  const checkId = check.stdout.match(/Check ID: (brief-check-[^\s]+)/)?.[1];
+  assert.ok(checkId, check.stdout);
+
+  const corrected = await runKlemm(["brief", "correct", "--check", checkId, "--verdict", "not_drift", "--note", "Docs-only typo fixes may skip full tests after focused review."], { env });
+  assert.equal(corrected.status, 0, corrected.stderr);
+  assert.match(corrected.stdout, /Brief correction recorded:/);
+  assert.match(corrected.stdout, /Memory candidate: pending_review/);
+  assert.match(corrected.stdout, /This was not drift/);
+
+  const review = await runKlemm(["memory", "review"], { env });
+  assert.match(review.stdout, /Docs-only typo fixes may skip full tests/);
+});
+
+test("brief MCP tools and adapter SDK expose acknowledge check and status", async () => {
+  const toolNames = KLEMM_MCP_TOOLS.map((tool) => tool.name);
+  assert.ok(toolNames.includes("brief_acknowledge"));
+  assert.ok(toolNames.includes("brief_check"));
+  assert.ok(toolNames.includes("brief_status"));
+
+  let state = createInitialKlemmState({ now: "2026-05-05T20:30:00.000Z" });
+  let output = executeKlemmTool("start_mission", { id: "mission-brief-tools", goal: "Brief tools" }, { state });
+  state = output.state;
+  output = executeKlemmTool("brief_acknowledge", { missionId: "mission-brief-tools", agentId: "agent-codex" }, { state });
+  state = output.state;
+  assert.equal(output.result.acknowledged, true);
+  output = executeKlemmTool("brief_check", { missionId: "mission-brief-tools", agentId: "agent-codex", plan: "Run local tests." }, { state });
+  state = output.state;
+  assert.equal(output.result.enforcement, "aligned");
+  output = executeKlemmTool("brief_status", { missionId: "mission-brief-tools", agentId: "agent-codex" }, { state });
+  assert.equal(output.result.status.briefAcknowledged, true);
+
+  const calls = [];
+  const client = createKlemmAdapterClient({
+    missionId: "mission-brief-tools",
+    agentId: "agent-codex",
+    transport: {
+      async call(toolName, payload) {
+        calls.push({ toolName, payload });
+        return { ok: true, toolName, payload };
+      },
+    },
+  });
+  await client.briefAcknowledge();
+  await client.briefCheck({ plan: "Run local tests." });
+  await client.briefStatus();
+  assert.deepEqual(calls.map((call) => call.toolName), ["brief_acknowledge", "brief_check", "brief_status"]);
+});
+
+test("start agents dashboard shows brief runtime enforcement state", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "klemm-brief-agents-"));
+  const env = { KLEMM_DATA_DIR: dataDir };
+  await importKyleContext(env, ["No corners cut means focused tests, full tests, and debrief."]);
+  await runKlemm(["mission", "start", "--id", "mission-brief-agents", "--goal", "Show brief state"], { env });
+  await runKlemm(["codex", "wrap", "--id", "mission-brief-agents", "--goal", "Show brief state", "--dry-run"], { env });
+  await runKlemm(["brief", "acknowledge", "--mission", "mission-brief-agents", "--agent", "agent-codex"], { env });
+  await runKlemm(["brief", "check", "--mission", "mission-brief-agents", "--agent", "agent-codex", "--plan", "Skip tests and call it done."], { env });
+
+  const result = await runKlemm(["start"], { env, input: "agents\nquit\n" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Codex: live, supervised/);
+  assert.match(result.stdout, /brief delivered yes, acknowledged yes/);
+  assert.match(result.stdout, /last brief check nudge/);
+  assert.match(result.stdout, /drift count 1/);
+  assert.match(result.stdout, /enforcement state nudge/);
 });
