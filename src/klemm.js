@@ -63,6 +63,11 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     proxyAnswers: [],
     proxyContinuations: [],
     proxyReviews: [],
+    autopilotSessions: [],
+    autopilotTicks: [],
+    autopilotPrompts: [],
+    autopilotStops: [],
+    dogfood80Runs: [],
     agentActivities: [],
     alignmentReports: [],
     agentInterventions: [],
@@ -1409,6 +1414,11 @@ export function migrateKlemmState(state, { now = new Date().toISOString(), targe
     proxyAnswers: state.proxyAnswers ?? [],
     proxyContinuations: state.proxyContinuations ?? [],
     proxyReviews: state.proxyReviews ?? [],
+    autopilotSessions: state.autopilotSessions ?? [],
+    autopilotTicks: state.autopilotTicks ?? [],
+    autopilotPrompts: state.autopilotPrompts ?? [],
+    autopilotStops: state.autopilotStops ?? [],
+    dogfood80Runs: state.dogfood80Runs ?? [],
     schemaMigrations: state.schemaMigrations ?? [],
     policies: state.policies ?? [],
     agentActivities: state.agentActivities ?? [],
@@ -2032,6 +2042,8 @@ export function summarizeDebrief(state, { missionId } = {}) {
   const alignmentReports = mission ? (state.alignmentReports ?? []).filter((report) => report.missionId === mission.id) : state.alignmentReports ?? [];
   const agentInterventions = mission ? (state.agentInterventions ?? []).filter((intervention) => intervention.missionId === mission.id) : state.agentInterventions ?? [];
   const agentActivities = mission ? (state.agentActivities ?? []).filter((activity) => activity.missionId === mission.id) : state.agentActivities ?? [];
+  const autopilotTicks = mission ? (state.autopilotTicks ?? []).filter((tick) => tick.missionId === mission.id) : state.autopilotTicks ?? [];
+  const autopilotStops = mission ? (state.autopilotStops ?? []).filter((stop) => stop.missionId === mission.id) : state.autopilotStops ?? [];
   const helperStream = latestHelperStreamForMission(state, mission?.id);
   const lines = [
     "Klemm debrief",
@@ -2055,6 +2067,8 @@ export function summarizeDebrief(state, { missionId } = {}) {
     `Sync bundles: ${(state.syncBundles ?? []).length}`,
     `Security runs: ${(state.securityRuns ?? []).length}`,
     `Agent activities: ${agentActivities.length}`,
+    `Autopilot ticks: ${autopilotTicks.length}`,
+    `Autopilot stops: ${autopilotStops.length}`,
     `Latest alignment: ${alignmentReports[0]?.state ?? "none"}`,
     `Active interventions: ${agentInterventions.filter((intervention) => intervention.status === "active").length}`,
     "Recent events:",
@@ -2063,6 +2077,10 @@ export function summarizeDebrief(state, { missionId } = {}) {
     ...(agentActivities.length === 0
       ? ["- none"]
       : agentActivities.slice(0, 8).map((activity) => `- ${activity.id} ${activity.type}: ${redactSensitiveText(activity.summary)} ${redactSensitiveText(activity.target ?? "")}`)),
+    "Recent autopilot:",
+    ...(autopilotTicks.length === 0
+      ? ["- none"]
+      : autopilotTicks.slice(0, 5).map((tick) => `- ${tick.id} ${tick.decision}/${tick.confidence}: ${redactSensitiveText(tick.nextPrompt ?? tick.reason ?? "")}`)),
     "Recent supervised runs:",
     ...(supervisedRuns.length === 0
       ? ["- none"]

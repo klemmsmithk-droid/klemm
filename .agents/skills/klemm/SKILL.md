@@ -9,7 +9,7 @@ Klemm is the user's local personal authority layer. Codex is only a temporary hu
 
 ## Startup
 
-For the human-facing front door, prefer `klemm start`. It opens the compact terminal menu Kyle expects: Status, Directions, Context, and Agents. Use it when the user wants to configure Klemm, add standing directions, connect ChatGPT/Claude/Gemini/Codex context sources, or inspect which agents are in use.
+For the human-facing front door, prefer `klemm start`. It opens the compact terminal menu Kyle expects: Status, Autopilot, Missions, Agents, Queue, Context, Memory, Trust, Repair, and Quit. Use it when the user wants to configure Klemm, add standing directions, inspect AFK state, connect local context sources, review memory, inspect trust explanations, or see which agents are in use.
 
 When the user invokes `/klemm supervise this session` or equivalent:
 
@@ -45,6 +45,29 @@ klemm codex hub --id <mission-id> --goal "<goal>"
 ```
 
 Use `klemm install` for first install: it writes the daemon plist, migrates the store, installs the `/klemm` skill, writes MCP config, installs `klemm-codex`, creates default runtime profiles, applies a policy pack, runs doctor with daemon health skipped by default, and prints the next commands. Use `--check-health` only when the daemon is already running. Use `klemm onboard v2 --stdin` for first-run mode/source/watch-path/agent-wrapper capture and first memory approvals.
+
+## AFK Autopilot / Kyle Stand-In
+
+When Kyle asks Codex to keep working, says "what's next?", says "proceed", or gives a no-corners-cut implementation slice, prefer AFK autopilot over repeatedly returning control to Kyle. AFK mode is the product path where Klemm stands in only for safe, local, goal-aligned work and stops when risk, uncertainty, queue items, or repeated failure require the real user.
+
+```text
+klemm afk start --id <mission-id> --goal "<goal>" --agent codex -- <first-safe-command>
+klemm afk status --mission <mission-id>
+klemm afk checkpoint --mission <mission-id>
+klemm trust why --autopilot <autopilot-tick-id>
+klemm afk finish --mission <mission-id>
+```
+
+Use `klemm afk start` when the user explicitly wants a long-running or hands-off build loop. It starts the mission, acknowledges Kyle's brief, reports the plan, preflights the launch, captures supervised output, asks proxy for the next continuation, records an autopilot tick, emits debrief evidence, and stops on queue/pause. Use `klemm afk checkpoint` at safe stopping points before asking Kyle what to do next.
+
+Follow AFK decisions exactly:
+
+- `continue`: use the generated next prompt and proceed only with safe local implementation, testing, or debrief work.
+- `nudge`: apply the constraint or course correction before continuing.
+- `queue`: stop and inspect/resolve the queued decision.
+- `pause`: stop and ask Kyle because confidence, drift, or repeated failures make proxy continuation unsafe.
+
+AFK autopilot must never approve pushes, deploys, publishing, external sends, credential/OAuth changes, financial/legal/reputation actions, broad destructive work, or ambiguous product-direction choices. It may continue only agents launched through Klemm or adapters with a continuation channel; unmanaged agents are observe-and-recommend only.
 
 ## Proxy / User Stand-In
 
