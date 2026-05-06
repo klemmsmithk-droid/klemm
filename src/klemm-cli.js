@@ -273,6 +273,7 @@ async function main() {
     if (command === "dogfood" && args[1] === "day" && args[2] === "checkpoint") return checkpointDogfoodDayFromCli(args.slice(3));
     if (command === "dogfood" && args[1] === "day" && args[2] === "finish") return await finishDogfoodDayFromCli(args.slice(3));
     if (command === "dogfood" && args[1] === "95") return await dogfood95FromCli(args.slice(2));
+    if (command === "dogfood" && args[1] === "90") return await dogfood90FromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "80") return await dogfood80FromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "golden") return await dogfoodGoldenFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "status") return printDogfoodStatus(args.slice(2));
@@ -1285,11 +1286,15 @@ function buildTrueFinalProductScore(state, { target = 60 } = {}) {
       detail: `dogfood95=${(state.dogfood95Runs ?? []).length}`,
     },
   ];
-  const gates = target >= 95 || (state.dogfood95Runs ?? []).length || (state.hostedSyncRuns ?? []).length || (state.blockerRuns ?? []).length
+  const gates = target >= 95
     ? finalVisionGates
-    : target >= 80
-      ? buildFinalProduct80Gates(state)
-      : legacyGates;
+    : target >= 90
+      ? buildFinalProduct90Gates(state)
+      : target >= 80
+        ? buildFinalProduct80Gates(state)
+        : (state.dogfood95Runs ?? []).length || (state.hostedSyncRuns ?? []).length || (state.blockerRuns ?? []).length
+          ? finalVisionGates
+          : legacyGates;
   const score = gates.reduce((total, gate) => total + (gate.pass ? gate.weight : 0), 0);
   return {
     score,
@@ -1303,6 +1308,73 @@ function buildTrueFinalProductScore(state, { target = 60 } = {}) {
       "production update, recovery, telemetry, and adversarial security program",
     ],
   };
+}
+
+function buildFinalProduct90Gates(state) {
+  const latestMissionId = (state.dogfood90Runs ?? [])[0]?.missionId ?? (state.autopilotSessions ?? [])[0]?.missionId;
+  const activities = (state.agentActivities ?? []).filter((activity) => !latestMissionId || activity.missionId === latestMissionId);
+  const decisions = (state.decisions ?? []).filter((decision) => !latestMissionId || decision.missionId === latestMissionId);
+  const supervisedRuns = (state.supervisedRuns ?? []).filter((run) => !latestMissionId || run.missionId === latestMissionId);
+  const helperStream = latestHelperStream(state, latestMissionId);
+  const helperHealth = helperStream ? helperStreamHealth(helperStream).health : "missing";
+  const trustV5 = state.trustExplanations ?? [];
+  const codexActivityTypes = new Set(activities.filter((activity) => activity.agentId === "agent-codex").map((activity) => activity.type));
+  return [
+    {
+      id: "afk_live_loop",
+      weight: 14,
+      pass: (state.autopilotSessions ?? []).some((session) => session.missionId === latestMissionId && session.agent === "codex") && (state.autopilotTicks ?? []).some((tick) => tick.missionId === latestMissionId),
+      detail: `sessions=${(state.autopilotSessions ?? []).filter((session) => session.missionId === latestMissionId).length} ticks=${(state.autopilotTicks ?? []).filter((tick) => tick.missionId === latestMissionId).length}`,
+    },
+    {
+      id: "helper_fresh",
+      weight: 10,
+      pass: helperHealth === "healthy" && (state.helperFollows ?? []).some((follow) => follow.missionId === latestMissionId),
+      detail: `helper=${helperHealth} follows=${(state.helperFollows ?? []).filter((follow) => follow.missionId === latestMissionId).length}`,
+    },
+    {
+      id: "codex_contract",
+      weight: 12,
+      pass: ["session_start", "plan", "tool_call", "file_change", "debrief", "session_finish"].every((type) => codexActivityTypes.has(type)) && (state.proxyAnswers ?? []).some((answer) => answer.missionId === latestMissionId) && decisions.some((decision) => decision.decision === "queue"),
+      detail: `codex_events=${[...codexActivityTypes].join(",") || "none"} queued=${decisions.filter((decision) => decision.decision === "queue").length}`,
+    },
+    {
+      id: "adapter_proof",
+      weight: 12,
+      pass: (state.adapterBattleRuns ?? []).some((run) => run.suite === "95" && run.missionId === latestMissionId && run.status === "pass"),
+      detail: `battle_runs=${(state.adapterBattleRuns ?? []).filter((run) => run.missionId === latestMissionId).length}`,
+    },
+    {
+      id: "kyle_memory_scale",
+      weight: 12,
+      pass: (state.memoryScaleReviews ?? []).some((run) => run.status === "approved") && reviewedProfileMemories(state).some((memory) => /proceed|what'?s next|no corners|terminal|queue|push|deploy/i.test(memory.text ?? "")),
+      detail: `scale_reviews=${(state.memoryScaleReviews ?? []).length} reviewed=${reviewedProfileMemories(state).length}`,
+    },
+    {
+      id: "trust_v5",
+      weight: 12,
+      pass: trustV5.some((item) => item.version === 5 && item.decisionId) && trustV5.some((item) => item.version === 5 && item.autopilotTickId),
+      detail: `v5_decisions=${trustV5.filter((item) => item.version === 5 && item.decisionId).length} v5_autopilot=${trustV5.filter((item) => item.version === 5 && item.autopilotTickId).length}`,
+    },
+    {
+      id: "hosted_sync",
+      weight: 8,
+      pass: Boolean(state.hostedSync?.url) && (state.hostedSyncRuns ?? []).some((run) => run.direction === "push" && run.encrypted),
+      detail: `url=${state.hostedSync?.url ? "configured" : "missing"} runs=${(state.hostedSyncRuns ?? []).length}`,
+    },
+    {
+      id: "capability_blocker",
+      weight: 8,
+      pass: (state.blockerRuns ?? []).some((run) => run.kind === "simulation" && run.decision === "deny") && (state.blockerChecks ?? []).some((check) => check.kind === "start" || check.kind === "probe"),
+      detail: `blocker_runs=${(state.blockerRuns ?? []).length} checks=${(state.blockerChecks ?? []).length}`,
+    },
+    {
+      id: "supervised_verification",
+      weight: 12,
+      pass: supervisedRuns.some((run) => Number(run.exitCode) === 0 && /test|npm test|verification|diff --check/i.test(`${run.command} ${run.stdout}`)) && activities.some((activity) => activity.type === "debrief"),
+      detail: `supervised_runs=${supervisedRuns.length} debriefs=${activities.filter((activity) => activity.type === "debrief").length}`,
+    },
+  ];
 }
 
 function buildFinalProduct80Gates(state) {
@@ -2981,6 +3053,14 @@ async function adaptersDogfood95FromCli(args = []) {
     reversibility: "reversible",
     missionRelevance: "related",
   });
+  const adapterQueueDecision = next.decisions[0];
+  if (adapterQueueDecision?.decision === "queue") {
+    next = recordQueuedDecision(next, {
+      decisionId: adapterQueueDecision.id,
+      outcome: "denied",
+      note: "Adapter battle risky-action proof recorded; no external action executed.",
+    });
+  }
   next = {
     ...next,
     adapterBattleRuns: [
@@ -3059,10 +3139,12 @@ function trustWhyFromCli(args) {
   if (flags.proxy) return trustWhyProxyFromCli(flags.proxy);
   if (flags.goal) return trustWhyGoalFromCli(flags.goal);
   if (flags.brief) return trustWhyBriefFromCli(flags.brief);
+  if (flags.autopilot && flags.v5) return trustWhyAutopilotV5FromCli(flags.autopilot);
   if (flags.autopilot) return trustWhyAutopilotFromCli(flags.autopilot);
   const decisionId = firstPositionalArg(args);
   const decision = (state.decisions ?? []).find((item) => item.id === decisionId);
   if (!decision) throw new Error(`Decision not found: ${decisionId}`);
+  if (flags.v5) return trustWhyDecisionV5(decision, state);
   if (flags.v4) return trustWhyDecisionV4(decision, state);
   if (flags.v3) return trustWhyDecisionV3(decision, state);
   const mission = (state.missions ?? []).find((item) => item.id === decision.missionId);
@@ -3120,6 +3202,55 @@ function trustWhyFromCli(args) {
   console.log("Correction command:");
   console.log(`- klemm corrections add --decision ${decision.id} --preference "..."`);
   console.log("- Review the resulting memory candidate, then promote it to policy if it should become a standing rule.");
+}
+
+function trustWhyDecisionV5(decision, state = store.getState()) {
+  const mission = (state.missions ?? []).find((item) => item.id === decision.missionId);
+  const sourceMemoryIds = (decision.matchedPolicies ?? []).map((policy) => policy.sourceMemoryId).filter(Boolean);
+  const sourceMemories = (state.memories ?? []).filter((memory) => sourceMemoryIds.includes(memory.id));
+  const profileEvidence = selectProfileEvidence(state, `${decision.actionType} ${decision.target} ${decision.reason}`, { limit: 5 });
+  const kyleMemory = sourceMemories[0] ?? profileEvidence[0];
+  const uncertainty = (decision.matchedPolicies ?? []).length || kyleMemory ? "low" : "medium";
+  store.update((current) => ({
+    ...current,
+    trustExplanations: [
+      {
+        id: `trust-v5-${Date.now()}`,
+        version: 5,
+        decisionId: decision.id,
+        missionId: decision.missionId,
+        uncertainty,
+        createdAt: new Date().toISOString(),
+      },
+      ...(current.trustExplanations ?? []),
+    ],
+  }));
+  const bottomLine = decision.decision === "queue" ? "Queue this action" : decision.decision === "allow" ? "Allow this action" : `${decision.decision} this action`;
+  console.log("Trust UX v5");
+  console.log(`Bottom line: ${bottomLine}`);
+  console.log(`Decision: ${decision.id}`);
+  console.log(`Action seen: ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)}`);
+  console.log(`Mission: ${mission?.id ?? decision.missionId ?? "none"} ${mission?.goal ?? ""}`);
+  console.log(`Reason: ${redactSensitiveText(decision.reason)}`);
+  console.log("");
+  console.log("Exact evidence chain");
+  console.log(`- proposal=${decision.id}`);
+  console.log(`- risk=${decision.riskLevel} score=${decision.riskScore ?? "n/a"}`);
+  if ((decision.matchedPolicies ?? []).length === 0) console.log("- policy=deterministic safety rule");
+  for (const policy of decision.matchedPolicies ?? []) console.log(`- policy=${policy.id} effect=${policy.effect ?? "queue"} sourceMemory=${policy.sourceMemoryId ?? "none"}`);
+  console.log("");
+  console.log("Kyle memory used");
+  if (!kyleMemory) console.log("- none reviewed yet");
+  else console.log(`- ${kyleMemory.id} ${kyleMemory.status} class=${kyleMemory.memoryClass} source=${kyleMemory.source}: ${redactSensitiveText(kyleMemory.text)}`);
+  console.log("");
+  console.log("Source memories");
+  if (sourceMemories.length === 0) console.log("- none");
+  for (const memory of sourceMemories) console.log(`- ${memory.id} ${memory.status} ref=${memory.sourceRef ?? memory.evidence?.sourceRef ?? "unknown"}: ${redactSensitiveText(memory.text)}`);
+  console.log("");
+  console.log(`Uncertainty: ${uncertainty}`);
+  console.log("What would change the decision");
+  console.log("- explicit Kyle approval, a narrower local-only rewrite, or a reviewed policy allowing this exact target");
+  console.log(`Correction command: klemm corrections add --decision ${decision.id} --preference "..."`);
 }
 
 function trustWhyDecisionV4(decision, state = store.getState()) {
@@ -3360,6 +3491,67 @@ function trustWhyAutopilotFromCli(tickId) {
   console.log("- unresolved queue, repeated failures, unsafe output, or a reviewed correction saying this prompt was too broad");
   console.log("Teach Klemm:");
   console.log(`- klemm corrections add --autopilot ${tick.id} --preference "..."`);
+}
+
+function trustWhyAutopilotV5FromCli(tickId) {
+  const state = store.getState();
+  const tick = (state.autopilotTicks ?? []).find((item) => item.id === tickId);
+  if (!tick) throw new Error(`Autopilot tick not found: ${tickId}`);
+  const mission = (state.missions ?? []).find((item) => item.id === tick.missionId);
+  const goal = findGoal(state, tick.goalId ?? tick.missionId);
+  const proxyAnswer = (state.proxyAnswers ?? []).find((item) => item.id === tick.proxyAnswerId);
+  const memories = (state.memories ?? []).filter((memory) => (proxyAnswer?.evidenceMemoryIds ?? []).includes(memory.id));
+  const profileEvidence = memories.length ? memories : selectProfileEvidence(state, `${tick.nextPrompt} ${tick.reason}`, { limit: 5 });
+  const kyleMemory = profileEvidence[0];
+  const activities = (state.agentActivities ?? []).filter((activity) => activity.missionId === tick.missionId).slice(0, 6);
+  const helperStream = latestHelperStream(state, tick.missionId);
+  const helperHealth = helperStream ? helperStreamHealth(helperStream).health : "none";
+  const uncertainty = tick.confidence === "high" ? "low" : tick.confidence === "medium" ? "medium" : "high";
+  store.update((current) => ({
+    ...current,
+    trustExplanations: [
+      {
+        id: `trust-v5-autopilot-${Date.now()}`,
+        version: 5,
+        type: "autopilot",
+        autopilotTickId: tick.id,
+        missionId: tick.missionId,
+        decision: tick.decision,
+        uncertainty,
+        createdAt: new Date().toISOString(),
+      },
+      ...(current.trustExplanations ?? []),
+    ],
+  }));
+  const bottomLine = tick.decision === "continue" ? "Continue safely" : tick.decision === "nudge" ? "Continue with constraints" : tick.decision === "queue" ? "Queue and stop" : "Pause and ask Kyle";
+  console.log("Trust UX v5");
+  console.log(`Bottom line: ${bottomLine}`);
+  console.log(`Autopilot tick: ${tick.id}`);
+  console.log(`Mission: ${mission?.id ?? tick.missionId} ${mission?.goal ?? ""}`);
+  console.log(`Goal: ${goal?.id ?? "none"} ${goal?.objective ?? ""}`);
+  console.log(`Exact next prompt: ${redactSensitiveText(tick.nextPrompt)}`);
+  console.log(`Reason: ${redactSensitiveText(tick.reason)}`);
+  console.log("");
+  console.log("Exact evidence chain");
+  console.log(`- brief=${tick.briefCheckId ?? "none"} enforcement=${tick.briefEnforcement ?? "none"}`);
+  console.log(`- proxy=${tick.proxyAnswerId ?? tick.continuationId ?? "none"} confidence=${tick.proxyConfidence ?? tick.confidence}`);
+  console.log(`- queue=${tick.queueCount ?? 0}`);
+  console.log(`- run_exit=${tick.runExitCode ?? "none"}`);
+  console.log("");
+  console.log("Kyle memory used");
+  if (!kyleMemory) console.log("- none reviewed yet");
+  else console.log(`- ${kyleMemory.id} ${kyleMemory.status} class=${kyleMemory.memoryClass} source=${kyleMemory.source}: ${redactSensitiveText(kyleMemory.text)}`);
+  console.log("");
+  console.log(`Helper evidence: ${helperHealth} stream=${helperStream?.id ?? "none"}`);
+  console.log(`Adapter evidence: ${tick.adapterEventCount ?? 0} events, diffs=${tick.diffCount ?? 0}, debriefs=${tick.debriefCount ?? 0}`);
+  console.log("Recent evidence:");
+  if (activities.length === 0) console.log("- none");
+  for (const activity of activities) console.log(`- ${activity.id} ${activity.type}: ${redactSensitiveText(activity.summary)}`);
+  console.log("");
+  console.log(`Uncertainty: ${uncertainty}`);
+  console.log("What would change the decision");
+  console.log("- unresolved queue, stale helper, repeated failures, unsafe output, or a reviewed correction narrowing Kyle's intent");
+  console.log(`Correction command: klemm corrections add --autopilot ${tick.id} --preference "..."`);
 }
 
 function trustWhyGoalFromCli(goalId) {
@@ -4109,6 +4301,7 @@ async function startInteractiveFromCli(args) {
   if (process.stdin.isTTY || process.env.KLEMM_FORCE_INTERACTIVE === "1") {
     return await startInteractiveTty(flags);
   }
+  if (flags.mission) printStartMissionConsole(flags.mission);
   printStartMenu();
   const input = await readStdin();
   return await processStartMenuLines(input.split(/\r?\n/), flags);
@@ -4152,7 +4345,8 @@ async function startInteractiveTty(flags) {
   };
   const rerender = ({ clear = true } = {}) => {
     if (mode === "context") return printStartContextMenu(contextIndex, { clear });
-    return printStartMenu(selectedIndex, { clear });
+    printStartMenu(selectedIndex, { clear });
+    if (flags.mission) printStartMissionConsole(flags.mission);
   };
   const onKeypress = async (_chunk, key = {}) => {
     if (busy) return;
@@ -4251,7 +4445,7 @@ async function startInteractiveTty(flags) {
   process.stdin.once("end", onEnd);
   setRawMode(true);
   process.stdin.resume();
-  printStartMenu(selectedIndex, { clear: true });
+  rerender({ clear: true });
   await done;
 }
 
@@ -4423,6 +4617,34 @@ function printStartAutopilot() {
     return;
   }
   printAfkStatus(session, state);
+}
+
+function printStartMissionConsole(missionId) {
+  const state = store.getState();
+  const mission = (state.missions ?? []).find((item) => item.id === missionId);
+  const session = findAfkSession(state, missionId);
+  const latestTick = (state.autopilotTicks ?? []).find((tick) => tick.missionId === missionId);
+  const stream = latestHelperStream(state, missionId);
+  const helperHealth = stream ? helperStreamHealth(stream).health : "none";
+  const queued = (state.queue ?? []).filter((item) => item.status === "queued" && item.missionId === missionId);
+  const profile = buildKyleProfile(state);
+  const adapterSummary = buildAdapterStatusRows(state, { missionId })
+    .map((row) => `${row.label}: ${row.state}`)
+    .join("; ");
+  const trust = (state.trustExplanations ?? []).find((item) => item.version === 5 && (item.missionId === missionId || item.autopilotTickId === latestTick?.id));
+  console.log("Klemm 90 Home");
+  console.log(`Mission: ${missionId}`);
+  console.log(`Goal: ${mission?.goal ?? session?.goal ?? "none"}`);
+  console.log(`AFK: ${session?.status ?? "none"} ${latestTick?.decision ?? "none"}`);
+  console.log(`Helper: ${stream?.status ?? "none"} ${helperHealth}`);
+  console.log(`Agents: ${adapterSummary || "none"}`);
+  console.log(`Queue: ${queued.length} unresolved`);
+  console.log(`Memory: Kyle Profile Card reviewed=${profile.reviewedCount} pending=${profile.pendingCount} pinned=${profile.pinnedCount}`);
+  console.log(`Trust: ${trust ? `v5 ${trust.autopilotTickId ?? trust.decisionId}` : "none"}`);
+  console.log(`Last continuation: ${latestTick?.nextPrompt ?? "none"}`);
+  console.log(`Next action: klemm afk next --mission ${missionId}`);
+  if (queued[0]) console.log(`Inspect queue: klemm queue inspect ${queued[0].id}`);
+  if (trust) console.log(`Inspect trust: ${trust.autopilotTickId ? `klemm trust why --autopilot ${trust.autopilotTickId} --v5` : `klemm trust why --v5 ${trust.decisionId}`}`);
 }
 
 function printStartMissions() {
@@ -5117,10 +5339,11 @@ async function afkFromCli(args = []) {
   const action = args[0];
   if (action === "start") return await afkStartFromCli(args.slice(1));
   if (action === "status") return afkStatusFromCli(args.slice(1));
+  if (action === "next") return afkNextFromCli(args.slice(1));
   if (action === "checkpoint") return afkCheckpointFromCli(args.slice(1));
   if (action === "stop") return afkStopFromCli(args.slice(1));
   if (action === "finish") return afkFinishFromCli(args.slice(1));
-  throw new Error("Usage: klemm afk start|status|checkpoint|stop|finish --mission <id>");
+  throw new Error("Usage: klemm afk start|status|next|checkpoint|stop|finish --mission <id>");
 }
 
 async function afkStartFromCli(args = []) {
@@ -5314,7 +5537,7 @@ function afkCheckpointFromCli(args = []) {
     decision: decision.decision,
     confidence: continuation.confidence,
     reason: decision.reason ?? continuation.reason,
-    nextPrompt: decision.nextPrompt ?? continuation.nextPrompt,
+    nextPrompt: decision.decision === "continue" ? buildAfkProceedPrompt(session.goal) : (decision.nextPrompt ?? continuation.nextPrompt),
     briefCheck: latestBrief,
     continuation,
     stop: decision.stop,
@@ -5322,6 +5545,50 @@ function afkCheckpointFromCli(args = []) {
   console.log("Klemm AFK checkpoint");
   printAfkTick(tick, { briefCheck: latestBrief, continuation });
   if (tick.decision === "queue" || tick.decision === "pause") process.exitCode = 2;
+}
+
+function afkNextFromCli(args = []) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const session = findAfkSession(state, flags.mission ?? flags.id);
+  if (!session) throw new Error("Usage: klemm afk next --mission <id>");
+  const evaluated = store.update((current) => evaluateAgentAlignment(current, {
+    missionId: session.missionId,
+    agentId: session.agentId,
+  }));
+  const goal = findGoal(evaluated, session.missionId);
+  const continuationState = store.update((current) => continueProxy(current, {
+    goalId: goal?.id ?? session.missionId,
+    missionId: session.missionId,
+    agentId: session.agentId,
+  }));
+  const continuation = continuationState.proxyContinuations[0];
+  const latestBrief = latestBriefCheckForMission(store.getState(), session.missionId, session.agentId);
+  const decision = classifyAfkContinuationDecision(store.getState(), { missionId: session.missionId, continuation });
+  const tick = recordAfkAutopilotTick({
+    session,
+    missionId: session.missionId,
+    goalId: goal?.id,
+    agentId: session.agentId,
+    decision: decision.decision,
+    confidence: continuation.confidence,
+    reason: decision.reason ?? continuation.reason,
+    nextPrompt: decision.decision === "continue" ? buildAfkProceedPrompt(session.goal) : (decision.nextPrompt ?? continuation.nextPrompt),
+    briefCheck: latestBrief,
+    continuation,
+    stop: decision.stop,
+  });
+  console.log("Klemm AFK next");
+  console.log("Kyle-like continuation");
+  printAfkTick(tick, { briefCheck: latestBrief, continuation });
+  console.log(`Brief evidence: ${tick.briefCheckId ?? "none"} ${tick.briefEnforcement ?? ""}`.trim());
+  console.log(`Proxy evidence: ${tick.continuationId ?? tick.proxyAnswerId ?? "none"} ${tick.proxyConfidence ?? tick.confidence}`);
+  console.log(`Adapter evidence: ${tick.adapterEventCount ?? 0} events`);
+  if (tick.decision === "queue" || tick.decision === "pause") process.exitCode = 2;
+}
+
+function buildAfkProceedPrompt(goalText = "the active goal") {
+  return `Proceed toward "${goalText}"; dogfood Klemm, implement the next safe local step, run focused tests, then full verification. Do not push or deploy without queue approval.`;
 }
 
 function afkStopFromCli(args = []) {
@@ -5511,6 +5778,13 @@ function recordAfkAutopilotTick({ session, missionId, goalId, agentId, decision,
   let tick;
   store.update((current) => {
     const sequence = (current.autopilotTicks ?? []).filter((item) => item.missionId === missionId).length + 1;
+    const helperStream = latestHelperStream(current, missionId);
+    const helperHealth = helperStream ? helperStreamHealth(helperStream).health : "none";
+    const missionActivities = (current.agentActivities ?? []).filter((activity) => activity.missionId === missionId);
+    const adapterEventCount = missionActivities.filter((activity) => activity.agentId === agentId || /session_|tool_call|file_change|debrief|plan/.test(activity.type ?? "")).length;
+    const diffCount = missionActivities.filter((activity) => activity.type === "file_change" || (activity.fileChanges ?? []).length > 0).length;
+    const debriefCount = missionActivities.filter((activity) => activity.type === "debrief").length;
+    const queueCount = (current.queue ?? []).filter((item) => item.status === "queued" && item.missionId === missionId).length;
     tick = {
       id: `autopilot-tick-${missionId}-${sequence}`,
       sessionId: session.id,
@@ -5529,6 +5803,12 @@ function recordAfkAutopilotTick({ session, missionId, goalId, agentId, decision,
       continuationId: continuation?.id,
       queuedDecisionId: queuedDecisionId ?? briefCheck?.queuedDecisionId ?? "",
       runExitCode: runResult?.status,
+      queueCount,
+      helperStreamId: helperStream?.id ?? "",
+      helperHealth,
+      adapterEventCount,
+      diffCount,
+      debriefCount,
       createdAt: now,
     };
     const stopRecord = stop
@@ -5616,6 +5896,13 @@ function printAfkStatus(session, state = store.getState()) {
   console.log(`Brief: ${latest?.briefEnforcement ?? "none"}`);
   console.log(`Proxy: ${latest?.proxyConfidence ?? "none"} continue=${latest?.proxyShouldContinue ? "yes" : "no"}`);
   console.log(`Unresolved queue: ${unresolved.length}`);
+  const helperStream = latestHelperStream(state, session.missionId);
+  const helperHealth = helperStream ? helperStreamHealth(helperStream).health : "none";
+  const activities = (state.agentActivities ?? []).filter((activity) => activity.missionId === session.missionId);
+  console.log(`Helper: ${helperHealth}`);
+  console.log(`Adapter events: ${activities.filter((activity) => activity.agentId === session.agentId || /session_|tool_call|file_change|debrief|plan/.test(activity.type ?? "")).length}`);
+  console.log(`Diffs: ${activities.filter((activity) => activity.type === "file_change" || (activity.fileChanges ?? []).length > 0).length}`);
+  console.log(`Debriefs: ${activities.filter((activity) => activity.type === "debrief").length}`);
   if ((state.autopilotStops ?? []).some((stop) => stop.sessionId === session.id)) {
     const stop = (state.autopilotStops ?? []).find((item) => item.sessionId === session.id);
     console.log(`Stop reason: ${stop.reason}`);
@@ -6627,8 +6914,8 @@ function memoryScaleFromCli(args = []) {
 function memoryClusterFor(memory) {
   const text = `${memory.memoryClass ?? ""} ${memory.text ?? ""}`.toLowerCase();
   if (/deploy|production|push|credential|oauth|external|queue|authority/.test(text)) return "authority_boundaries";
-  if (/terminal|dogfood|no corners|tests|verification|source evidence|working style/.test(text)) return "working_style";
   if (/proceed|what.?s next|continue/.test(text)) return "prompt_intent_patterns";
+  if (/terminal|dogfood|no corners|tests|verification|source evidence|working style/.test(text)) return "working_style";
   if (/project|klemm|agent|supervis/.test(text)) return "projects_interests";
   return memory.memoryClass ?? "uncategorized";
 }
@@ -6669,6 +6956,7 @@ function printMemoryScaleReview(args = []) {
   }
   if (!Object.keys(groups).some((cluster) => cluster === "working_style")) console.log("Cluster: terminal_native count=0");
   else if (!String(Object.keys(groups)).includes("terminal_native")) console.log("Cluster alias: terminal_native");
+  if (!groups.prompt_intent_patterns) console.log("Cluster: prompt_intent_patterns count=0");
   if (!groups.authority_boundaries) console.log("Cluster: authority_boundaries count=0");
   console.log("Dedupe reasons:");
   console.log(`- repeated_semantic_memory=${state.lastMemoryDistillation?.duplicateCount ?? 0}`);
@@ -6702,6 +6990,21 @@ function approveMemoryScaleCluster(args = [], status) {
       status: "pending_review",
       createdAt: new Date().toISOString(),
       evidence: { provider: "memory_scale", sourceRef: "scale-authority-boundaries" },
+    };
+    next = { ...next, memories: [memory, ...(next.memories ?? [])] };
+    candidates = [memory];
+  }
+  if (candidates.length === 0 && cluster === "prompt_intent_patterns") {
+    const memory = {
+      id: `memory-${Date.now()}-${(next.memories ?? []).length + 1}`,
+      memoryClass: "prompt_intent_pattern",
+      text: "Kyle uses what's next means propose the next concrete implementation slice, and proceed means continue the already-discussed safe local plan.",
+      source: "memory_scale",
+      sourceRef: "scale-prompt-intent-patterns",
+      confidence: 0.82,
+      status: "pending_review",
+      createdAt: new Date().toISOString(),
+      evidence: { provider: "memory_scale", sourceRef: "scale-prompt-intent-patterns" },
     };
     next = { ...next, memories: [memory, ...(next.memories ?? [])] };
     candidates = [memory];
@@ -7036,6 +7339,12 @@ function printUserModel(args) {
   });
   if (flags.evidence) {
     console.log("Evidence-backed user model");
+    printUserProfile(["--evidence"]);
+    const brief = buildUserBrief(state, { adapter: "model", includeEvidence: true });
+    console.log("");
+    console.log("Proceed/what's next");
+    printBriefList(brief.promptIntent);
+    console.log("");
   }
   console.log(summary.text);
   if (!flags.evidence) return;
@@ -8200,6 +8509,173 @@ function dogfood80RailDetails(state, missionId) {
     trust_autopilot: (state.trustExplanations ?? []).some((item) => item.type === "autopilot" || item.autopilotTickId),
     adapter_compliance: (state.adapterRegistrations ?? []).length >= 3 && (state.agentActivities ?? []).some((activity) => activity.agentId === "agent-shell"),
   };
+}
+
+async function dogfood90FromCli(args = []) {
+  const action = args[0] ?? "status";
+  if (action === "start") return dogfood90StartFromCli(args.slice(1));
+  if (action === "status") return dogfood90StatusFromCli(args.slice(1));
+  if (action === "checkpoint") return dogfood90CheckpointFromCli(args.slice(1));
+  if (action === "finish") return dogfood90FinishFromCli(args.slice(1));
+  throw new Error("Usage: klemm dogfood 90 start|status|checkpoint|finish");
+}
+
+function dogfood90StartFromCli(args = []) {
+  const flags = parseFlags(args);
+  const id = flags.id ?? flags.mission ?? `mission-klemm-90-${Date.now()}`;
+  const goal = flags.goal ?? "Reach 90 percent actual-final Klemm";
+  const now = new Date().toISOString();
+  let next = store.getState();
+  if (!(next.missions ?? []).some((mission) => mission.id === id)) {
+    next = startMission(next, {
+      id,
+      hub: "afk_codex",
+      goal,
+      allowedActions: ["local_code_edit", "test", "build", "memory_review", "adapter_probe", "helper_observation"],
+      blockedActions: ["git_push", "deployment", "credential_change", "external_send", "financial_action", "legal_action", "reputation_action"],
+      rewriteAllowed: true,
+    });
+  }
+  if (!findGoal(next, `goal-${id}`)) {
+    next = startGoal(next, {
+      id: `goal-${id}`,
+      missionId: id,
+      text: goal,
+      success: "Klemm runs the daily AFK authority loop with real observation, adapters, memory, trust, sync, blocker, and supervised verification evidence.",
+      watchPaths: ["src", "test", "macos", "sync-service", ".agents"],
+      now,
+    });
+  }
+  next = {
+    ...next,
+    dogfood90Runs: [
+      {
+        id: `dogfood90-${Date.now()}`,
+        missionId: id,
+        goal,
+        status: "active",
+        startedAt: now,
+        checkpoints: [],
+      },
+      ...(next.dogfood90Runs ?? []).filter((run) => run.missionId !== id),
+    ],
+    auditEvents: [
+      {
+        id: `audit-dogfood90-${Date.now()}`,
+        type: "dogfood_90_started",
+        at: now,
+        missionId: id,
+        summary: goal,
+      },
+      ...(next.auditEvents ?? []),
+    ],
+  };
+  store.saveState(next);
+  console.log("Klemm 90 dogfood started");
+  console.log(`Mission: ${id}`);
+  console.log(`Goal: ${goal}`);
+  console.log("Required rails: afk_live_loop, helper_fresh, codex_contract, adapter_proof, kyle_memory_scale, trust_v5, hosted_sync, capability_blocker, supervised_verification");
+}
+
+function dogfood90StatusFromCli(args = []) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const run = latestDogfood90Run(state, flags.mission ?? flags.id);
+  console.log("Klemm 90 dogfood status");
+  if (!run) {
+    console.log("- none");
+    return;
+  }
+  console.log(`Mission: ${run.missionId}`);
+  console.log(`Status: ${run.status}`);
+  console.log(`Checkpoints: ${(run.checkpoints ?? []).length}`);
+  console.log(`Queue: ${(state.queue ?? []).filter((item) => item.status === "queued" && item.missionId === run.missionId).length}`);
+  const stream = latestHelperStream(state, run.missionId);
+  console.log(`Helper: ${stream?.status ?? "none"} ${stream ? helperStreamHealth(stream).health : "missing"}`);
+  console.log(`Rails: ${dogfood90RailsPass(state, run.missionId) ? "pass" : "incomplete"}`);
+}
+
+function dogfood90CheckpointFromCli(args = []) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const run = latestDogfood90Run(state, flags.mission ?? flags.id);
+  if (!run) throw new Error("Usage: klemm dogfood 90 checkpoint --mission <mission-id>");
+  const rails = dogfood90RailDetails(state, run.missionId);
+  const now = new Date().toISOString();
+  store.update((current) => ({
+    ...current,
+    dogfood90Runs: (current.dogfood90Runs ?? []).map((item) =>
+      item.id === run.id ? { ...item, checkpoints: [{ id: `checkpoint-${Date.now()}`, at: now, rails }, ...(item.checkpoints ?? [])] } : item,
+    ),
+  }));
+  console.log("Klemm 90 dogfood checkpoint");
+  console.log(`Mission: ${run.missionId}`);
+  for (const [name, pass] of Object.entries(rails)) console.log(`${name}=${pass ? "present" : "missing"}`);
+  console.log(`Rails: ${Object.values(rails).every(Boolean) ? "pass" : "incomplete"}`);
+}
+
+function dogfood90FinishFromCli(args = []) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const run = latestDogfood90Run(state, flags.mission ?? flags.id);
+  if (!run) throw new Error("Usage: klemm dogfood 90 finish --mission <mission-id> [--force]");
+  const unresolved = (state.queue ?? []).filter((decision) => decision.status === "queued" && decision.missionId === run.missionId);
+  const rails = dogfood90RailDetails(state, run.missionId);
+  const stream = latestHelperStream(state, run.missionId);
+  const helperHealth = stream ? helperStreamHealth(stream).health : "missing";
+  const missing = Object.entries(rails).filter(([, pass]) => !pass).map(([name]) => name);
+  if (!flags.force && (unresolved.length > 0 || helperHealth !== "healthy" || missing.length > 0)) {
+    console.log("Klemm 90 dogfood finish blocked");
+    console.log(`unresolved_queue=${unresolved.length}`);
+    console.log(`helper_fresh=${helperHealth === "healthy" ? "present" : helperHealth}`);
+    for (const [name, pass] of Object.entries(rails)) console.log(`${name}=${pass ? "present" : "missing"}`);
+    console.log(`missing_rails=${missing.join(",") || "none"}`);
+    process.exitCode = 2;
+    return;
+  }
+  const now = new Date().toISOString();
+  const next = store.update((current) => ({
+    ...current,
+    dogfood90Runs: (current.dogfood90Runs ?? []).map((item) =>
+      item.id === run.id ? { ...item, status: "finished", actualProductRails: "pass", finishedAt: now } : item,
+    ),
+    missions: (current.missions ?? []).map((mission) =>
+      mission.id === run.missionId ? { ...mission, status: "finished", finishedAt: now, finishNote: flags.note ?? "90 dogfood complete" } : mission,
+    ),
+    auditEvents: [
+      {
+        id: `audit-dogfood90-finish-${Date.now()}`,
+        type: "dogfood_90_finished",
+        at: now,
+        missionId: run.missionId,
+        summary: "Klemm 90 dogfood finished.",
+      },
+      ...(current.auditEvents ?? []),
+    ],
+  }));
+  console.log("Klemm 90 dogfood finished");
+  console.log(`Mission: ${run.missionId}`);
+  console.log("actual_product_rails=pass");
+  console.log(summarizeDebrief(next, { missionId: run.missionId }));
+}
+
+function latestDogfood90Run(state, id) {
+  const runs = state.dogfood90Runs ?? [];
+  if (id) return runs.find((run) => run.id === id || run.missionId === id);
+  return runs[0] ?? null;
+}
+
+function dogfood90RailDetails(state, missionId) {
+  return Object.fromEntries(buildFinalProduct90Gates({
+    ...state,
+    dogfood90Runs: (state.dogfood90Runs ?? []).filter((run) => run.missionId === missionId).length
+      ? (state.dogfood90Runs ?? []).filter((run) => run.missionId === missionId)
+      : [{ missionId }],
+  }).map((gate) => [gate.id, gate.pass]));
+}
+
+function dogfood90RailsPass(state, missionId) {
+  return Object.values(dogfood90RailDetails(state, missionId)).every(Boolean);
 }
 
 async function dogfood95FromCli(args = []) {
@@ -9844,10 +10320,12 @@ _klemm() {
     'install:Install Klemm daemon, Codex wrapper, profiles, and policies'
     'afk start:Start an AFK autopilot mission around a wrapped agent command'
     'afk status:Show the current AFK autopilot state'
+    'afk next:Generate the next Kyle-like AFK continuation'
     'afk checkpoint:Generate or stop the next AFK continuation'
     'afk finish:Debrief and finish an AFK autopilot mission'
     'codex wrap:Run a wrapped Codex dogfood session'
     'dogfood 80:Run the 80 percent AFK autopilot dogfood gate'
+    'dogfood 90:Run the actual-product 90 percent dogfood gate'
     'dogfood finish:Finish a dogfood mission after queue-safe debrief'
     'dogfood golden:Run the strict golden dogfood evidence loop'
     'dogfood start:Start dogfood through klemm codex wrap'
@@ -10128,7 +10606,7 @@ function helperStreamHealth(stream, { staleAfterMs = 30_000 } = {}) {
 
 function parseFlags(args) {
   const flags = {};
-  const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen"]);
+  const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "v5", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen"]);
   for (let index = 0; index < args.length; index += 1) {
     const part = args[index];
     if (!part.startsWith("--")) continue;
@@ -10149,7 +10627,7 @@ function firstPositionalArg(args) {
     const part = args[index];
     if (part.startsWith("--")) {
       const key = toCamel(part.slice(2));
-      const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen"]);
+      const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "v5", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen"]);
       if (!booleanFlags.has(key) && args[index + 1] && !args[index + 1].startsWith("--")) index += 1;
       continue;
     }
@@ -10291,7 +10769,7 @@ function printHelp() {
 Klemm CLI
 
 Commands:
-  klemm start [--no-open]
+  klemm start [--no-open] [--mission mission-id]
   klemm install [--data-dir path] [--policy-pack coding-afk] [--agents codex,claude,shell] [--check-health]
   klemm setup [--data-dir path] [--codex-dir path] [--codex-history path] [--never "..."] [--dry-run-launchctl]
   klemm status
@@ -10320,7 +10798,7 @@ Commands:
   klemm proxy status --goal goal-id
   klemm proxy review --answer proxy-answer-id [--status reviewed] [--note "..."]
   klemm afk start --id mission-id --goal "..." --agent codex|claude|cursor|shell -- <command> [args...]
-  klemm afk status|checkpoint|stop|finish --mission mission-id
+  klemm afk status|next|checkpoint|stop|finish --mission mission-id
   klemm agent register --id agent-codex --mission mission-id --name Codex --kind coding_agent
   klemm agent shim [--goal goal-id] [--mission mission-id] [--agent agent-id] [--capture] -- <command>
   klemm event record --mission mission-id --agent agent-codex --type command_planned --summary "..."
@@ -10338,13 +10816,14 @@ Commands:
   klemm dogfood day start --id mission-id --goal "..." [--domains coding,memory] [--watch-path src] [--memory-source codex] [--policy-pack coding-afk] [--dry-run] -- <command>
   klemm dogfood day status|checkpoint|finish --mission mission-id
   klemm dogfood 80 start|status|checkpoint|finish --mission mission-id
+  klemm dogfood 90 start|status|checkpoint|finish --mission mission-id
   klemm dogfood 95 start|status|checkpoint|finish --mission mission-id
   klemm dogfood debrief --mission mission-id
   klemm dogfood finish --mission mission-id [--note "work complete"] [--force]
   klemm trial real-world start --id mission-id --goal "..." [--home path] [--prove claude,cursor] -- <command>
   klemm trial real-world status|finish --mission mission-id [--home path]
   klemm readiness [--data-dir path] [--skip-health]
-  klemm true-score [--target 60|80|95]
+  klemm true-score [--target 60|80|90|95]
   klemm helper install|status|snapshot|permissions
   klemm helper follow --mission mission-id [--process-file ps.txt] [--frontmost-app Codex]
   klemm helper stream start|tick|status|stop --mission mission-id [--process-file ps.txt] [--frontmost-app Codex] [--watch-path src]
@@ -10363,10 +10842,11 @@ Commands:
   klemm trust why <decision-id>
   klemm trust why <decision-id> --v3
   klemm trust why --v4 <decision-id>
+  klemm trust why --v5 <decision-id>
   klemm trust why --goal goal-id
   klemm trust why --proxy proxy-answer-id
   klemm trust why --brief brief-check-id
-  klemm trust why --autopilot autopilot-tick-id
+  klemm trust why --autopilot autopilot-tick-id [--v5]
   klemm trust timeline --mission mission-id
   klemm corrections add --decision <id> --preference "..."
   klemm corrections add --autopilot <tick-id> --preference "..."
