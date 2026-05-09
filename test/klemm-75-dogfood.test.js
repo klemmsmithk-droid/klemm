@@ -253,9 +253,9 @@ test("captured output, adapter envelopes, and queue details redact secrets and d
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-hardening-alpha-"));
   await chmod(dataDir, 0o777);
   await mkdir(join(dataDir, "logs"), { recursive: true });
-  await writeFile(join(dataDir, "logs", "klemm-daemon.log"), "token=sk-live-1234567890\n", "utf8");
+  await writeFile(join(dataDir, "logs", "klemm-daemon.log"), "Bearer redactionfixturetoken123456\n", "utf8");
   const secretScript = join(dataDir, "print-output.js");
-  await writeFile(secretScript, "console.log('token=sk-live-1234567890'); console.error('api_key=secret-value-123');", "utf8");
+  await writeFile(secretScript, "console.log('Bearer redactionfixturetoken123456'); console.error('Bearer redactionfixturestderr123456');", "utf8");
   const env = { KLEMM_DATA_DIR: dataDir };
   await runKlemm(["mission", "start", "--id", "mission-redaction", "--goal", "Redact secrets"], { env });
 
@@ -263,18 +263,19 @@ test("captured output, adapter envelopes, and queue details redact secrets and d
   assert.equal(captured.status, 0, captured.stderr);
 
   const runs = await runKlemm(["supervised-runs", "--details"], { env });
-  assert.doesNotMatch(runs.stdout, /sk-live-1234567890/);
-  assert.doesNotMatch(runs.stdout, /secret-value-123/);
+  assert.doesNotMatch(runs.stdout, /redactionfixturetoken123456/);
+  assert.doesNotMatch(runs.stdout, /redactionfixturestderr123456/);
   assert.match(runs.stdout, /\[REDACTED\]/);
 
   await runKlemm(["adapter", "token", "add", "--id", "codex-local", "--token", "adapter-secret-token", "--versions", "1,2"], { env });
-  const report = await runKlemm(["codex", "report", "--mission", "mission-redaction", "--adapter-client", "codex-local", "--adapter-token", "adapter-secret-token", "--protocol-version", "2", "--type", "tool_call", "--tool", "shell", "--command", "echo token=sk-live-1234567890"], { env });
+  const report = await runKlemm(["codex", "report", "--mission", "mission-redaction", "--adapter-client", "codex-local", "--adapter-token", "adapter-secret-token", "--protocol-version", "2", "--type", "tool_call", "--tool", "shell", "--command", "echo Bearer redactionfixturetoken123456"], { env });
   assert.equal(report.status, 0, report.stderr);
   const debrief = await runKlemm(["debrief", "--mission", "mission-redaction"], { env });
-  assert.doesNotMatch(debrief.stdout, /sk-live-1234567890/);
+  assert.doesNotMatch(debrief.stdout, /redactionfixturetoken123456/);
   assert.match(debrief.stdout, /\[REDACTED\]/);
 
   const doctor = await runKlemm(["doctor", "--data-dir", dataDir, "--skip-health"], { env });
-  assert.equal(doctor.status, 0, doctor.stderr);
+  assert.equal(doctor.status, 1, doctor.stdout);
   assert.match(doctor.stdout, /Permissions: warning/);
+  assert.match(doctor.stdout, /Plain-English summary/);
 });

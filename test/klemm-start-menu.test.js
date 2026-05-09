@@ -157,7 +157,7 @@ test("klemm start supports arrow-key selection for the main menu", async () => {
 
   const result = await runKlemm(["start"], {
     env,
-    input: "\x1b[B\x1b[B\x1b[B\nquit\n",
+    input: "\x1b[B\nquit\n",
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -178,5 +178,5 @@ test("klemm start clears the terminal before interactive arrow redraws", async (
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\x1b\[2J\x1b\[H/);
-  assert.match(result.stdout, /> 2\. Directions/);
+  assert.match(result.stdout, /> 2\. Agents/);
 });

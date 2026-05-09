@@ -32,7 +32,9 @@ async function runKlemm(args, { env = {}, timeoutMs = 8000 } = {}) {
 
 test("readiness scores a complete terminal-native private-alpha loop at 100 percent", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-ready-"));
-  const env = { KLEMM_DATA_DIR: dataDir };
+  const home = join(dataDir, "home");
+  await mkdir(home, { recursive: true });
+  const env = { KLEMM_DATA_DIR: dataDir, HOME: home };
   const chatPath = join(dataDir, "chatgpt.json");
   await writeFile(chatPath, JSON.stringify([{ role: "user", content: "Never let agents deploy production without approval." }]), "utf8");
 

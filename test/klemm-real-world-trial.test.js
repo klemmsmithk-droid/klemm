@@ -66,14 +66,15 @@ test("real-world trial runs Codex through Klemm and honestly labels installed ve
   assert.match(status.stdout, /Mission: mission-real-world/);
   assert.match(status.stdout, /Codex: live, supervised/);
   assert.match(status.stdout, /Claude: installed, not seen/);
-  assert.match(status.stdout, /Cursor: MCP configured, not seen/);
+  assert.doesNotMatch(status.stdout, /Cursor:/);
   assert.match(status.stdout, /Shell: shim available/);
   assert.match(status.stdout, /Observed evidence:/);
   assert.match(status.stdout, /codex_session=yes/);
   assert.match(status.stdout, /claude_live=no/);
-  assert.match(status.stdout, /cursor_live=no/);
+  assert.doesNotMatch(status.stdout, /cursor_live=/);
   assert.match(status.stdout, /Next proof:/);
   assert.match(status.stdout, /klemm adapters proof claude/);
+  assert.doesNotMatch(status.stdout, /klemm adapters proof cursor/);
 
   const finished = await runKlemm(["trial", "real-world", "finish", "--mission", "mission-real-world", "--home", home], { env });
   assert.equal(finished.status, 0, finished.stderr);
@@ -109,11 +110,11 @@ test("real-world trial can include Claude and Cursor proof sessions when request
 
   assert.equal(started.status, 0, started.stderr);
   assert.match(started.stdout, /Claude proof: pass/);
-  assert.match(started.stdout, /Cursor proof: pass/);
+  assert.match(started.stdout, /Cursor proof: skipped/);
 
   const status = await runKlemm(["trial", "real-world", "status", "--mission", "mission-real-proofed", "--home", home], { env });
   assert.match(status.stdout, /Claude: live, hooks reporting/);
-  assert.match(status.stdout, /Cursor: live, MCP reporting/);
+  assert.doesNotMatch(status.stdout, /Cursor:/);
   assert.match(status.stdout, /claude_live=yes/);
-  assert.match(status.stdout, /cursor_live=yes/);
+  assert.doesNotMatch(status.stdout, /cursor_live=/);
 });

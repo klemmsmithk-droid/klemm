@@ -1,10 +1,173 @@
 # Klemm
 
-Klemm is a macOS-first, terminal-native personal authority layer for supervising agents while the user is away. It is local-first: missions, agents, decisions, memory distillations, and debriefs persist in a local SQLite store.
+Klemm is a local authority layer for AI agents.
 
-Klemm is not only an MCP tool. The MCP-style tool surface is an adapter; the local CLI and daemon are the source of authority.
+It watches agents, keeps them on-mission, queues risky actions, and explains decisions.
 
-## CLI
+Klemm is macOS-first, terminal-native, and local-first. It is not a chatbot, generic assistant, ordinary MCP server, or goal tracker. It is the agent-side watch officer for tools such as Codex, Claude Code, shell agents, MCP agents, and browser agents.
+
+The product loop is:
+
+```text
+observe -> evaluate -> authorize/block/queue/rewrite -> explain -> debrief
+```
+
+Klemm's authority target is agentic work. Browser history, local documents, email/calendar metadata, and chat exports are context sources only when imported or observed through supported local paths; Klemm does not claim to control ordinary apps such as Chrome or email.
+
+## What Works Today
+
+- Terminal home base: `klemm start`
+- First-run install, doctor, repair, and uninstall rails
+- Plain `codex` hook plus `klemm codex wrap`
+- `/klemm` Codex skill instructions
+- Claude Code hook adapter path using documented-style hook events
+- Shell supervision with capture, output interception, and policy decisions
+- Memory/directions/profile model with reviewed authority boundaries
+- Queue and authority decisions for risky actions
+- Watch-officer trust reports: `klemm trust report <decision-id>`
+- Debriefs for supervised missions
+- MCP/stdout adapter rails and local daemon APIs
+- macOS helper/blocker rails that report capability honestly
+
+## What Klemm Will Not Claim
+
+- No broad OS-wide control of every process.
+- No silent control of unmanaged agents; they are observed and recommended for wrapping.
+- No direct control of Chrome, email, calendars, or ordinary apps.
+- No authority from raw imported chat/browser/doc text until reviewed or pinned.
+- No push, deploy, publish, OAuth, credential, external-send, financial, legal, reputation-sensitive, or destructive action without explicit approval or queue handling.
+- No final-product percentage claims in launch material.
+
+## Golden Demo
+
+```bash
+klemm install
+klemm start
+codex
+klemm demo golden
+klemm trust report <decision-id>
+klemm debrief --mission <mission-id>
+```
+
+Expected story:
+
+```text
+Klemm is running. Plain codex is protected. Run klemm start.
+Klemm Golden Demo
+Plain codex protected: yes
+Safe work observed: yes
+Risky action queued: yes decision-golden-risk-...
+Klemm Watch Report
+Klemm debrief
+```
+
+The demo never pushes, deploys, deletes real user files, or calls external services. It proves the local authority loop: safe work is observed, risky work is queued, the trust report explains the decision, and the debrief summarizes the watch.
+
+## Install
+
+Requirements:
+
+- macOS
+- Node.js 20+
+- Git
+- Swift toolchain for the optional macOS helper/blocker build checks
+- Codex CLI installed if you want the plain `codex` hook to route real Codex sessions
+
+Clone and run locally:
+
+```bash
+git clone https://github.com/klemmsmithk-droid/klemm.git
+cd klemm
+npm test
+npm link
+klemm install
+klemm start
+```
+
+If you do not want to link the CLI globally, use:
+
+```bash
+npm run klemm -- install
+npm run klemm -- start
+```
+
+`klemm install` is idempotent. It writes user-level artifacts, runs doctor checks, and prints what was installed, what is protected, and what to run next.
+
+## Core Commands
+
+```bash
+klemm install
+klemm start
+klemm doctor
+klemm repair
+klemm uninstall --dry-run
+klemm codex wrap --id mission-demo --goal "Safe local work" -- npm test
+klemm adapters hook claude
+klemm adapters prove --live codex --mission mission-demo
+klemm supervise --watch --capture --record-tree --mission mission-demo -- npm test
+klemm trust report <decision-id>
+klemm debrief --mission mission-demo
+klemm memory personalize --source directions --review-required
+klemm memory workbench
+klemm user profile --card --evidence
+klemm directions add "Queue pushes and deploys while I am AFK."
+klemm queue inspect <decision-id>
+```
+
+## Risky Actions
+
+Klemm queues, pauses, blocks, or rewrites risky agent work instead of letting it pass silently. Risky actions include:
+
+- `git push`
+- production deploys and publishing
+- OAuth or permission-scope changes
+- credential or token access
+- external sends
+- financial, legal, or reputation-sensitive actions
+- destructive filesystem actions
+- mass deletes
+- irreversible state changes
+
+Safe local code edits, local reads, focused tests, and reversible local commands can proceed when they match the active mission and policy.
+
+## Trust Reports
+
+`klemm trust report <decision-id>` is the main audit surface. A report includes:
+
+- bottom line
+- what happened
+- what Klemm decided and why
+- evidence that mattered
+- evidence ignored
+- uncertainty
+- what would change the decision
+- one-line correction command
+
+Example:
+
+```bash
+klemm trust report decision-demo-push
+klemm corrections add --decision decision-demo-push --preference "Never push to origin while I am AFK."
+```
+
+## Data And Privacy
+
+Klemm is local-first. Local state is stored in the configured Klemm data directory. Raw imports are evidence, not authority, until reviewed or pinned. Secrets are redacted from trust reports, debriefs, logs, adapter envelopes, and captured command output.
+
+See:
+
+- [Install](docs/install.md)
+- [Codex integration](docs/codex.md)
+- [Claude Code hooks](docs/claude-code.md)
+- [Shell supervision](docs/shell-supervision.md)
+- [Memory and profile model](docs/memory.md)
+- [Trust reports](docs/trust-report.md)
+- [Security](docs/security.md)
+- [Uninstall](docs/uninstall.md)
+- [Known limitations](docs/known-limitations.md)
+- [Alpha hardening](docs/alpha-hardening.md)
+
+## Extended Command Reference
 
 ```bash
 npm run klemm -- status
@@ -140,7 +303,7 @@ npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe
 
 ## Klemm Goals
 
-Klemm Goals are the cross-agent version of Codex `/goal`: a durable objective that non-Codex agents can attach to, update, and be judged against while Klemm remains the authority layer. A goal creates a backing mission lease, records attached Codex/Claude/Cursor/shell/MCP agents, stores progress ticks, tracks evidence, and raises review hints when the work drifts into risky or out-of-scope territory.
+Klemm Goals are the cross-agent version of Codex `/goal`: a durable objective that non-Codex agents can attach to, update, and be judged against while Klemm remains the authority layer. A goal creates a backing mission lease, records attached Codex/Claude/shell/MCP/browser agents, stores progress ticks, tracks evidence, and raises review hints when the work drifts into risky or out-of-scope territory.
 
 ```bash
 npm run klemm -- goal start --id goal-importer --text "Refactor importer tests" --success "focused and full tests pass" --budget-turns 6 --watch-path src --watch-path test
@@ -153,7 +316,7 @@ npm run klemm -- goal complete --id goal-importer --evidence "focused and full t
 npm run klemm -- goal debrief --id goal-importer
 ```
 
-Use goals when Codex is not the only active surface: Claude Code hooks, Cursor, shell agents, browser agents, or MCP agents can all report into the same objective. `goal tick` is the compact checkpoint surface: it says what changed, which agent acted, what evidence exists, and whether Klemm thinks the work is still aligned. Risk hints are recorded into observation and trust timelines so a later debrief can answer what happened and why.
+Use goals when Codex is not the only active surface: Claude Code hooks, shell agents, browser agents, or MCP agents can all report into the same objective. `goal tick` is the compact checkpoint surface: it says what changed, which agent acted, what evidence exists, and whether Klemm thinks the work is still aligned. Risk hints are recorded into observation and trust timelines so a later debrief can answer what happened and why.
 
 ## Continuous Agent Monitor
 
@@ -333,7 +496,7 @@ npm run klemm -- os permissions
 The first OS layer uses public macOS-safe capabilities:
 
 - process snapshots from `ps`
-- agent-like process detection for Codex, Claude, Cursor, ChatGPT, and generic agent processes
+- agent-like process detection for Codex, Claude, ChatGPT, and generic agent processes
 - unmanaged-agent alerts when an agent-like process is running outside Klemm supervision
 - point-in-time file metadata snapshots for explicitly watched paths
 - optional frontmost-app activity supplied by the CLI or a future helper
@@ -361,7 +524,7 @@ npm run klemm -- adapters install --real --all --home "$HOME"
 npm run klemm -- adapters doctor --home "$HOME"
 npm run klemm -- adapters uninstall codex --home "$HOME"
 npm run klemm -- adapters probe claude
-npm run klemm -- adapters health --mission mission-codex --require codex,claude,cursor,shell
+npm run klemm -- adapters health --mission mission-codex --require codex,claude,shell
 npm run klemm -- trust why <decision-id>
 npm run klemm -- trust timeline --mission mission-codex
 npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
@@ -375,10 +538,9 @@ npm run klemm -- dogfood start --id mission-klemm --goal "Build Klemm" --plan "U
 npm run klemm -- dogfood day start --id mission-klemm-day --goal "Daily Klemm build" --domains coding,memory --watch-path ./src --memory-source codex-history --policy-pack coding-afk --dry-run -- npm test
 npm run klemm -- dogfood day checkpoint --mission mission-klemm-day
 npm run klemm -- dogfood day finish --mission mission-klemm-day
-npm run klemm -- true-score --target 60
 ```
 
-`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, Cursor MCP/rules, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
+`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
 
 ## Codex Hub
 

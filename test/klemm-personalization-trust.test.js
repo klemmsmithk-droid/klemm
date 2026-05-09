@@ -266,7 +266,7 @@ test("Claude and Cursor adapter proofs receive profile briefs and status reports
   assert.match(claude.stdout, /Profile brief: pass/);
   assert.match(cursor.stdout, /Profile brief: pass/);
 
-  const status = await runKlemm(["adapters", "status", "--mission", "mission-goal-adapter-briefs", "--home", home], { env });
+  const status = await runKlemm(["adapters", "status", "--mission", "mission-goal-adapter-briefs", "--home", home, "--include-cursor"], { env });
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /Claude: live, hooks reporting/);
   assert.match(status.stdout, /Cursor: live, MCP reporting/);

@@ -6,3 +6,13 @@ artifact.txt
 node_modules/
 .build/
 .DS_Store
+*.log
+*.pid
+*.token
+*.pem
+*.key
+*.env
+*.env.*
+coverage/
+dist/
+tmp/

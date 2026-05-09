@@ -1,7 +1,7 @@
 {
   "name": "klemm",
   "version": "0.1.0",
-  "description": "Cross-agent personal authority layer",
+  "description": "Local-first authority layer for AI agents",
   "directories": {
     "doc": "docs",
     "test": "test"
@@ -11,11 +11,27 @@
     "klemm": "node --no-warnings src/klemm-cli.js",
     "mcp": "node --no-warnings src/klemm-mcp-server.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "ai-agents",
+    "codex",
+    "agent-supervision",
+    "local-first",
+    "cli"
+  ],
+  "author": "Kyle Klemm-Smith",
   "license": "ISC",
   "type": "module",
-  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/klemmsmithk-droid/klemm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/klemmsmithk-droid/klemm/issues"
+  },
+  "homepage": "https://github.com/klemmsmithk-droid/klemm#readme",
   "bin": {
     "klemm": "./src/klemm-cli.js",
     "klemm-mcp": "./src/klemm-mcp-server.js"

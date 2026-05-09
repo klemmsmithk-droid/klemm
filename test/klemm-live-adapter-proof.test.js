@@ -48,7 +48,7 @@ test("adapter compliance scores live proxy, authority, capture, diff, and debrie
   assert.equal(compliance.status, 0, compliance.stderr);
   assert.match(compliance.stdout, /Adapter Compliance/);
   assert.match(compliance.stdout, /codex: 8\/8/);
-  assert.match(compliance.stdout, /shell: 5\/8/);
+  assert.match(compliance.stdout, /shell: 8\/8/);
   assert.match(compliance.stdout, /proxy_usage=yes/);
   assert.match(compliance.stdout, /authority_usage=yes/);
   assert.match(compliance.stdout, /diff_reporting=yes/);

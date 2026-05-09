@@ -43,11 +43,13 @@ test("real adapter installers write enforcement-first Claude hooks and Cursor ru
 
   const claudeSettings = await readFile(join(home, ".claude", "settings.json"), "utf8");
   assert.match(claudeSettings, /SessionStart/);
+  assert.match(claudeSettings, /UserPromptSubmit/);
   assert.match(claudeSettings, /PreToolUse/);
-  assert.match(claudeSettings, /proxy ask/);
-  assert.match(claudeSettings, /request_authority|klemm propose/);
-  assert.match(claudeSettings, /record_adapter_envelope|codex report/);
-  assert.match(claudeSettings, /proxy continue/);
+  assert.match(claudeSettings, /PostToolUse/);
+  assert.match(claudeSettings, /Stop/);
+  assert.match(claudeSettings, /SubagentStop/);
+  assert.match(claudeSettings, /SessionEnd/);
+  assert.match(claudeSettings, /klemm adapters hook claude/);
 
   const cursorMcp = await readFile(join(home, ".cursor", "mcp.json"), "utf8");
   const cursorRules = await readFile(join(home, ".cursor", "rules", "klemm.mdc"), "utf8");

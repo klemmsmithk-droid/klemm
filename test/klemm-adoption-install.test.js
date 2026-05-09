@@ -61,7 +61,8 @@ async function runExecutable(command, args, { env = {}, input = "", timeoutMs = 
 
 test("klemm install writes artifacts and prints a clean first-run summary", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-install-"));
-  const env = { KLEMM_DATA_DIR: dataDir };
+  const homeDir = await mkdtemp(join(tmpdir(), "klemm-install-home-"));
+  const env = { KLEMM_DATA_DIR: dataDir, HOME: homeDir };
 
   const installed = await runKlemm([
     "install",
@@ -117,7 +118,7 @@ test("onboarding v2 records mode, sources, watch paths, agent wrappers, and appr
     input: [
       "coding-afk",
       chatPath,
-      "/Users/kyleklemm-smith/klemm",
+      "/Users/example/klemm",
       "codex,claude,shell",
       "yes",
       "",
@@ -152,7 +153,8 @@ test("status and doctor report daemon HTTP health while preserving local fallbac
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-daemon-aware-"));
-  const env = { KLEMM_DATA_DIR: dataDir, KLEMM_DAEMON_URL: url };
+  const home = join(dataDir, "home");
+  const env = { KLEMM_DATA_DIR: dataDir, KLEMM_DAEMON_URL: url, HOME: home };
 
   try {
     const status = await runKlemm(["status"], { env });
@@ -162,9 +164,10 @@ test("status and doctor report daemon HTTP health while preserving local fallbac
     assert.match(status.stdout, /Store fallback: available/);
 
     const doctor = await runKlemm(["doctor", "--url", url], { env });
-    assert.equal(doctor.status, 0, doctor.stderr);
+    assert.equal(doctor.status, 1, doctor.stdout);
     assert.match(doctor.stdout, /Health: ok/);
     assert.match(doctor.stdout, /Daemon transport: ok/);
+    assert.match(doctor.stdout, /Plain Codex protected: no/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

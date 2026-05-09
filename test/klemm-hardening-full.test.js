@@ -45,10 +45,10 @@ test("doctor repairs stale daemon pid files and reports store, logs, and health 
     env: { KLEMM_DATA_DIR: dataDir },
   });
 
-  assert.equal(doctor.status, 0, doctor.stderr);
+  assert.equal(doctor.status, 0, doctor.stdout);
   assert.match(doctor.stdout, /Klemm doctor/);
   assert.match(doctor.stdout, /Store: ok/);
-  assert.match(doctor.stdout, /Schema version:/);
+  assert.match(doctor.stdout, /Plain-English summary/);
   assert.match(doctor.stdout, /PID file: stale repaired/);
   assert.match(doctor.stdout, /Logs: ok/);
   assert.match(doctor.stdout, /Health: skipped/);

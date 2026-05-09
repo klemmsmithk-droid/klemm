@@ -1,4 +1,6 @@
-# Klemm
+# Klemm Command Reference
+
+This file is a broad engineering reference, not launch copy. The public product story is in `README.md`: Klemm is a local authority layer for AI agents, with Codex, Claude Code hooks, shell supervision, MCP/browser-agent envelopes, memory review, trust reports, and debriefs as the main alpha paths.
 
 Klemm is a macOS-first, terminal-native personal authority layer for supervising agents while the user is away. It is local-first: missions, agents, decisions, memory distillations, and debriefs persist in a local SQLite store.
 
@@ -140,7 +142,7 @@ npm run klemm -- supervise --mission mission-codex -- node -e "console.log('safe
 
 ## Klemm Goals
 
-Klemm Goals are the cross-agent version of Codex `/goal`: a durable objective that non-Codex agents can attach to, update, and be judged against while Klemm remains the authority layer. A goal creates a backing mission lease, records attached Codex/Claude/Cursor/shell/MCP agents, stores progress ticks, tracks evidence, and raises review hints when the work drifts into risky or out-of-scope territory.
+Klemm Goals are the cross-agent version of Codex `/goal`: a durable objective that non-Codex agents can attach to, update, and be judged against while Klemm remains the authority layer. A goal creates a backing mission lease, records attached Codex/Claude/shell/MCP/browser agents, stores progress ticks, tracks evidence, and raises review hints when the work drifts into risky or out-of-scope territory.
 
 ```bash
 npm run klemm -- goal start --id goal-importer --text "Refactor importer tests" --success "focused and full tests pass" --budget-turns 6 --watch-path src --watch-path test
@@ -153,7 +155,7 @@ npm run klemm -- goal complete --id goal-importer --evidence "focused and full t
 npm run klemm -- goal debrief --id goal-importer
 ```
 
-Use goals when Codex is not the only active surface: Claude Code hooks, Cursor, shell agents, browser agents, or MCP agents can all report into the same objective. `goal tick` is the compact checkpoint surface: it says what changed, which agent acted, what evidence exists, and whether Klemm thinks the work is still aligned. Risk hints are recorded into observation and trust timelines so a later debrief can answer what happened and why.
+Use goals when Codex is not the only active surface: Claude Code hooks, shell agents, browser agents, or MCP agents can all report into the same objective. `goal tick` is the compact checkpoint surface: it says what changed, which agent acted, what evidence exists, and whether Klemm thinks the work is still aligned. Risk hints are recorded into observation and trust timelines so a later debrief can answer what happened and why.
 
 ## Continuous Agent Monitor
 
@@ -350,7 +352,7 @@ npm run klemm -- os permissions
 The first OS layer uses public macOS-safe capabilities:
 
 - process snapshots from `ps`
-- agent-like process detection for Codex, Claude, Cursor, ChatGPT, and generic agent processes
+- agent-like process detection for Codex, Claude, ChatGPT, and generic agent processes
 - unmanaged-agent alerts when an agent-like process is running outside Klemm supervision
 - point-in-time file metadata snapshots for explicitly watched paths
 - optional frontmost-app activity supplied by the CLI or a future helper
@@ -378,7 +380,7 @@ npm run klemm -- adapters install --real --all --home "$HOME"
 npm run klemm -- adapters doctor --home "$HOME"
 npm run klemm -- adapters uninstall codex --home "$HOME"
 npm run klemm -- adapters probe claude
-npm run klemm -- adapters health --mission mission-codex --require codex,claude,cursor,shell
+npm run klemm -- adapters health --mission mission-codex --require codex,claude,shell
 npm run klemm -- trust why <decision-id>
 npm run klemm -- trust timeline --mission mission-codex
 npm run klemm -- corrections add --decision <decision-id> --preference "Queue production deploys while I am away"
@@ -392,10 +394,9 @@ npm run klemm -- dogfood start --id mission-klemm --goal "Build Klemm" --plan "U
 npm run klemm -- dogfood day start --id mission-klemm-day --goal "Daily Klemm build" --domains coding,memory --watch-path ./src --memory-source codex-history --policy-pack coding-afk --dry-run -- npm test
 npm run klemm -- dogfood day checkpoint --mission mission-klemm-day
 npm run klemm -- dogfood day finish --mission mission-klemm-day
-npm run klemm -- true-score --target 60
 ```
 
-`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, Cursor MCP/rules, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
+`macos/KlemmHelper` is a SwiftPM observation helper. The Node daemon remains the authority; the helper reports public macOS observations: process snapshots, running apps, frontmost app, permission status, file-watch metadata, and unmanaged-agent hints. It can emit one JSON snapshot or stream snapshots to `POST /api/os/observations`. Adapter installs can write generated bundles or real user-level config files with backups and uninstall/doctor checks for Codex MCP, Claude Code hooks, and shell profiles. HTTP adapter calls can additionally require `KLEMM_DAEMON_TOKEN`; encrypted token files are created with `klemm daemon token generate|rotate`, checked by `klemm doctor --token-file <path>`, and redacted in normal output.
 
 ## Codex Skill
 
@@ -440,11 +441,11 @@ Imports record provider-level source records, per-memory evidence, and quarantin
 - `klemm helper stream start/status/stop`: daemon-managed helper stream lifecycle with heartbeat/stale detection, file-watch metadata, frontmost app, and unmanaged-agent events.
 - `klemm observe status/recommend/attach`: normalized observation events and unmanaged-agent recommendations.
 - `klemm observe loop start/tick/status/stop`: continuous observe-and-recommend loop for real agent sessions, drift, risk hints, and watched files.
-- `klemm adapters list/probe/install/uninstall/doctor`: documented Codex, Claude, Cursor, shell, browser, and MCP adapter rails with generated or real backed-up installs.
+- `klemm adapters list/probe/install/uninstall/doctor`: documented Codex, Claude, shell, browser, and MCP adapter rails with generated or real backed-up installs.
 - `klemm adapters health`: live adapter capability coverage from installs and recent adapter envelopes.
 - `klemm trust why` and `klemm corrections add/approve/reject/promote`: end-to-end decision explanation and correction-driven policy learning.
 - `klemm trust timeline`: mission-level timeline of observer ticks, risk hints, decisions, and activity.
-- `klemm true-score`: stricter true-final-product scorecard for tracking progress toward the actual 100% vision.
+- Legacy prototype score commands may remain for internal regression tests, but they are not shipping claims.
 - `klemm daemon token generate|rotate`: encrypted local daemon token lifecycle with doctor permission/decrypt checks.
 - `klemm dogfood start`: default dogfood entrypoint that routes through `klemm codex wrap`.
 - `klemm sync export/import --encrypted`: local passphrase-encrypted sync bundles.

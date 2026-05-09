@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -53,7 +53,9 @@ async function importAndApproveKyleContext(env) {
 
 test("readiness and start status explain stale missions and repair install actions", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "klemm-readiness-cleanup-"));
-  const env = { KLEMM_DATA_DIR: dataDir };
+  const home = join(dataDir, "home");
+  await mkdir(home, { recursive: true });
+  const env = { KLEMM_DATA_DIR: dataDir, HOME: home };
   await runKlemm(["mission", "start", "--id", "mission-stale-one", "--goal", "Old active work"], { env });
   await runKlemm(["mission", "start", "--id", "mission-stale-two", "--goal", "Another old active work"], { env });
 

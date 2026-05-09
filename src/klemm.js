@@ -69,6 +69,30 @@ export function createInitialKlemmState({ now = new Date().toISOString() } = {})
     autopilotStops: [],
     dogfood80Runs: [],
     dogfood90Runs: [],
+    dogfoodUltimateRuns: [],
+    liveAdapterTrials: [],
+    launchAgentChecks: [],
+    packageUpdates: [],
+    releaseArtifacts: [],
+    updateChannels: [],
+    daemonTelemetry: [],
+    liveSessionProofs: [],
+    securityReviews: [],
+    codexCliHooks: [],
+    installChecks: [],
+    repairRuns: [],
+    goldenDemoRuns: [],
+    memoryReviewSessions: [],
+    watchReports: [],
+    ultimateScoreEvidence: [],
+    nativeServiceHealth: [],
+    adapterSessions: [],
+    adapterEvidence: [],
+    runtimeInterventions: [],
+    userDirections: [],
+    profileFacts: [],
+    trustGraph: [],
+    auditChain: [],
     agentActivities: [],
     alignmentReports: [],
     agentInterventions: [],
@@ -278,7 +302,7 @@ export function askProxy(state, options = {}) {
     createdAt: now,
   };
 
-  if (answer.escalationRequired) {
+  if (answer.escalationRequired && options.queueOnEscalation !== false) {
     nextState = proposeAction(state, {
       id: `decision-${answer.id}`,
       missionId: question.missionId,
@@ -1421,6 +1445,30 @@ export function migrateKlemmState(state, { now = new Date().toISOString(), targe
     autopilotStops: state.autopilotStops ?? [],
     dogfood80Runs: state.dogfood80Runs ?? [],
     dogfood90Runs: state.dogfood90Runs ?? [],
+    dogfoodUltimateRuns: state.dogfoodUltimateRuns ?? [],
+    liveAdapterTrials: state.liveAdapterTrials ?? [],
+    launchAgentChecks: state.launchAgentChecks ?? [],
+    packageUpdates: state.packageUpdates ?? [],
+    releaseArtifacts: state.releaseArtifacts ?? [],
+    updateChannels: state.updateChannels ?? [],
+    daemonTelemetry: state.daemonTelemetry ?? [],
+    liveSessionProofs: state.liveSessionProofs ?? [],
+    securityReviews: state.securityReviews ?? [],
+    codexCliHooks: state.codexCliHooks ?? [],
+    installChecks: state.installChecks ?? [],
+    repairRuns: state.repairRuns ?? [],
+    goldenDemoRuns: state.goldenDemoRuns ?? [],
+    memoryReviewSessions: state.memoryReviewSessions ?? [],
+    watchReports: state.watchReports ?? [],
+    ultimateScoreEvidence: state.ultimateScoreEvidence ?? [],
+    nativeServiceHealth: state.nativeServiceHealth ?? [],
+    adapterSessions: state.adapterSessions ?? [],
+    adapterEvidence: state.adapterEvidence ?? [],
+    runtimeInterventions: state.runtimeInterventions ?? [],
+    userDirections: state.userDirections ?? [],
+    profileFacts: state.profileFacts ?? [],
+    trustGraph: state.trustGraph ?? [],
+    auditChain: state.auditChain ?? [],
     schemaMigrations: state.schemaMigrations ?? [],
     policies: state.policies ?? [],
     agentActivities: state.agentActivities ?? [],
@@ -2090,7 +2138,7 @@ export function summarizeDebrief(state, { missionId } = {}) {
     "Recent interventions:",
     ...decisions
       .slice(0, 8)
-      .map((decision) => `- ${decision.id} ${decision.decision}/${decision.status}: ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)}`),
+      .map((decision) => `- ${decision.id} ${decision.decision}/${decision.status}: ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)} | klemm trust report ${decision.id}`),
   ];
 
   return lines.join("\n");
@@ -2793,13 +2841,13 @@ function normalizeEventType(type) {
 
 function normalizeAdapterEventType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
-  const known = new Set(["session_start", "session_finish", "plan", "tool_call", "diff", "uncertainty", "subagent", "debrief", "activity"]);
+  const known = new Set(["session_start", "session_finish", "plan", "tool_call", "diff", "uncertainty", "subagent", "debrief", "codex_turn_start", "codex_turn_check", "codex_turn_finish", "activity"]);
   return known.has(value) ? value : "activity";
 }
 
 function normalizeActivityType(type) {
   const value = String(type ?? "activity").trim().toLowerCase().replaceAll("-", "_");
-  const known = new Set(["session_start", "session_finish", "plan", "command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "uncertainty", "debrief", "activity"]);
+  const known = new Set(["session_start", "session_finish", "plan", "command", "tool_call", "file_change", "browser_action", "subagent", "analysis", "uncertainty", "debrief", "codex_turn_start", "codex_turn_check", "codex_turn_finish", "activity"]);
   return known.has(value) ? value : "activity";
 }
 
@@ -3308,7 +3356,7 @@ function buildPromptIntentMemoryText(text) {
 }
 
 function classifyMemoryLine(line) {
-  if (/\b(do not|don't|never|requires approval|without approval|blocked|boundary|boundaries)\b/i.test(line)) {
+  if (/\b(do not|don't|never|requires approval|without approval|explicitly approved|blocked|boundary|boundaries|queue|queued)\b/i.test(line)) {
     return "authority_boundary";
   }
   if (/\b(prefer|always|working style|terminal-first|cli-first|focused|run tests|before completion|review before risky|what'?s next|whats next|proceed|no corners|no cut corners|do all that|dogfood|keep going)\b/i.test(line)) {

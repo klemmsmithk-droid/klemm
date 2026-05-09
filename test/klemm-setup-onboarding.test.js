@@ -99,7 +99,7 @@ test("onboarding wizard persists authority boundaries, watch paths, sync sources
     env,
     input: [
       "Never let agents push to GitHub without approval.",
-      "/Users/kyleklemm-smith/klemm",
+      "/Users/example/klemm",
       codexHistory,
       "I prefer terminal-first tools.",
       "yes",

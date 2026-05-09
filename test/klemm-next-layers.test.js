@@ -86,7 +86,7 @@ test("LaunchAgent helper scaffold renders a plist for the local daemon", () => {
   const plist = renderLaunchAgentPlist({
     label: "com.klemm.daemon",
     program: "/usr/local/bin/klemm",
-    dataDir: "/Users/kyle/Library/Application Support/Klemm",
+    dataDir: "/Users/example/Library/Application Support/Klemm",
   });
 
   assert.match(plist, /com\.klemm\.daemon/);

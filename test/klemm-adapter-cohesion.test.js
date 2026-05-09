@@ -114,16 +114,20 @@ test("adapter status dashboard and klemm start agents show clean live agent summ
   assert.match(status.stdout, /Klemm Adapter Status/);
   assert.match(status.stdout, /Codex: live, supervised/);
   assert.match(status.stdout, /Claude: installed, not seen/);
-  assert.match(status.stdout, /Cursor: MCP configured, not seen/);
+  assert.doesNotMatch(status.stdout, /Cursor:/);
   assert.match(status.stdout, /Shell: shim available/);
   assert.match(status.stdout, /Next fix:/);
+
+  const legacyStatus = await runKlemm(["adapters", "status", "--mission", "mission-adapter-status", "--home", home, "--include-cursor"], { env });
+  assert.equal(legacyStatus.status, 0, legacyStatus.stderr);
+  assert.match(legacyStatus.stdout, /Cursor: MCP configured, not seen/);
 
   const start = await runKlemm(["start"], { env, input: "agents\nquit\n" });
   assert.equal(start.status, 0, start.stderr);
   assert.match(start.stdout, /Agents in use/);
   assert.match(start.stdout, /Codex: live, supervised/);
   assert.match(start.stdout, /Claude: installed, not seen/);
-  assert.match(start.stdout, /Cursor: MCP configured, not seen/);
+  assert.doesNotMatch(start.stdout, /Cursor:/);
   assert.match(start.stdout, /Shell: shim available/);
   assert.doesNotMatch(start.stdout, /kind=codex_agent/);
 });

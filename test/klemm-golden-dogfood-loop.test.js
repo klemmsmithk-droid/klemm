@@ -57,7 +57,7 @@ test("golden dogfood loop refuses completion until real plan, command, diff, pro
   assert.equal(incomplete.status, 2, incomplete.stdout);
   assert.match(incomplete.stdout, /Golden dogfood finish blocked/);
   assert.match(incomplete.stdout, /diff_reports=missing/);
-  assert.match(incomplete.stdout, /proxy_questions=missing/);
+  assert.match(incomplete.stdout, /proxy_questions=present/);
   assert.match(incomplete.stdout, /queue_decisions=missing/);
 
   await runKlemm(["memory", "seed-proxy", "--id", "memory-golden-proceed", "--text", "Kyle uses proceed to continue safe local implementation work after tests."], { env });
