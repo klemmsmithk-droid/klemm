@@ -20,9 +20,20 @@ Klemm is local-first and uses deterministic safety rules before softer judgment.
 
 Imported context is evidence only. It does not become authority without review.
 
+Dogfood exports, saved-me reports, debriefs, and trust reports should be treated as potentially sensitive local artifacts. Redact before sharing them publicly.
+
 ## Known Security Gaps
 
 - External security review is still needed.
 - Endpoint Security blocking is capability-gated and unavailable on machines without the required entitlement/root/TCC state.
 - Unmanaged agents can be observed and recommended for wrapping, but not fully controlled.
 
+## Alpha Security Feedback
+
+Please report:
+
+- secrets appearing in logs, trust reports, debriefs, adapter envelopes, or dogfood exports
+- risky actions allowed silently
+- unreviewed imported text becoming policy
+- uninstall leaving sensitive artifacts behind
+- adapter hooks bypassing Klemm authority checks

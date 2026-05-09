@@ -2,6 +2,8 @@
 
 Klemm is local-first. It is designed to supervise local agent work and explain authority decisions without sending private memory to a hosted service by default.
 
+Alpha users should assume Klemm is still pre-audit. Use it to supervise local agent work, not to delegate high-value external actions without review.
+
 ## Stored Data
 
 Klemm stores local state in the configured Klemm data directory. Depending on use, this can include:
@@ -16,6 +18,7 @@ Klemm stores local state in the configured Klemm data directory. Depending on us
 - audit events
 - adapter registrations
 - captured supervised output
+- dogfood exports and saved-me moment metadata
 
 ## What Leaves The Machine
 
@@ -49,3 +52,12 @@ Klemm queues or blocks pushes, deploys, publishing, OAuth changes, credential ch
 - Unmanaged ordinary apps are not controlled.
 - External security review is still recommended before broad public alpha use.
 
+## Alpha Security Feedback
+
+Open a GitHub security issue or follow `SECURITY.md` if you find:
+
+- a secret in logs, debriefs, trust reports, adapter envelopes, or dogfood exports
+- a risky action allowed silently
+- unreviewed imported text becoming authority
+- uninstall leaving sensitive runtime artifacts behind
+- a command execution path that bypasses authority checks

@@ -41,3 +41,12 @@ For risky `PreToolUse` input, Klemm routes the proposed action through the autho
 - Fake-home fixture tests prove config behavior only; they do not count as live adapter proof.
 - Live proof requires observed hook envelopes from an actual Claude Code session.
 
+## Diagnostics
+
+```bash
+klemm adapters hook claude
+klemm adapters status --live
+klemm adapters prove --live claude --mission <mission-id>
+```
+
+If live proof fails, treat the output as the source of truth. It should say which evidence is missing: lifecycle, plan, tool call, diff, proxy/continuation, authority decision, debrief, or session finish.

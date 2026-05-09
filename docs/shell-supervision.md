@@ -21,3 +21,19 @@ Risky shell work includes pushes, deploys, credential access, OAuth changes, ext
 
 Safe local tests and reversible local commands can proceed when they are mission-aligned.
 
+## Saved-Me Review
+
+After a shell-supervised run, review what Klemm prevented:
+
+```bash
+klemm saved list --mission <mission-id>
+klemm saved report <saved-id>
+klemm trust report <decision-id> --brief
+```
+
+If Klemm was too strict or too loose, record it:
+
+```bash
+klemm corrections mark-false-positive <decision-id> --preference "..."
+klemm corrections mark-false-negative <decision-id> --preference "..."
+```

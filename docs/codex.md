@@ -40,7 +40,21 @@ Check it with:
 klemm codex hook doctor
 ```
 
+If doctor says the hook is missing or not first on `PATH`, run:
+
+```bash
+klemm doctor
+klemm repair
+```
+
+When reporting Codex alpha feedback, include:
+
+```bash
+klemm adapters status --live
+klemm dogfood export --mission <mission-id> --output codex-dogfood.json
+klemm debrief --mission <mission-id>
+```
+
 ## Risk Boundary
 
 Codex should not ask the user "what next?" by default when Klemm has reviewed, high-confidence, low-risk guidance. Codex should still ask the real user before product strategy, emotional judgment, external actions, or risky irreversible work.
-

@@ -15,6 +15,7 @@ Klemm is alpha software.
 - Endpoint Security blocking is capability-gated and fails safely when unavailable.
 - Hosted sync is encrypted bundle transport, not a hosted plaintext brain.
 - External security review is still needed before broad alpha distribution.
+- Dogfood exports and saved-me reports are local evidence aids, not proof that every adapter will behave correctly in every future session.
 
 ## Honest Product Boundary
 

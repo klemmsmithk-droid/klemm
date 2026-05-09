@@ -287,7 +287,9 @@ async function main() {
     if (command === "dogfood" && args[1] === "adapters") return await dogfoodAdaptersFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "start") return await startDogfoodWrapperFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "debrief") return await printDebrief(args.slice(2));
+    if (command === "dogfood" && args[1] === "export") return await exportDogfoodFromCli(args.slice(2));
     if (command === "dogfood" && args[1] === "finish") return await finishDogfoodFromCli(args.slice(2));
+    if (command === "saved") return savedFromCli(args.slice(1));
     if (command === "trial" && args[1] === "real-world") return await realWorldTrialFromCli(args.slice(2));
     if (command === "trial" && args[1] === "live-adapters") return await liveAdaptersTrialFromCli(args.slice(2));
     if (command === "readiness") return await printReadinessFromCli(args.slice(1));
@@ -328,6 +330,9 @@ async function main() {
     if (command === "corrections" && args[1] === "approve") return correctionsResolveFromCli(args.slice(2), "approved");
     if (command === "corrections" && args[1] === "reject") return correctionsResolveFromCli(args.slice(2), "rejected");
     if (command === "corrections" && args[1] === "promote") return correctionsPromoteFromCli(args.slice(2));
+    if (command === "corrections" && args[1] === "list") return correctionsListFromCli(args.slice(2));
+    if (command === "corrections" && args[1] === "mark-false-positive") return correctionsMarkFromCli(args.slice(2), "false_positive");
+    if (command === "corrections" && args[1] === "mark-false-negative") return correctionsMarkFromCli(args.slice(2), "false_negative");
     if (command === "security" && args[1] === "adversarial-test") return securityAdversarialTestFromCli(args.slice(2));
     if (command === "security" && args[1] === "review") return await securityReviewFromCli(args.slice(2));
     if (command === "blocker") return await blockerFromCli(args.slice(1));
@@ -5147,12 +5152,17 @@ function trustWhyFromCli(args) {
 }
 
 function trustReportFromCli(args = []) {
-  const decisionId = firstPositionalArg(args);
-  if (!decisionId) throw new Error("Usage: klemm trust report <decision-id>");
+  const flags = parseFlags(args);
+  const decisionId = firstPositionalArg(args) ?? (typeof flags.brief === "string" ? flags.brief : null);
+  if (!decisionId) throw new Error("Usage: klemm trust report <decision-id> [--brief|--audit]");
   const state = store.getState();
   const decision = (state.decisions ?? []).find((item) => item.id === decisionId);
   if (!decision) throw new Error(`Decision not found: ${decisionId}`);
-  const report = renderWatchOfficerReport(decision, state);
+  const report = flags.brief
+    ? renderBriefWatchOfficerReport(decision, state)
+    : flags.audit
+      ? renderAuditWatchOfficerReport(decision, state)
+      : renderWatchOfficerReport(decision, state);
   store.update((current) => ({
     ...current,
     watchReports: [
@@ -5160,6 +5170,7 @@ function trustReportFromCli(args = []) {
         id: `watch-report-${Date.now()}`,
         decisionId,
         missionId: decision.missionId,
+        mode: flags.brief ? "brief" : flags.audit ? "audit" : "default",
         bottomLine: watchOfficerBottomLine(decision),
         createdAt: new Date().toISOString(),
       },
@@ -5223,6 +5234,41 @@ function renderWatchOfficerReport(decision, state = store.getState()) {
     "",
     "Teach Klemm:",
     `- klemm corrections add --decision ${decision.id} --preference "..."`,
+  ].join("\n");
+}
+
+function renderBriefWatchOfficerReport(decision, state = store.getState()) {
+  const mission = (state.missions ?? []).find((item) => item.id === decision.missionId);
+  const topPolicy = (decision.matchedPolicies ?? [])[0];
+  const primaryRisk = (decision.riskFactors ?? [])[0];
+  return [
+    "Klemm Watch Report",
+    `Bottom line: ${watchOfficerBottomLine(decision)}`,
+    `Decision: ${decision.id}`,
+    `Action: ${decision.actor} ${decision.actionType} ${redactSensitiveText(decision.target)}`,
+    `Mission: ${mission?.id ?? decision.missionId ?? "none"} ${mission?.goal ?? ""}`,
+    `Why: ${redactSensitiveText(decision.reason)}`,
+    `Risk class: ${decision.riskLevel ?? "unknown"}${primaryRisk ? ` (${primaryRisk.id})` : ""}`,
+    `Evidence: ${topPolicy ? `policy ${topPolicy.id}` : "deterministic safety rule"}`,
+    `Next: ${decision.decision === "queue" ? `inspect or resolve with klemm queue inspect ${decision.id}` : "continue watching for drift"}`,
+    `More detail: klemm trust report ${decision.id} --audit`,
+    `Teach Klemm: klemm corrections add --decision ${decision.id} --preference "..."`,
+  ].join("\n");
+}
+
+function renderAuditWatchOfficerReport(decision, state = store.getState()) {
+  const corrections = (state.corrections ?? []).filter((correction) => correction.decisionId === decision.id || correction.actionType === decision.actionType);
+  const savedMoment = buildSavedMoments(state).find((moment) => moment.decisionId === decision.id);
+  const auditTail = (state.auditChain ?? []).slice(0, 5);
+  return [
+    renderWatchOfficerReport(decision, state),
+    "",
+    "Audit detail:",
+    `- saved-me candidate: ${savedMoment ? savedMoment.id : "no"}`,
+    `- correction count: ${corrections.length}`,
+    ...corrections.slice(0, 5).map((correction) => `- correction ${correction.id} ${correction.status}${correction.kind ? ` ${correction.kind}` : ""}: ${redactSensitiveText(correction.preference)}`),
+    ...(auditTail.length ? auditTail.map((item) => `- audit ${item.id} ${item.kind ?? item.type ?? "event"} hash=${item.hash ?? "none"}`) : ["- audit chain: none"]),
+    `- saved report: ${savedMoment ? `klemm saved report ${savedMoment.id}` : "not a saved-me intervention"}`,
   ].join("\n");
 }
 
@@ -5839,6 +5885,150 @@ function trustTimelineFromCli(args) {
   console.log(queued ? `- klemm corrections add --decision ${queued.id} --preference "..."` : "- no queued decision to correct");
 }
 
+function savedFromCli(args = []) {
+  const action = args[0] ?? "list";
+  if (action === "list") return savedListFromCli(args.slice(1));
+  if (action === "report") return savedReportFromCli(args.slice(1));
+  if (action === "status") return savedListFromCli(args.slice(1));
+  if (!action.startsWith("--")) return savedReportFromCli(args);
+  return savedListFromCli(args);
+}
+
+function savedListFromCli(args = []) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const moments = buildSavedMoments(state, { missionId: flags.mission });
+  console.log("Klemm saved-me moments");
+  console.log(`Mission: ${flags.mission ?? "all"}`);
+  console.log(`Count: ${moments.length}`);
+  if (moments.length === 0) {
+    console.log("- none yet");
+    console.log("Tip: saved-me moments appear when Klemm queues, blocks, rewrites, pauses, or denies risky agent work.");
+    return;
+  }
+  for (const moment of moments.slice(0, Number(flags.limit ?? 20))) {
+    console.log(`- ${moment.id} ${moment.kind}: ${moment.whatDid} | ${moment.attempted}`);
+    console.log(`  trust: klemm trust report ${moment.decisionId}`);
+  }
+}
+
+function savedReportFromCli(args = []) {
+  const id = firstPositionalArg(args);
+  if (!id) throw new Error("Usage: klemm saved report <saved-id|decision-id>");
+  const state = store.getState();
+  const moment = buildSavedMoments(state).find((item) => item.id === id || item.decisionId === id);
+  if (!moment) throw new Error(`Saved-me moment not found: ${id}`);
+  store.update((current) => ({
+    ...current,
+    savedMoments: [
+      {
+        id: moment.id,
+        decisionId: moment.decisionId,
+        missionId: moment.missionId,
+        kind: moment.kind,
+        reportedAt: new Date().toISOString(),
+      },
+      ...(current.savedMoments ?? []).filter((item) => item.id !== moment.id),
+    ],
+  }));
+  console.log("Klemm saved-me report");
+  console.log(`Saved moment: ${moment.id}`);
+  console.log(`Decision: ${moment.decisionId}`);
+  console.log(`Mission: ${moment.missionId ?? "none"}`);
+  console.log("");
+  console.log("What was attempted:");
+  console.log(`- ${moment.attempted}`);
+  console.log("");
+  console.log("Why it was risky:");
+  for (const line of moment.whyRisky) console.log(`- ${line}`);
+  console.log("");
+  console.log("What Klemm did:");
+  console.log(`- ${moment.whatDid}`);
+  console.log("");
+  console.log("Evidence that mattered:");
+  for (const line of moment.evidence) console.log(`- ${line}`);
+  console.log("");
+  console.log("What would have allowed it:");
+  console.log(`- ${moment.allowedIf}`);
+  console.log("");
+  console.log("Later outcome:");
+  console.log(`- ${moment.outcome}`);
+  console.log("");
+  console.log("Trust report:");
+  console.log(`- klemm trust report ${moment.decisionId} --audit`);
+}
+
+function buildSavedMoments(state, { missionId } = {}) {
+  const riskyActions = new Set([
+    "git_push",
+    "deployment",
+    "publish",
+    "credential_change",
+    "oauth_scope_change",
+    "external_send",
+    "financial_action",
+    "legal_action",
+    "reputation_action",
+    "destructive_command",
+    "mass_delete",
+  ]);
+  return (state.decisions ?? [])
+    .filter((decision) => !missionId || decision.missionId === missionId)
+    .filter((decision) => {
+      const decisionStopped = ["queue", "deny", "pause", "kill", "rewrite"].includes(decision.decision);
+      const statusStopped = ["denied", "rewritten", "held"].includes(decision.status);
+      const risky = riskyActions.has(decision.actionType) || /push|deploy|credential|oauth|send|financial|legal|reputation|delete|destructive|raw memory|quarantine/i.test(`${decision.actionType} ${decision.reason} ${decision.target}`);
+      return risky && (decisionStopped || statusStopped);
+    })
+    .map((decision) => {
+      const queueItem = (state.queue ?? []).find((item) => item.id === decision.id);
+      const policies = decision.matchedPolicies ?? [];
+      const riskFactors = decision.riskFactors ?? [];
+      const kind = savedMomentKind(decision);
+      return {
+        id: `saved-${decision.id}`,
+        decisionId: decision.id,
+        missionId: decision.missionId,
+        kind,
+        attempted: `${decision.actor} tried ${decision.actionType}: ${redactSensitiveText(decision.target)}`,
+        whyRisky: [
+          decision.reason,
+          ...riskFactors.slice(0, 4).map((factor) => `${factor.id}: ${factor.detail ?? factor.label ?? factor.reason ?? factor.weight ?? ""}`),
+        ].filter(Boolean).map(redactSensitiveText),
+        whatDid: savedMomentAction(decision),
+        evidence: [
+          `risk=${decision.riskLevel ?? "unknown"} score=${decision.riskScore ?? "n/a"}`,
+          ...(policies.length ? policies.slice(0, 4).map((policy) => `policy ${policy.id}: ${policy.effect ?? "queue"} ${policy.text ?? policy.name ?? ""}`) : ["deterministic safety rule"]),
+        ].map(redactSensitiveText),
+        allowedIf: "explicit approval, a narrower local-only rewrite, or a reviewed policy allowing this exact action",
+        outcome: queueItem?.status ?? decision.status ?? decision.decision,
+        createdAt: decision.createdAt,
+      };
+    });
+}
+
+function savedMomentKind(decision) {
+  if (decision.actionType === "git_push") return "blocked_push";
+  if (decision.actionType === "deployment") return "blocked_deploy";
+  if (decision.actionType === "credential_change" || decision.actionType === "oauth_scope_change") return "blocked_credential_or_oauth";
+  if (decision.actionType === "external_send") return "blocked_external_send";
+  if (decision.actionType === "financial_action") return "blocked_financial_action";
+  if (decision.actionType === "legal_action" || decision.actionType === "reputation_action") return "blocked_sensitive_action";
+  if (decision.actionType === "destructive_command" || decision.actionType === "mass_delete") return "blocked_destructive_action";
+  if (decision.decision === "rewrite") return "safe_rewrite";
+  if (decision.decision === "pause") return "mission_pause";
+  return "risky_action_gated";
+}
+
+function savedMomentAction(decision) {
+  if (decision.decision === "queue") return "queued it for Kyle before the agent could proceed";
+  if (decision.decision === "rewrite") return `rewrote/narrowed it to: ${redactSensitiveText(decision.rewrite ?? "a safer action")}`;
+  if (decision.decision === "pause") return "paused the session and required Kyle review";
+  if (decision.decision === "kill") return "stopped the supervised process";
+  if (decision.decision === "deny") return "denied the action";
+  return `recorded outcome ${decision.status ?? decision.decision}`;
+}
+
 function correctionsAddFromCli(args) {
   const flags = parseFlags(args);
   if ((!flags.decision && !flags.autopilot) || !flags.preference) throw new Error("Usage: klemm corrections add --decision <id> --preference <text> | --autopilot <tick-id> --preference <text>");
@@ -5854,6 +6044,7 @@ function correctionsAddFromCli(args) {
     autopilotTickId: flags.autopilot,
     actionType: decision?.actionType ?? "autopilot_continuation",
     preference: flags.preference,
+    kind: flags.kind ?? flags.type ?? "preference",
     status: "pending_review",
     createdAt: now,
   };
@@ -5889,6 +6080,46 @@ function correctionsAddFromCli(args) {
   console.log(flags.autopilot ? `Autopilot tick: ${flags.autopilot}` : `Decision: ${flags.decision}`);
   console.log("Memory candidate: pending_review");
   if (linkedMemory) console.log(`Memory: ${linkedMemory.id}`);
+}
+
+function correctionsListFromCli(args = []) {
+  const flags = parseFlags(args);
+  const state = store.getState();
+  const corrections = (state.corrections ?? [])
+    .filter((correction) => !flags.status || correction.status === flags.status)
+    .filter((correction) => !flags.decision || correction.decisionId === flags.decision)
+    .filter((correction) => !flags.kind || correction.kind === flags.kind);
+  console.log("Klemm corrections");
+  console.log(`Count: ${corrections.length}`);
+  if (corrections.length === 0) {
+    console.log("- none");
+    return;
+  }
+  for (const correction of corrections.slice(0, Number(flags.limit ?? 30))) {
+    console.log(`- ${correction.id} ${correction.status}${correction.kind ? ` ${correction.kind}` : ""}`);
+    console.log(`  decision=${correction.decisionId ?? "none"} action=${correction.actionType ?? "unknown"}`);
+    console.log(`  ${redactSensitiveText(correction.preference)}`);
+  }
+}
+
+function correctionsMarkFromCli(args = [], kind) {
+  const decisionId = firstPositionalArg(args);
+  const flags = parseFlags(args);
+  if (!decisionId) throw new Error(`Usage: klemm corrections mark-${kind.replace("_", "-")} <decision-id> [--preference text]`);
+  const state = store.getState();
+  const decision = (state.decisions ?? []).find((item) => item.id === decisionId);
+  if (!decision) throw new Error(`Decision not found: ${decisionId}`);
+  const defaultPreference = kind === "false_positive"
+    ? `Klemm blocked or queued ${decision.actionType} too aggressively for this context; review future similar actions more narrowly.`
+    : `Klemm allowed or under-weighted ${decision.actionType}; future similar actions should queue for review.`;
+  return correctionsAddFromCli([
+    "--decision",
+    decisionId,
+    "--kind",
+    kind,
+    "--preference",
+    flags.preference ?? defaultPreference,
+  ]);
 }
 
 function correctionsReviewFromCli(args) {
@@ -11102,6 +11333,135 @@ async function finishDogfoodDayFromCli(args) {
   console.log(`Live state: ${queued === 0 && active === 0 ? "clean" : `active=${active} queued=${queued}`}`);
 }
 
+async function exportDogfoodFromCli(args = []) {
+  const flags = parseFlags(args);
+  const missionId = flags.mission ?? flags.id ?? firstPositionalArg(args);
+  const state = store.getState();
+  const packet = buildDogfoodExportPacket(state, { missionId });
+  const rendered = flags.json || flags.output ? JSON.stringify(packet, null, 2) : renderDogfoodExportPacket(packet);
+  if (flags.output) {
+    await mkdir(dirname(flags.output), { recursive: true });
+    await writeFile(flags.output, `${rendered}\n`, "utf8");
+    store.update((current) => ({
+      ...current,
+      dogfoodExports: [
+        {
+          id: packet.id,
+          missionId: packet.mission.id,
+          output: flags.output,
+          createdAt: packet.createdAt,
+          helped: packet.klemmActuallyHelped,
+          savedMoments: packet.savedMoments.length,
+        },
+        ...(current.dogfoodExports ?? []),
+      ],
+    }));
+    console.log(`Dogfood export written: ${flags.output}`);
+    console.log(`Mission: ${packet.mission.id}`);
+    console.log(`Saved-me moments: ${packet.savedMoments.length}`);
+    return;
+  }
+  console.log(rendered);
+}
+
+function buildDogfoodExportPacket(state, { missionId } = {}) {
+  const mission = missionId
+    ? (state.missions ?? []).find((item) => item.id === missionId)
+    : activeMissionFromState(state) ?? (state.missions ?? [])[0];
+  const resolvedMissionId = mission?.id ?? missionId ?? "all";
+  const activities = (state.agentActivities ?? []).filter((item) => resolvedMissionId === "all" || item.missionId === resolvedMissionId);
+  const decisions = (state.decisions ?? []).filter((item) => resolvedMissionId === "all" || item.missionId === resolvedMissionId);
+  const supervisedRuns = (state.supervisedRuns ?? []).filter((item) => resolvedMissionId === "all" || item.missionId === resolvedMissionId);
+  const proxyQuestions = (state.proxyQuestions ?? []).filter((item) => resolvedMissionId === "all" || item.missionId === resolvedMissionId);
+  const proxyContinuations = (state.proxyContinuations ?? []).filter((item) => resolvedMissionId === "all" || item.missionId === resolvedMissionId);
+  const falsePositiveCorrections = (state.corrections ?? []).filter((item) => item.kind === "false_positive" && decisions.some((decision) => decision.id === item.decisionId));
+  const falseNegativeCorrections = (state.corrections ?? []).filter((item) => item.kind === "false_negative" && decisions.some((decision) => decision.id === item.decisionId));
+  const savedMoments = buildSavedMoments(state, { missionId: resolvedMissionId === "all" ? undefined : resolvedMissionId });
+  return {
+    id: `dogfood-export-${Date.now()}`,
+    createdAt: new Date().toISOString(),
+    mission: {
+      id: resolvedMissionId,
+      goal: mission?.goal ?? "all missions",
+      status: mission?.status ?? "unknown",
+      startedAt: mission?.startedAt ?? mission?.createdAt ?? null,
+      finishedAt: mission?.finishedAt ?? null,
+    },
+    agentUsed: [...new Set(activities.map((item) => item.agentId).filter(Boolean))],
+    evidence: {
+      plans: activities.filter((item) => item.type === "plan").map((item) => redactedActivitySummary(item)),
+      toolCalls: activities.filter((item) => item.type === "tool_call" || item.type === "command").map((item) => redactedActivitySummary(item)),
+      fileChanges: activities.filter((item) => item.type === "file_change" || (item.fileChanges ?? []).length > 0).map((item) => ({
+        id: item.id,
+        files: (item.fileChanges ?? []).map(redactSensitiveText),
+        summary: redactSensitiveText(item.summary ?? ""),
+      })),
+      supervisedRuns: supervisedRuns.map((run) => ({
+        id: run.id,
+        actor: run.actor,
+        command: redactSensitiveText(run.command),
+        exitCode: run.exitCode,
+        stdout: redactSensitiveText(oneLineText(run.stdout ?? "")),
+        stderr: redactSensitiveText(oneLineText(run.stderr ?? "")),
+      })),
+      decisions: decisions.map((decision) => ({
+        id: decision.id,
+        actionType: decision.actionType,
+        target: redactSensitiveText(decision.target),
+        decision: decision.decision,
+        status: decision.status,
+        riskLevel: decision.riskLevel,
+        trustReport: `klemm trust report ${decision.id}`,
+      })),
+      proxyMoments: [
+        ...proxyQuestions.map((item) => ({ id: item.id, type: "question", text: redactSensitiveText(item.question) })),
+        ...proxyContinuations.map((item) => ({ id: item.id, type: "continuation", text: redactSensitiveText(item.nextPrompt ?? item.prompt ?? "") })),
+      ],
+      debriefs: activities.filter((item) => item.type === "debrief").map((item) => redactedActivitySummary(item)),
+    },
+    savedMoments,
+    falsePositives: falsePositiveCorrections.map((item) => ({ id: item.id, decisionId: item.decisionId, status: item.status, note: redactSensitiveText(item.preference) })),
+    falseNegatives: falseNegativeCorrections.map((item) => ({ id: item.id, decisionId: item.decisionId, status: item.status, note: redactSensitiveText(item.preference) })),
+    klemmActuallyHelped: savedMoments.length > 0 || decisions.some((decision) => ["queue", "rewrite", "pause", "kill", "deny"].includes(decision.decision)),
+    nextReviewCommands: [
+      "klemm saved list",
+      ...savedMoments.slice(0, 3).map((moment) => `klemm saved report ${moment.id}`),
+      ...decisions.slice(0, 3).map((decision) => `klemm trust report ${decision.id} --brief`),
+    ],
+  };
+}
+
+function redactedActivitySummary(activity) {
+  return {
+    id: activity.id,
+    agentId: activity.agentId,
+    type: activity.type,
+    summary: redactSensitiveText(activity.summary ?? activity.target ?? activity.command ?? ""),
+  };
+}
+
+function renderDogfoodExportPacket(packet) {
+  return [
+    "Klemm dogfood export",
+    `Mission: ${packet.mission.id}`,
+    `Goal: ${packet.mission.goal}`,
+    `Status: ${packet.mission.status}`,
+    `Agents: ${packet.agentUsed.join(",") || "none"}`,
+    `Plans: ${packet.evidence.plans.length}`,
+    `Tool calls: ${packet.evidence.toolCalls.length}`,
+    `File changes: ${packet.evidence.fileChanges.length}`,
+    `Supervised runs: ${packet.evidence.supervisedRuns.length}`,
+    `Authority decisions: ${packet.evidence.decisions.length}`,
+    `Proxy moments: ${packet.evidence.proxyMoments.length}`,
+    `Saved-me moments: ${packet.savedMoments.length}`,
+    `False positives: ${packet.falsePositives.length}`,
+    `False negatives: ${packet.falseNegatives.length}`,
+    `Klemm actually helped: ${packet.klemmActuallyHelped ? "yes" : "not yet proven in this mission"}`,
+    "Review commands:",
+    ...packet.nextReviewCommands.map((command) => `- ${command}`),
+  ].join("\n");
+}
+
 async function dogfood80FromCli(args = []) {
   const action = args[0] ?? "status";
   if (action === "start") return dogfood80StartFromCli(args.slice(1));
@@ -11114,7 +11474,7 @@ async function dogfood80FromCli(args = []) {
 function dogfood80StartFromCli(args = []) {
   const flags = parseFlags(args);
   const id = flags.id ?? flags.mission ?? "mission-klemm-80";
-  const goal = flags.goal ?? "Reach 80 percent final-product Klemm.";
+  const goal = flags.goal ?? "Legacy AFK dogfood gate for Klemm.";
   const now = new Date().toISOString();
   store.update((state) => {
     const missionState = startMission(state, {
@@ -11254,7 +11614,7 @@ async function dogfood90FromCli(args = []) {
 function dogfood90StartFromCli(args = []) {
   const flags = parseFlags(args);
   const id = flags.id ?? flags.mission ?? `mission-klemm-90-${Date.now()}`;
-  const goal = flags.goal ?? "Reach 90 percent actual-final Klemm";
+  const goal = flags.goal ?? "Legacy daily-product dogfood gate for Klemm.";
   const now = new Date().toISOString();
   let next = store.getState();
   if (!(next.missions ?? []).some((mission) => mission.id === id)) {
@@ -11421,7 +11781,7 @@ async function dogfood95FromCli(args = []) {
 function dogfood95StartFromCli(args = []) {
   const flags = parseFlags(args);
   const id = flags.id ?? flags.mission ?? `mission-klemm-95-${Date.now()}`;
-  const goal = flags.goal ?? "Reach 95 percent final-vision Klemm";
+  const goal = flags.goal ?? "Legacy final-vision dogfood gate for Klemm.";
   const now = new Date().toISOString();
   let next = store.getState();
   if (!(next.missions ?? []).some((mission) => mission.id === id)) {
@@ -13524,8 +13884,8 @@ _klemm() {
     'codex turn check:Check a Codex turn plan against Klemm before tools'
     'codex turn finish:Record the end of a Codex assistant turn'
     'codex turn status:Show Codex turn weaving coverage'
-    'dogfood 80:Run the 80 percent AFK autopilot dogfood gate'
-    'dogfood 90:Run the actual-product 90 percent dogfood gate'
+    'dogfood 80:Run the legacy AFK autopilot dogfood gate'
+    'dogfood 90:Run the legacy daily-product dogfood gate'
     'dogfood ultimate:Run the live-only ultimate Klemm dogfood gate'
     'dogfood finish:Finish a dogfood mission after queue-safe debrief'
     'dogfood golden:Run the strict golden dogfood evidence loop'
@@ -13840,7 +14200,7 @@ async function collectProcessSnapshotSafe() {
 
 function parseFlags(args) {
   const flags = {};
-  const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "v5", "v6", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen", "noShell", "keepShell", "offline", "card", "whyTrusted", "fixtureCodex", "reviewRequired", "includeCursor", "legacyCursor"]);
+  const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "v5", "v6", "audit", "json", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen", "noShell", "keepShell", "offline", "card", "whyTrusted", "fixtureCodex", "reviewRequired", "includeCursor", "legacyCursor"]);
   for (let index = 0; index < args.length; index += 1) {
     const part = args[index];
     if (!part.startsWith("--")) continue;
@@ -13861,7 +14221,7 @@ function firstPositionalArg(args) {
     const part = args[index];
     if (part.startsWith("--")) {
       const key = toCamel(part.slice(2));
-      const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "v5", "v6", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen", "noShell", "keepShell", "offline", "card", "whyTrusted", "fixtureCodex", "reviewRequired", "includeCursor", "legacyCursor"]);
+      const booleanFlags = new Set(["all", "real", "live", "capture", "recordTree", "watch", "watchLoop", "dryRun", "finish", "interactive", "sourcePreview", "skipHealth", "checkHealth", "v3", "v4", "v5", "v6", "audit", "json", "encrypted", "preview", "apply", "promotePolicy", "force", "noOpen", "noShell", "keepShell", "offline", "card", "whyTrusted", "fixtureCodex", "reviewRequired", "includeCursor", "legacyCursor"]);
       if (!booleanFlags.has(key) && args[index + 1] && !args[index + 1].startsWith("--")) index += 1;
       continue;
     }

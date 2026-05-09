@@ -2,6 +2,8 @@
 
 Klemm is a local authority layer for AI agents.
 
+In one sentence: Klemm watches AI agents and prevents them from going off mission.
+
 It watches agents, keeps them on-mission, queues risky actions, and explains decisions.
 
 Klemm is macOS-first, terminal-native, and local-first. It is not a chatbot, generic assistant, ordinary MCP server, or goal tracker. It is the agent-side watch officer for tools such as Codex, Claude Code, shell agents, MCP agents, and browser agents.
@@ -40,6 +42,8 @@ Klemm's authority target is agentic work. Browser history, local documents, emai
 
 ## Golden Demo
 
+There is one canonical demo: install Klemm, run a supervised local session, let safe work continue, attempt a risky action, inspect the trust report, then read the debrief.
+
 ```bash
 klemm install
 klemm start
@@ -62,6 +66,8 @@ Klemm debrief
 ```
 
 The demo never pushes, deploys, deletes real user files, or calls external services. It proves the local authority loop: safe work is observed, risky work is queued, the trust report explains the decision, and the debrief summarizes the watch.
+
+See [Canonical demo](docs/demo.md) for the reproducible local flow.
 
 ## Install
 
@@ -106,12 +112,19 @@ klemm adapters hook claude
 klemm adapters prove --live codex --mission mission-demo
 klemm supervise --watch --capture --record-tree --mission mission-demo -- npm test
 klemm trust report <decision-id>
+klemm trust report <decision-id> --brief
+klemm trust report <decision-id> --audit
 klemm debrief --mission mission-demo
+klemm dogfood export --mission mission-demo --output dogfood-export.json
+klemm saved list
+klemm saved report <saved-id>
 klemm memory personalize --source directions --review-required
 klemm memory workbench
 klemm user profile --card --evidence
 klemm directions add "Queue pushes and deploys while I am AFK."
 klemm queue inspect <decision-id>
+klemm corrections mark-false-positive <decision-id> --preference "This local action was safe in context."
+klemm corrections mark-false-negative <decision-id> --preference "This should have queued."
 ```
 
 ## Risky Actions
@@ -157,6 +170,11 @@ Klemm is local-first. Local state is stored in the configured Klemm data directo
 See:
 
 - [Install](docs/install.md)
+- [Alpha user guide](docs/alpha-user-guide.md)
+- [Alpha checklist](docs/alpha-checklist.md)
+- [Daily dogfood](docs/dogfood.md)
+- [Canonical demo](docs/demo.md)
+- [Feedback](docs/feedback.md)
 - [Codex integration](docs/codex.md)
 - [Claude Code hooks](docs/claude-code.md)
 - [Shell supervision](docs/shell-supervision.md)
